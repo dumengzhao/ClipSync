@@ -27,7 +27,7 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
-          arguments: --manifest-path src-tauri/Cargo.toml --all-features
+          arguments: --manifest-path client/src-tauri/Cargo.toml --all-features
 
   npm-audit:
     runs-on: ubuntu-22.04
@@ -36,4 +36,4 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - run: npm audit --audit-level=high
+      - run: cd client && npm audit --audit-level=high
