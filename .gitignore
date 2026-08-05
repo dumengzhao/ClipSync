@@ -1,0 +1,47 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build output
+dist/
+dist-ssr/
+build/
+src-tauri/target/
+src-tauri/gen/
+
+# Tauri
+src-tauri/WixTools/
+src-tauri/.cargo/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Crash dumps
+crash_dumps/
+
+# Local key material (never commit)
+*.p12
+*.pfx
+*.key
+*.pem
+.tauri/
+
+# Cargo lock is committed for binary, ignored for library
+# This is a binary app, so Cargo.lock IS committed
