@@ -71,8 +71,7 @@ ClipSync/
 
 ### 阶段一 MVP（最高优先级）
 - ❌ 剪贴板读写与监听（三平台 `ClipboardProvider` 实现都是 stub）
-- ❌ WebSocket 信令通道
-- ❌ TCP 数据通道
+- ❌ WebSocket 单通道（信令 + 文件分片复用）
 - ❌ 手动地址连接
 - ❌ SPAKE2 设备配对流程
 - ❌ 同步引擎协调逻辑
