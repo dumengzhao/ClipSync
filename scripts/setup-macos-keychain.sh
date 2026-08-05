@@ -3,11 +3,12 @@
 # 用于验证构建产物的完整性签名是否正常
 set -euo pipefail
 
-APP_PATH="${1:-src-tauri/target/release/bundle/macos/ClipSync.app}"
+CLIENT_DIR="$(dirname "$0")/../client"
+APP_PATH="${1:-$CLIENT_DIR/src-tauri/target/release/bundle/macos/ClipSync.app}"
 
 if [ ! -d "$APP_PATH" ]; then
     echo "Error: $APP_PATH not found"
-    echo "Run 'npm run tauri build' first"
+    echo "Run 'cd client && npm run tauri build' first"
     exit 1
 fi
 

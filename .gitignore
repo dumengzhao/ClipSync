@@ -7,12 +7,13 @@ node_modules/
 dist/
 dist-ssr/
 build/
-src-tauri/target/
-src-tauri/gen/
+target/
+**/src-tauri/target/
+**/src-tauri/gen/
 
 # Tauri
-src-tauri/WixTools/
-src-tauri/.cargo/
+**/WixTools/
+**/.cargo/
 
 # IDE
 .vscode/

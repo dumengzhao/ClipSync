@@ -10,6 +10,20 @@
 - **端到端加密**：AES-256-GCM + X25519 + SPAKE2 配对
 - **极低资源占用**：包体积 < 15MB，内存 < 50MB
 
+## 仓库结构
+
+```
+ClipSync/
+├── client/             # 终端应用（Tauri + Rust 桌面端）
+├── server/             # 服务端模块（规划中，当前为空）
+├── docs/               # 开发方案文档
+├── .github/workflows/  # CI/CD（ci/nightly/release/security）
+├── scripts/            # 辅助脚本
+└── rust-toolchain.toml # 锁定 Rust 版本
+```
+
+终端应用在 `client/`，未来服务端在 `server/`，其他模块按需新增。
+
 ## 开发
 
 ### 环境要求
@@ -24,31 +38,22 @@
 ### 启动开发
 
 ```bash
+cd client
 npm install
 npm run tauri dev
 ```
 
 ### 本地 CI 验证
 
-提交前运行：
+提交前运行（在仓库根目录）：
 
 ```bash
-npm run local-ci
+scripts/local-ci.sh
 ```
 
 等价于 GitHub Actions 的 `ci.yml` 检查项：fmt、clippy、test、lint、build。
 
-## 项目结构
-
-```
-clipsync/
-├── docs/                # 开发方案文档
-├── src/                 # 前端 React/TS
-├── src-tauri/           # Rust 后端
-├── .github/workflows/   # CI/CD
-├── scripts/             # 辅助脚本
-└── rust-toolchain.toml  # 锁定 Rust 版本
-```
+## 项目结构详情
 
 详细架构见 [docs/development-plan.md](docs/development-plan.md)。
 
