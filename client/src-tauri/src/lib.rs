@@ -17,7 +17,7 @@ pub mod update;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager,
+    Manager, WindowEvent,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -43,6 +43,13 @@ pub fn run() {
             build_tray(app)?;
 
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // 点窗口关闭按钮（X）时，隐藏窗口而非退出进程
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                hide_main_window(window.app_handle());
+            }
         })
         .invoke_handler(tauri::generate_handler![
             tauri_cmd::get_version,
@@ -76,17 +83,8 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
-            "show" => {
-                if let Some(w) = app.get_webview_window("main") {
-                    w.show().ok();
-                    w.set_focus().ok();
-                }
-            }
-            "hide" => {
-                if let Some(w) = app.get_webview_window("main") {
-                    w.hide().ok();
-                }
-            }
+            "show" => show_main_window(app),
+            "hide" => hide_main_window(app),
             "quit" => app.exit(0),
             _ => {}
         })
@@ -100,17 +98,48 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
                 let app = tray.app_handle();
                 if let Some(w) = app.get_webview_window("main") {
                     if w.is_visible().unwrap_or(false) {
-                        w.hide().ok();
+                        hide_main_window(app);
                     } else {
-                        w.show().ok();
-                        w.set_focus().ok();
+                        show_main_window(app);
                     }
                 }
             }
         })
         .build(app)?;
 
+    // 启动时隐藏 Dock（仅在菜单栏运行）
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::ActivationPolicy;
+        let _ = app.set_activation_policy(ActivationPolicy::Accessory);
+    }
+
     Ok(())
+}
+
+/// 显示主窗口并恢复 Dock 图标
+fn show_main_window(app: &tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::ActivationPolicy;
+        let _ = app.set_activation_policy(ActivationPolicy::Regular);
+    }
+    if let Some(w) = app.get_webview_window("main") {
+        w.show().ok();
+        w.set_focus().ok();
+    }
+}
+
+/// 隐藏主窗口并移除 Dock 图标（仅菜单栏）
+fn hide_main_window(app: &tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        w.hide().ok();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::ActivationPolicy;
+        let _ = app.set_activation_policy(ActivationPolicy::Accessory);
+    }
 }
 
 fn init_logging() {
