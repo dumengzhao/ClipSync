@@ -535,18 +535,28 @@ UI 提供地址簿功能，保存常用对端地址与备注名。
 
 ## 6.3 传输通道设计
 
-每个 P2P 连接包含两个通道：
+每个 P2P 连接复用**单一 WebSocket 通道**，信令与文件分片都走同一连接的二进制帧。
 
-- **信令通道：** WebSocket 长连接，传输剪贴板元数据、同步状态、控制指令、心跳
-- **数据通道：** 独立 TCP 连接，用于文件分片传输，支持流式传输和断点续传
+**为何单通道：**
 
-**为何分通道：**
+- **配置简单**：跨网穿透只需映射一个端口，用户体验最好
+- **连接管理统一**：加密、重连、心跳只写一套代码
+- **WebSocket 全双工**：信令和数据可并发，互不阻塞
+- **剪贴板场景流量小**：文本/图片/按需文件分片（默认 2MB/片），WebSocket 帧开销可忽略
+- **多文件并发**：通过 `sync_id + file_index + offset` 在同一连接上多路复用
 
-- 信令通道需要低延迟、可靠传输（WebSocket over TCP 已满足）
-- 数据通道需要支持大流量、流式读写，独立连接避免阻塞信令
-- 多文件并发传输可复用同一数据通道，通过 `sync_id + file_index + offset` 寻址
+**端口设计：** 默认端口 24681（可在配置中修改）。跨网穿透只需映射此单端口。所有通信均为 TCP（无 UDP 依赖，对内网穿透工具友好）。
 
-**端口设计：** 默认信令端口 24681，数据端口 24682，可在配置中修改。两个端口均需在防火墙放行（或由用户配置端口映射）。
+**消息复用：** WebSocket 二进制帧首字节区分消息类型，信令 JSON 与文件 Bincode 共用同一连接：
+
+```text
+WebSocket binary frame:
+  [1 byte: msg_type] [payload...]
+    msg_type = 0x01 -> 信令 JSON
+    msg_type = 0x02 -> 文件分片请求 Bincode
+    msg_type = 0x03 -> 文件分片响应 Bincode
+    msg_type = 0x04 -> 心跳
+```
 
 ## 6.4 通信协议设计
 
@@ -581,9 +591,11 @@ pub struct Envelope {
 
 ## 6.5 文件传输策略
 
+文件分片通过 6.3 节描述的同一 WebSocket 连接以二进制帧传输，无需独立通道。
+
 **分片大小：** 默认 2MB/片，可根据网络状况动态调整（基于 RTT 与丢包率）。
 
-**并发控制：** 单文件最多 3 个分片同时在途，单连接最多 9 个分片同时在途，避免内存堆积与网络拥塞。
+**并发控制：** 单文件最多 3 个分片同时在途，单连接最多 9 个分片同时在途，通过 `sync_id + file_index + offset` 多路复用，避免内存堆积与网络拥塞。
 
 **断点续传：** 传输中断后，从已确认的最后一个分片继续；支持基于 BLAKE3 哈希的秒传（哈希匹配则跳过传输）。
 
@@ -961,8 +973,7 @@ clipboard-sync/
 │   │   │   └── linux.rs          # Linux 实现（X11 + Wayland）
 │   │   ├── transfer/             # 传输模块
 │   │   │   ├── mod.rs
-│   │   │   ├── websocket.rs      # WebSocket 信令通道
-│   │   │   ├── tcp.rs            # TCP 数据通道
+│   │   │   ├── websocket.rs      # WebSocket 单通道（信令 + 文件分片）
 │   │   │   └── file_stream.rs    # 文件流式传输
 │   │   ├── discovery/            # 设备发现模块
 │   │   │   ├── mod.rs
@@ -1131,7 +1142,6 @@ pub struct AppConfig {
     pub max_file_size_mb: u64,
     pub max_image_size_mb: u32,
     pub listen_port: u16,
-    pub data_port: u16,
     pub enable_mdns: bool,
     pub manual_addresses: Vec<ManualAddress>,
     pub sync_primary_selection: bool,   // Linux only
@@ -2242,7 +2252,7 @@ CI 自动检查以上清单项，未勾选或检查失败将阻塞 PR 合并。
 **解决方案：**
 
 - **重连机制：** 指数退避重连（1s、2s、4s...，上限 60s）
-- **双通道独立：** 信令通道与数据通道独立重连，一个断开不影响另一个
+- **单连接简化：** 仅一个 WebSocket 连接，重连逻辑统一，无需协调多通道状态
 - **连接状态 UI：** 实时显示对端连接状态（在线/离线/重连中）
 - **手动重连按钮：** UI 提供手动触发重连
 - **地址验证：** 输入地址时自动测试连通性，提示端口是否可达
