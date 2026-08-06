@@ -116,10 +116,28 @@ pub fn open_settings(app: AppHandle) -> Result<(), String> {
     }
 }
 
-/// 列出当前通过 mDNS 发现的局域网对端
+/// 列出当前通过 mDNS 发现的局域网对端。
+///
+/// 已配对设备不会出现在发现列表里——它们归「已配对」列表管理，无需在发现区
+/// 重复出现（用户也明确要求「已保存的配对不要出现在发现里」）。注意这里只过滤
+/// 返回给前端的拷贝，内存中的 `state.discovered` 表保持完整，重连监控仍会据此
+/// 对「已发现 + 已配对」的对端发起重连。
 #[tauri::command]
 pub fn list_discovered_peers(state: State<AppState>) -> Vec<DiscoveredPeer> {
-    state.discovered.lock().values().cloned().collect()
+    let paired: std::collections::HashSet<String> = state
+        .registry
+        .lock()
+        .list()
+        .into_iter()
+        .map(|p| p.device_id.0)
+        .collect();
+    state
+        .discovered
+        .lock()
+        .values()
+        .filter(|p| !paired.contains(&p.device_id))
+        .cloned()
+        .collect()
 }
 
 /// 列出当前已建立加密通道的对端 device_id。
