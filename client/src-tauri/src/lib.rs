@@ -181,6 +181,7 @@ pub fn run() {
             tauri_cmd::cache_stats,
             tauri_cmd::set_config,
             tauri_cmd::list_discovered_peers,
+            tauri_cmd::list_connected_peers,
             tauri_cmd::open_settings,
             tauri_cmd::quit_app,
         ])

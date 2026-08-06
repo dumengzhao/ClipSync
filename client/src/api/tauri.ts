@@ -32,6 +32,11 @@ export async function listDiscoveredPeers(): Promise<DiscoveredPeer[]> {
   return invoke<DiscoveredPeer[]>('list_discovered_peers');
 }
 
+/** 列出当前已建立加密通道的对端 device_id（用于挂载时回填在线状态） */
+export async function listConnectedPeers(): Promise<string[]> {
+  return invoke<string[]>('list_connected_peers');
+}
+
 /** 应用配置（与 Rust 端 `AppConfig` 字段保持一致） */
 export interface AppConfig {
   device_name: string;

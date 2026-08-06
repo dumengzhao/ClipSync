@@ -82,6 +82,14 @@ impl ConnectionHub {
         *self.pairing_code.lock().unwrap() = code;
     }
 
+    /// 返回当前已建立加密通道的对端 device_id 集合。
+    ///
+    /// 供前端挂载时主动查询一次，避免错过 `peer-connected` 事件
+    /// （该事件可能在 webview 加载、事件监听就绪前就已发出，Tauri 不重放事件）。
+    pub fn connected_peer_ids(&self) -> Vec<String> {
+        self.peers.lock().unwrap().keys().cloned().collect()
+    }
+
     /// 启动监听器、本地剪贴板广播器，并订阅 mDNS 发现事件以主动连接对端。
     pub async fn start(self: Arc<Self>, app: AppHandle, listen_port: u16) {
         *self.app.lock().unwrap() = Some(app.clone());
