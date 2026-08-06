@@ -60,6 +60,14 @@ impl ClipboardChangedPayload {
 pub struct SyncEngine {
     anti_loop: Arc<AntiLoop>,
     identity: Arc<DeviceIdentity>,
+    /// **进程级唯一**的剪贴板句柄，全生命周期保持存活。
+    ///
+    /// 绝不能每次读写都 `PlatformClipboard::new()` 后立即丢弃：Windows 下剪贴板数据由
+    /// 系统持有，临时实例无妨；但 **X11 / Wayland 的剪贴板是「所有权」模型** —— 写入方
+    /// 必须作为 selection owner 常驻，持续应答其它进程的 SelectionRequest。实例一旦被
+    /// Drop，所有权即刻释放，对端粘贴只会拿到空内容。共用一个长生命周期实例是跨平台
+    /// 正确写入的前提。
+    clipboard: Arc<PlatformClipboard>,
     signal_tx: tokio::sync::broadcast::Sender<()>,
     event_tx: tokio::sync::broadcast::Sender<SyncEvent>,
     last_emitted: Arc<Mutex<Option<String>>>,
@@ -72,6 +80,7 @@ impl SyncEngine {
         Self {
             anti_loop: Arc::new(AntiLoop::new()),
             identity: Arc::new(identity),
+            clipboard: Arc::new(PlatformClipboard::new()),
             signal_tx,
             event_tx,
             last_emitted: Arc::new(Mutex::new(None)),
@@ -83,11 +92,19 @@ impl SyncEngine {
         self.event_tx.subscribe()
     }
 
+    /// 取得进程内唯一的剪贴板句柄。
+    ///
+    /// 所有剪贴板读写都必须走它，不要另建临时实例——原因见 `clipboard` 字段注释。
+    pub fn clipboard(&self) -> Arc<PlatformClipboard> {
+        self.clipboard.clone()
+    }
+
     /// 启动引擎：开始监听剪贴板并将变化广播为 Tauri 事件
     pub async fn start(&self, app: AppHandle) -> Result<()> {
         // 1) 启动剪贴板监听；变化时通过 signal 通道（非阻塞）通知处理任务
         let signal_tx = self.signal_tx.clone();
-        let watch = PlatformClipboard::new()
+        let watch = self
+            .clipboard
             .watch(Box::new(move || {
                 let _ = signal_tx.send(());
             }))
@@ -101,11 +118,28 @@ impl SyncEngine {
         let identity = self.identity.clone();
         let event_tx = self.event_tx.clone();
         let last_emitted = self.last_emitted.clone();
+        let clipboard = self.clipboard.clone();
         tauri::async_runtime::spawn(async move {
-            while signal_rx.recv().await.is_ok() {
-                let clipboard = PlatformClipboard::new();
-                let Ok(content) = clipboard.read().await else {
-                    continue;
+            loop {
+                // 注意：不能写成 `while recv().await.is_ok()`。broadcast 在接收方落后时
+                // 返回 `Lagged`，那样会让循环**永久退出**，本机从此再也无法把剪贴板发出去
+                // （而接收远端内容走的是另一条代码路径，仍然正常）——表现为「单向能同步」。
+                match signal_rx.recv().await {
+                    Ok(()) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("剪贴板信号积压，跳过 {n} 次变化");
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+                let content = match clipboard.read().await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        // 复制了不支持的格式（如 Windows 上的文件 CF_HDROP），或读取被
+                        // 其它进程抢占。必须留痕，否则整条链路静默丢内容、无从排查。
+                        tracing::warn!("读取本地剪贴板失败，本次变化已忽略: {e}");
+                        continue;
+                    }
                 };
                 let hash = content_hash(&content);
                 let should_emit = {
@@ -118,10 +152,16 @@ impl SyncEngine {
                     }
                 };
                 if !should_emit {
+                    tracing::debug!("剪贴板内容与上次相同（或为远端回声），跳过");
                     continue;
                 }
                 let device_id = identity.id.clone();
                 let mark = anti_loop.mark_outgoing(&device_id, &content);
+                tracing::debug!(
+                    "本地剪贴板变化 kind={} sync_id={}",
+                    content_kind(&content),
+                    mark.sync_id.0
+                );
                 let _ = event_tx.send(SyncEvent::LocalClipboardChanged { mark, content });
             }
         });
@@ -130,7 +170,12 @@ impl SyncEngine {
         let mut event_rx = self.event_tx.subscribe();
         let app_handle = app.clone();
         tauri::async_runtime::spawn(async move {
-            while let Ok(ev) = event_rx.recv().await {
+            loop {
+                let ev = match event_rx.recv().await {
+                    Ok(ev) => ev,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                };
                 let SyncEvent::LocalClipboardChanged { mark, content } = ev;
                 let payload =
                     ClipboardChangedPayload::from_content(&mark.sync_id, &mark.device_id, &content);
@@ -150,8 +195,22 @@ impl SyncEngine {
             let mut g = self.last_emitted.lock().unwrap();
             *g = Some(content_hash(&content));
         }
-        if let Err(e) = PlatformClipboard::new().write(content).await {
-            tracing::error!("failed to write remote clipboard content: {e}");
+        let kind = content_kind(&content);
+        // 用常驻实例写入：X11/Wayland 下临时实例被 Drop 会立即失去 selection 所有权，
+        // 对端粘贴将拿到空内容。
+        match self.clipboard.write(content).await {
+            Ok(()) => tracing::debug!("已应用来自 {} 的剪贴板内容 kind={kind}", mark.device_id.0),
+            Err(e) => tracing::error!("写入远端剪贴板内容失败 kind={kind}: {e}"),
         }
+    }
+}
+
+/// 内容类型的简短名称，仅用于日志
+fn content_kind(content: &ClipboardContent) -> &'static str {
+    match content {
+        ClipboardContent::Text(_) => "text",
+        ClipboardContent::Image { .. } => "image",
+        ClipboardContent::Files(_) => "files",
+        ClipboardContent::Html { .. } => "html",
     }
 }

@@ -15,6 +15,7 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -79,9 +80,15 @@ enum Role {
     Responder,
 }
 
+/// 连接序号发生器，用于区分同一对端的新旧连接。
+static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
+
 /// 单个已连接对端（用于把本地剪贴板变化转发给它）
 #[derive(Clone)]
 struct Peer {
+    /// 本条连接的唯一序号。清理时据此判断表中登记的是否仍是自己，
+    /// 避免**已过期的旧连接把刚建立的新连接从表里删掉**（那会导致本机只收不发）。
+    conn_id: u64,
     tx: mpsc::UnboundedSender<SyncEnvelope>,
 }
 
@@ -177,12 +184,30 @@ impl ConnectionHub {
             let hub = self.clone();
             tauri::async_runtime::spawn(async move {
                 let mut rx = engine.subscribe();
-                while let Ok(ev) = rx.recv().await {
+                loop {
+                    // 不能用 `while let Ok(ev)`：broadcast 落后时返回 `Lagged`，那样会让
+                    // 转发任务**永久退出**，本机从此只收不发（接收走 run_connection 里
+                    // 另一条路径，仍然正常）——正是「单向能同步」的典型成因。
+                    let ev = match rx.recv().await {
+                        Ok(ev) => ev,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!("转发任务积压，跳过 {n} 条本地变化");
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    };
                     let SyncEvent::LocalClipboardChanged { mark, content } = ev;
                     let env = SyncEnvelope { mark, content };
                     let peers = hub.peers.lock().unwrap().clone();
-                    for (_id, p) in peers {
-                        let _ = p.tx.send(env.clone());
+                    if peers.is_empty() {
+                        tracing::warn!("本地剪贴板已变化，但当前没有已连接对端，内容未发出");
+                        continue;
+                    }
+                    tracing::debug!("向 {} 个对端转发本地剪贴板变化", peers.len());
+                    for (id, p) in peers {
+                        if p.tx.send(env.clone()).is_err() {
+                            tracing::warn!("对端 {id} 的发送通道已关闭，本次内容未送达");
+                        }
                     }
                 }
             });
@@ -515,13 +540,20 @@ impl ConnectionHub {
         }
 
         // 6) 注册对端，进入加密同步循环
+        let conn_id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
         let (tx, mut rx) = mpsc::unbounded_channel::<SyncEnvelope>();
-        self.peers.lock().unwrap().insert(
+        if let Some(old) = self.peers.lock().unwrap().insert(
             peer_id.clone(),
             Peer {
+                conn_id,
                 tx: tx.clone(),
             },
-        );
+        ) {
+            tracing::debug!(
+                "与 {peer_name} 的连接 #{} 已被新连接 #{conn_id} 取代",
+                old.conn_id
+            );
+        }
 
         let (mut write, mut read) = ws.split();
 
@@ -578,12 +610,26 @@ impl ConnectionHub {
             }
         }
 
-        // 清理
-        self.peers.lock().unwrap().remove(&peer_id);
-        if let Some(app) = self.app.lock().unwrap().clone() {
-            let _ = app.emit("peer-disconnected", &peer_id);
+        // 清理：仅当表中登记的仍是**本条**连接时才摘除。若期间已被更新的连接取代，
+        // 无条件 remove 会把活着的新连接一并删掉，本机将只收不发。
+        let was_current = {
+            let mut g = self.peers.lock().unwrap();
+            match g.get(&peer_id) {
+                Some(p) if p.conn_id == conn_id => {
+                    g.remove(&peer_id);
+                    true
+                }
+                _ => false,
+            }
+        };
+        if was_current {
+            if let Some(app) = self.app.lock().unwrap().clone() {
+                let _ = app.emit("peer-disconnected", &peer_id);
+            }
+            tracing::info!("connection to {} closed", peer_name);
+        } else {
+            tracing::debug!("{peer_name} 的旧连接 #{conn_id} 退出，当前连接不受影响");
         }
-        tracing::info!("connection to {} closed", peer_name);
         Ok(())
     }
 }

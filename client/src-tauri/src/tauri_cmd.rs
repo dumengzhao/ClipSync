@@ -6,7 +6,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::clipboard::types::ClipboardContent;
-use crate::clipboard::{ClipboardProvider, PlatformClipboard};
+use crate::clipboard::ClipboardProvider;
 use crate::config::settings::ManualAddress;
 use crate::device::registry::{PairedDevice, TrustLevel};
 use crate::discovery::DiscoveredPeer;
@@ -155,9 +155,12 @@ pub fn pair_with(state: State<AppState>, device_id: String, code: String) -> Res
     Ok(())
 }
 
+// 注意：以下两个命令必须复用引擎持有的常驻剪贴板句柄，不能自建临时实例。
+// X11/Wayland 下临时实例一旦 Drop 就会失去 selection 所有权，写入等于白写。
+
 #[tauri::command]
-pub async fn get_clipboard() -> Result<String, String> {
-    let cb = PlatformClipboard::new();
+pub async fn get_clipboard(state: State<'_, AppState>) -> Result<String, String> {
+    let cb = state.engine.clipboard();
     match cb.read().await {
         Ok(ClipboardContent::Text(t)) => Ok(t),
         Ok(_) => Err("clipboard does not contain text".to_string()),
@@ -166,8 +169,8 @@ pub async fn get_clipboard() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn set_clipboard(text: String) -> Result<(), String> {
-    let cb = PlatformClipboard::new();
+pub async fn set_clipboard(state: State<'_, AppState>, text: String) -> Result<(), String> {
+    let cb = state.engine.clipboard();
     cb.write(ClipboardContent::Text(text))
         .await
         .map_err(|e| e.to_string())
