@@ -24,7 +24,7 @@ pub fn get_device_id(state: State<AppState>) -> String {
 
 #[tauri::command]
 pub fn get_device_name(state: State<AppState>) -> String {
-    state.identity.name.clone()
+    state.config.lock().device_name.clone()
 }
 
 #[tauri::command]
