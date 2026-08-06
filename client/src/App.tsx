@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import {
   getVersion,
@@ -104,6 +104,10 @@ export default function App() {
 
     // 实时订阅局域网发现 / 配对 / 连接状态
     const unlistenDiscovered = listen<DiscoveredPeer>('peer-discovered', (e) => {
+      // 已配对的设备不进入发现列表（配对方以后端 registry 为准，避免竞态闪现）
+      if (pairedRef.current.some((p) => p.id === e.payload.device_id)) {
+        return;
+      }
       setDiscovered((prev) => {
         if (prev.some((p) => p.device_id === e.payload.device_id)) {
           return prev.map((p) => (p.device_id === e.payload.device_id ? e.payload : p));
@@ -243,6 +247,10 @@ export default function App() {
   const discoveredIds = new Set(discovered.map((p) => p.device_id));
   // 已配对设备不重复出现在「发现」列表中
   const discoveredOnly = discovered.filter((p) => !pairedIds.has(p.device_id));
+  // 用 ref 持有最新已配对集合，供下面 peer-discovered 监听在闭包内判断，
+  // 避免挂载初期 paired 尚未加载完成时把已配对设备写进发现列表（竞态闪现）。
+  const pairedRef = useRef<PairedDeviceInfo[]>([]);
+  pairedRef.current = paired;
 
   if (view === 'settings') {
     return <SettingsPage onBack={() => setView('main')} />;
