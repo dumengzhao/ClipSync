@@ -15,6 +15,10 @@ pub struct AppConfig {
     pub max_image_size_mb: u32,
     pub listen_port: u16,
     pub enable_mdns: bool,
+    /// SPAKE2 配对码（6 位数字）。两端设成相同即可自动配对。
+    /// 默认值仅用于开发/测试；正式使用应在各端设置不同码并通过 UI 完成配对。
+    #[serde(default = "default_pairing_code")]
+    pub pairing_code: String,
     pub manual_addresses: Vec<ManualAddress>,
     pub sync_primary_selection: bool,
     pub cache_ttl_hours: u32,
@@ -35,6 +39,10 @@ pub enum Theme {
     Dark,
 }
 
+fn default_pairing_code() -> String {
+    "000000".to_string()
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -47,6 +55,7 @@ impl Default for AppConfig {
             max_image_size_mb: 50,
             listen_port: 24681,
             enable_mdns: true,
+            pairing_code: "000000".to_string(),
             manual_addresses: Vec::new(),
             sync_primary_selection: false,
             cache_ttl_hours: 24,

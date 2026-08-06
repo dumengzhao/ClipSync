@@ -1,6 +1,7 @@
 //! 传输模块 - 单 WebSocket 通道（信令 + 文件分片复用）
 
 pub mod file_stream;
+pub mod manager;
 pub mod websocket;
 
 use crate::error::TransferResult;

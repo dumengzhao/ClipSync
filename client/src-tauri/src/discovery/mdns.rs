@@ -139,7 +139,15 @@ impl MdnsDiscovery {
                         let _ = app2.emit("peer-discovered", &peer);
                     }
                     ServiceEvent::ServiceRemoved(full, _) => {
-                        let _ = app2.emit("peer-lost", full);
+                        // full = "clipsync-<device_id>._clipsync._tcp.local."
+                        let did = full
+                            .strip_prefix("clipsync-")
+                            .and_then(|s| s.strip_suffix("._clipsync._tcp.local."))
+                            .unwrap_or(&full)
+                            .to_string();
+                        let st = app2.state::<crate::AppState>();
+                        st.discovered.lock().remove(&did);
+                        let _ = app2.emit("peer-lost", &did);
                     }
                     _ => {}
                 }

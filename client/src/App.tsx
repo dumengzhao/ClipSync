@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { getVersion } from './api/tauri';
+import { getVersion, listDiscoveredPeers, type DiscoveredPeer } from './api/tauri';
 import SettingsPage from './SettingsPage';
 
 /**
@@ -12,13 +12,49 @@ import SettingsPage from './SettingsPage';
 export default function App() {
   const [version, setVersion] = useState('');
   const [view, setView] = useState<'main' | 'settings'>('main');
+  const [peers, setPeers] = useState<DiscoveredPeer[]>([]);
+  const [connected, setConnected] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     getVersion().then(setVersion).catch(() => setVersion('unknown'));
     // dev 下「托盘 → 设置」通过事件请求内嵌显示设置视图
-    const unlisten = listen<null>('open-settings', () => setView('settings'));
+    const unlistenSettings = listen<null>('open-settings', () => setView('settings'));
+
+    // 拉取初始已发现设备
+    listDiscoveredPeers().then(setPeers).catch(() => {});
+
+    // 实时订阅局域网发现 / 连接状态
+    const unlistenDiscovered = listen<DiscoveredPeer>('peer-discovered', (e) => {
+      setPeers((prev) => {
+        if (prev.some((p) => p.device_id === e.payload.device_id)) return prev;
+        return [...prev, e.payload];
+      });
+    });
+    const unlistenLost = listen<string>('peer-lost', (e) => {
+      setPeers((prev) => prev.filter((p) => p.device_id !== e.payload));
+      setConnected((prev) => {
+        const n = new Set(prev);
+        n.delete(e.payload);
+        return n;
+      });
+    });
+    const unlistenConnected = listen<{ device_id: string }>('peer-connected', (e) => {
+      setConnected((prev) => new Set(prev).add(e.payload.device_id));
+    });
+    const unlistenDisconnected = listen<string>('peer-disconnected', (e) => {
+      setConnected((prev) => {
+        const n = new Set(prev);
+        n.delete(e.payload);
+        return n;
+      });
+    });
+
     return () => {
-      unlisten.then((u) => u());
+      unlistenSettings.then((u) => u());
+      unlistenDiscovered.then((u) => u());
+      unlistenLost.then((u) => u());
+      unlistenConnected.then((u) => u());
+      unlistenDisconnected.then((u) => u());
     };
   }, []);
 
@@ -33,11 +69,32 @@ export default function App() {
         <p className="version">v{version}</p>
       </header>
       <main className="app-main">
-        <p>跨平台剪贴板同步工具</p>
+        <section className="peers">
+          <h2>发现的设备</h2>
+          {peers.length === 0 ? (
+            <p className="hint">局域网内未发现其它 ClipSync 设备</p>
+          ) : (
+            <ul className="peer-list">
+              {peers.map((p) => {
+                const isConnected = connected.has(p.device_id);
+                return (
+                  <li key={p.device_id} className="peer-item">
+                    <span className={`peer-dot ${isConnected ? 'on' : 'off'}`} />
+                    <span className="peer-name">{p.device_name}</span>
+                    <span className="peer-addr">
+                      {p.addr}:{p.port}
+                      {isConnected ? ' · 已连接' : ''}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
         <button className="btn" onClick={() => setView('settings')}>
           打开设置
         </button>
-        <p className="hint">开发中，详见 docs/development-plan.md</p>
+        <p className="hint">局域网剪贴板同步已启用（mDNS 自动发现 + SPAKE2 加密配对）</p>
       </main>
     </div>
   );

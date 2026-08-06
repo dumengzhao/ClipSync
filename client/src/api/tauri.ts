@@ -12,6 +12,26 @@ export async function getPairedDevices(): Promise<unknown[]> {
   return invoke<unknown[]>('get_paired_devices');
 }
 
+/** 通过 mDNS 发现的局域网对端（与 Rust 端 `DiscoveredPeer` 一致） */
+export interface DiscoveredPeer {
+  device_id: string;
+  device_name: string;
+  addr: string;
+  port: number;
+}
+
+/** 已建立加密连接的对端（peer-connected 事件负载） */
+export interface ConnectedPeer {
+  device_id: string;
+  device_name: string;
+  addr: string;
+}
+
+/** 列出当前已发现的局域网设备 */
+export async function listDiscoveredPeers(): Promise<DiscoveredPeer[]> {
+  return invoke<DiscoveredPeer[]>('list_discovered_peers');
+}
+
 /** 应用配置（与 Rust 端 `AppConfig` 字段保持一致） */
 export interface AppConfig {
   device_name: string;
@@ -23,6 +43,7 @@ export interface AppConfig {
   max_image_size_mb: number;
   listen_port: number;
   enable_mdns: boolean;
+  pairing_code: string;
   manual_addresses: { label: string; addr: string; port: number }[];
   sync_primary_selection: boolean;
   cache_ttl_hours: number;

@@ -49,6 +49,8 @@ pub fn set_config(
 
     crate::config::save_config(&app, &cfg).map_err(|e| e.to_string())?;
     *state.config.lock() = cfg.clone();
+    // 配对码可能变更，热更新到传输中枢（无需重启即对新连接生效）
+    state.hub.set_pairing_code(cfg.pairing_code.clone());
 
     if cfg.enable_mdns {
         let identity = state.identity.clone();

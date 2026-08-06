@@ -14,6 +14,8 @@ pub enum MessageType {
     FileChunkRequest = 0x02,
     FileChunkResponse = 0x03,
     Heartbeat = 0x04,
+    /// 加密剪贴板同步包：payload = [12 字节 nonce][AES-GCM 密文]，明文为 bincode 序列化的 `SyncEnvelope`
+    Sync = 0x05,
 }
 
 impl MessageType {
@@ -69,11 +71,11 @@ impl MessageFrame {
     }
 }
 
-// 阶段二（connect / listen）实现要点：
+// connect / listen 已在 `crate::transfer::manager` 中实现：
 // - `connect(addr)`：tokio_tungstenite::connect_async(ws://addr) 返回 (WebSocketStream, _)
 // - `listen(port)`：tokio TcpListener 接受连接，对每个连接 upgrade 为 WebSocket
-// - 每条消息按 `MessageFrame` 编解码；信令 JSON、文件分片 Bincode 复用同一二进制流
-// - 多文件并发通过 `sync_id + file_index + offset` 在同一连接上多路复用
+// - 每条消息按 `MessageFrame` 编解码；信令（SPAKE2）/ 同步包复用同一二进制流
+// - 连接建立后先跑 SPAKE2 配对（Signal 帧），再用 Sync 帧（AES-GCM 加密）传输剪贴板内容
 
 #[cfg(test)]
 mod tests {
