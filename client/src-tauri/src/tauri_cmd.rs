@@ -10,6 +10,7 @@ use crate::clipboard::ClipboardProvider;
 use crate::config::settings::ManualAddress;
 use crate::device::registry::{PairedDevice, TrustLevel};
 use crate::discovery::DiscoveredPeer;
+use crate::discovery::manual::ManualAddressBook;
 use crate::AppState;
 
 #[tauri::command]
@@ -49,6 +50,16 @@ pub fn set_config(
 
     crate::config::save_config(&app, &cfg).map_err(|e| e.to_string())?;
     *state.config.lock() = cfg.clone();
+
+    // 同步手动地址簿：配置是持久化真源，每次保存都据此重建内存地址簿，
+    // 使监控任务的兜底直连始终读到最新地址（重启时 lib.rs 也已据此初始化）。
+    {
+        let mut book = state.manual.lock();
+        *book = ManualAddressBook::new();
+        for a in &cfg.manual_addresses {
+            book.add(a.clone());
+        }
+    }
 
     if cfg.enable_mdns {
         let identity = state.identity.clone();

@@ -13,6 +13,10 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
   const [cfg, setCfg] = useState<AppConfig | null>(null);
   const [msg, setMsg] = useState('');
   const [thresholdWarn, setThresholdWarn] = useState('');
+  // 手动连接地址（mDNS 被防火墙拦截时的兜底直连）
+  const [maLabel, setMaLabel] = useState('');
+  const [maAddr, setMaAddr] = useState('');
+  const [maPort, setMaPort] = useState('');
 
   useEffect(() => {
     getConfig()
@@ -36,6 +40,32 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
 
   const quit = () => {
     quitApp();
+  };
+
+  const addManual = () => {
+    const addr = maAddr.trim();
+    const port = Number(maPort);
+    if (!addr || !Number.isFinite(port) || port <= 0 || port > 65535) {
+      setMsg('请填写有效的地址和端口（端口范围 1–65535）');
+      return;
+    }
+    const label = maLabel.trim() || `${addr}:${port}`;
+    const list = cfg.manual_addresses ? [...cfg.manual_addresses] : [];
+    if (list.some((m) => m.label === label)) {
+      setMsg('该标签的手动地址已存在');
+      return;
+    }
+    list.push({ label, addr, port });
+    update('manual_addresses', list);
+    setMaLabel('');
+    setMaAddr('');
+    setMaPort('');
+    setMsg('已添加，点「保存」后生效（配对设备将自动尝试直连）');
+  };
+
+  const removeManual = (i: number) => {
+    const list = (cfg.manual_addresses ?? []).filter((_, idx) => idx !== i);
+    update('manual_addresses', list);
   };
 
   if (!cfg) return <div className="settings"><p>加载中…</p></div>;
@@ -154,6 +184,41 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
           {thresholdWarn}
         </p>
       )}
+
+      <div className="section">手动连接地址（mDNS 被拦截时的兜底直连）</div>
+      {cfg.manual_addresses && cfg.manual_addresses.length > 0 && (
+        <ul className="peer-list">
+          {cfg.manual_addresses.map((m, i) => (
+            <li key={m.label} className="peer-item">
+              <span className="peer-name">{m.label}</span>
+              <span className="peer-addr">
+                {m.addr}:{m.port}
+              </span>
+              <button className="btn btn-sm btn-ghost" onClick={() => removeManual(i)}>
+                删除
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="row">
+        <label>新增手动地址</label>
+        <input placeholder="标签（可选）" value={maLabel} onChange={(e) => setMaLabel(e.target.value)} />
+        <input placeholder="地址 / IP" value={maAddr} onChange={(e) => setMaAddr(e.target.value)} />
+        <input
+          type="number"
+          placeholder="端口"
+          value={maPort}
+          onChange={(e) => setMaPort(e.target.value)}
+        />
+        <button className="btn btn-sm" onClick={addManual}>
+          添加
+        </button>
+      </div>
+      <p className="hint">
+        已配对设备只要曾经连上过，本端就会记住对方地址并在断线后自动重连；此处再填对方地址，
+        可在防火墙拦截局域网发现（mDNS）时兜底直连。
+      </p>
 
       <div className="section">缓存</div>
       <div className="row">

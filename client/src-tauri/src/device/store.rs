@@ -41,6 +41,9 @@ pub struct PairedRecord {
     pub verified: bool,
     #[serde(default)]
     pub last_seen: u64,
+    /// 最后成功连接的对端可拨号地址（host:port），mDNS 失效时兜底重连用。
+    #[serde(default)]
+    pub last_addr: Option<String>,
 }
 
 impl From<&PairedDevice> for PairedRecord {
@@ -51,6 +54,7 @@ impl From<&PairedDevice> for PairedRecord {
             fingerprint: d.fingerprint.clone(),
             verified: matches!(d.trust, TrustLevel::Verified),
             last_seen: d.last_seen,
+            last_addr: d.last_addr.clone(),
         }
     }
 }
@@ -67,6 +71,7 @@ impl From<PairedRecord> for PairedDevice {
                 TrustLevel::Unverified
             },
             last_seen: r.last_seen,
+            last_addr: r.last_addr,
         }
     }
 }
@@ -209,6 +214,7 @@ mod tests {
             fingerprint: "abcdef".into(),
             trust: TrustLevel::Verified,
             last_seen: 42,
+            last_addr: Some("192.168.1.50:24681".into()),
         };
         let back: PairedDevice = PairedRecord::from(&original).into();
         assert_eq!(back.device_id, original.device_id);
@@ -216,6 +222,7 @@ mod tests {
         assert_eq!(back.fingerprint, original.fingerprint);
         assert_eq!(back.trust, original.trust);
         assert_eq!(back.last_seen, original.last_seen);
+        assert_eq!(back.last_addr, original.last_addr);
     }
 
     /// 旧版本写下的文件缺少后加的字段时，必须仍能读出来，
