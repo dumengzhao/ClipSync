@@ -49,8 +49,6 @@ pub fn set_config(
 
     crate::config::save_config(&app, &cfg).map_err(|e| e.to_string())?;
     *state.config.lock() = cfg.clone();
-    // 配对码可能变更，热更新到传输中枢（无需重启即对新连接生效）
-    state.hub.set_pairing_code(cfg.pairing_code.clone());
 
     if cfg.enable_mdns {
         let identity = state.identity.clone();
@@ -119,6 +117,42 @@ pub fn list_discovered_peers(state: State<AppState>) -> Vec<DiscoveredPeer> {
 #[tauri::command]
 pub fn list_connected_peers(state: State<AppState>) -> Vec<String> {
     state.hub.connected_peer_ids()
+}
+
+/// 生成 6 位随机配对码并「武装」本端监听（应答方角色）。
+/// 返回该码供前端展示给用户，由用户线下告知对方。
+#[tauri::command]
+pub fn generate_pairing_code(state: State<AppState>) -> String {
+    state.hub.generate_pairing_code()
+}
+
+/// 取消当前武装的配对码。
+#[tauri::command]
+pub fn cancel_pairing(state: State<AppState>) {
+    state.hub.cancel_pairing();
+}
+
+/// 返回当前武装中的配对码（若有），供前端刷新时恢复展示。
+#[tauri::command]
+pub fn get_pending_pairing(state: State<AppState>) -> Option<String> {
+    state.hub.pending_pairing_code()
+}
+
+/// 用户在前端手动发起配对：作为发起方，使用输入的配对码连接指定对端。
+///
+/// 对端必须已「生成配对码」并展示同一码（处于武装状态），否则握手会被拒绝。
+#[tauri::command]
+pub fn pair_with(state: State<AppState>, device_id: String, code: String) -> Result<(), String> {
+    let peer = {
+        let g = state.discovered.lock();
+        g.get(&device_id).cloned()
+    };
+    let peer = peer.ok_or_else(|| format!("未发现设备 {device_id}（请确认对方已上线且在局域网内）"))?;
+    let hub = state.hub.clone();
+    tauri::async_runtime::spawn(async move {
+        hub.pair_with(peer, code).await;
+    });
+    Ok(())
 }
 
 #[tauri::command]

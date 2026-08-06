@@ -71,7 +71,7 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         />
       </div>
       <div className="row">
-        <label>配对码 (6 位数字，两端需一致)</label>
+        <label>预留配对码（交互式配对暂不使用）</label>
         <input
           type="text"
           value={cfg.pairing_code}
