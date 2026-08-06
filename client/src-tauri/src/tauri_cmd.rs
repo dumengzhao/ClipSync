@@ -113,6 +113,14 @@ pub fn list_discovered_peers(state: State<AppState>) -> Vec<DiscoveredPeer> {
     state.discovered.lock().values().cloned().collect()
 }
 
+/// 列出当前已建立加密通道的对端 device_id。
+///
+/// 前端挂载时主动拉取一次，兜底 `peer-connected` 事件可能早于监听就绪而丢失的竞态。
+#[tauri::command]
+pub fn list_connected_peers(state: State<AppState>) -> Vec<String> {
+    state.hub.connected_peer_ids()
+}
+
 #[tauri::command]
 pub async fn get_clipboard() -> Result<String, String> {
     let cb = PlatformClipboard::new();

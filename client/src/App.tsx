@@ -1,6 +1,11 @@
 import { useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { getVersion, listDiscoveredPeers, type DiscoveredPeer } from './api/tauri';
+import {
+  getVersion,
+  listDiscoveredPeers,
+  listConnectedPeers,
+  type DiscoveredPeer,
+} from './api/tauri';
 import SettingsPage from './SettingsPage';
 
 /**
@@ -22,6 +27,11 @@ export default function App() {
 
     // 拉取初始已发现设备
     listDiscoveredPeers().then(setPeers).catch(() => {});
+
+    // 主动查询当前已连接对端，兜底 peer-connected 事件可能早于本监听就绪而丢失的竞态
+    listConnectedPeers()
+      .then((ids) => setConnected(new Set(ids)))
+      .catch(() => {});
 
     // 实时订阅局域网发现 / 连接状态
     const unlistenDiscovered = listen<DiscoveredPeer>('peer-discovered', (e) => {
