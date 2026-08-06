@@ -556,6 +556,7 @@ dependencies = [
  "chrono",
  "crossbeam-channel",
  "dbus-secret-service",
+ "futures-util",
  "hkdf",
  "hmac",
  "lru",

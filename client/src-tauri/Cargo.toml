@@ -50,6 +50,7 @@ uuid = { version = "1", features = ["v4"] }
 # Network
 tokio-tungstenite = "0.23"
 mdns-sd = "0.11"
+futures-util = "0.3"
 
 # Platform clipboard (will be replaced by native impl in phase 3)
 arboard = "3"

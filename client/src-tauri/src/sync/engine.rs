@@ -4,7 +4,7 @@
 //! 引擎持有 AntiLoop、设备身份与平台剪贴板，将本地剪贴板变化以 `SyncEvent` 形式
 //! 通过 tokio broadcast 广播，并由消费任务转译为 Tauri 事件 `clipboard-changed`。
 
-use crate::clipboard::types::{DeviceId, SyncId};
+use crate::clipboard::types::{DeviceId, SyncId, SyncMark};
 use crate::clipboard::{ClipboardContent, ClipboardProvider, PlatformClipboard};
 use crate::device::identity::DeviceIdentity;
 use crate::sync::anti_loop::{content_hash, AntiLoop};
@@ -17,8 +17,8 @@ use tauri::{AppHandle, Emitter};
 #[derive(Debug, Clone)]
 pub enum SyncEvent {
     LocalClipboardChanged {
-        sync_id: SyncId,
-        device_id: DeviceId,
+        /// 本次写出的同步标记（含 sync_id / device_id / lamport / 内容哈希）
+        mark: SyncMark,
         content: ClipboardContent,
     },
 }
@@ -122,11 +122,7 @@ impl SyncEngine {
                 }
                 let device_id = identity.id.clone();
                 let mark = anti_loop.mark_outgoing(&device_id, &content);
-                let _ = event_tx.send(SyncEvent::LocalClipboardChanged {
-                    sync_id: mark.sync_id,
-                    device_id,
-                    content,
-                });
+                let _ = event_tx.send(SyncEvent::LocalClipboardChanged { mark, content });
             }
         });
 
@@ -135,16 +131,27 @@ impl SyncEngine {
         let app_handle = app.clone();
         tauri::async_runtime::spawn(async move {
             while let Ok(ev) = event_rx.recv().await {
-                let SyncEvent::LocalClipboardChanged {
-                    sync_id,
-                    device_id,
-                    content,
-                } = ev;
-                let payload = ClipboardChangedPayload::from_content(&sync_id, &device_id, &content);
+                let SyncEvent::LocalClipboardChanged { mark, content } = ev;
+                let payload =
+                    ClipboardChangedPayload::from_content(&mark.sync_id, &mark.device_id, &content);
                 let _ = app_handle.emit("clipboard-changed", payload);
             }
         });
 
         Ok(())
+    }
+
+    /// 应用对端传来的剪贴板更新：先记录防回环标记（推进 Lamport 时钟），
+    /// 再写回本地剪贴板。写入前把内容哈希登记为「最近已发出」，使本机剪贴板监听
+    /// 回调触发的回声被判定为重复而丢弃，避免回环。
+    pub async fn apply_remote(&self, mark: SyncMark, content: ClipboardContent) {
+        self.anti_loop.record_applied(&mark);
+        {
+            let mut g = self.last_emitted.lock().unwrap();
+            *g = Some(content_hash(&content));
+        }
+        if let Err(e) = PlatformClipboard::new().write(content).await {
+            tracing::error!("failed to write remote clipboard content: {e}");
+        }
     }
 }

@@ -9,7 +9,7 @@ pub mod mdns;
 pub use mdns::MdnsDiscovery;
 
 use crate::clipboard::types::DeviceId;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// 已发现的设备（手动地址簿使用，含 fingerprint 占位）
 #[derive(Debug, Clone)]
@@ -22,7 +22,7 @@ pub struct DiscoveredDevice {
 }
 
 /// 通过 mDNS 发现的局域网对端，前端可直接消费（序列化后作为事件负载）
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoveredPeer {
     pub device_id: String,
     pub device_name: String,

@@ -70,6 +70,14 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
           onChange={(e) => update('enable_mdns', e.target.checked)}
         />
       </div>
+      <div className="row">
+        <label>配对码 (6 位数字，两端需一致)</label>
+        <input
+          type="text"
+          value={cfg.pairing_code}
+          onChange={(e) => update('pairing_code', e.target.value)}
+        />
+      </div>
 
       <div className="section">同步内容</div>
       <div className="row">

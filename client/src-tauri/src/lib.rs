@@ -28,6 +28,7 @@ use crate::device::registry::DeviceRegistry;
 use crate::discovery::manual::ManualAddressBook;
 use crate::discovery::{DiscoveredPeer, MdnsDiscovery};
 use crate::sync::engine::SyncEngine;
+use crate::transfer::manager::ConnectionHub;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -38,6 +39,8 @@ pub struct AppState {
     /// 运行期可改的配置（端口等），背后加锁以支持 `set_config` 热更新
     pub config: Mutex<AppConfig>,
     pub engine: Arc<SyncEngine>,
+    /// 传输连接中枢：监听 / 连接对端 / SPAKE2 配对 / 加密通道转发
+    pub hub: Arc<ConnectionHub>,
     pub registry: Mutex<DeviceRegistry>,
     pub manual: Mutex<ManualAddressBook>,
     pub cache: FileCache,
@@ -53,6 +56,11 @@ impl AppState {
         let identity = DeviceIdentity::load_or_create(&config.device_name)
             .expect("failed to load or create device identity");
         let engine = Arc::new(SyncEngine::new(identity.clone()));
+        let hub = ConnectionHub::new(
+            Arc::new(identity.clone()),
+            engine.clone(),
+            config.pairing_code.clone(),
+        );
 
         let mut manual = ManualAddressBook::new();
         for addr in &config.manual_addresses {
@@ -62,15 +70,16 @@ impl AppState {
         let cache = FileCache::new(256, config.cache_ttl_hours);
 
         Self {
-            identity,
-            config: Mutex::new(config),
-            engine,
-            registry: Mutex::new(DeviceRegistry::new()),
-            manual: Mutex::new(manual),
-            cache,
-            discovery: MdnsDiscovery::new(),
-            discovered: Mutex::new(HashMap::new()),
-        }
+                identity,
+                config: Mutex::new(config),
+                engine,
+                hub,
+                registry: Mutex::new(DeviceRegistry::new()),
+                manual: Mutex::new(manual),
+                cache,
+                discovery: MdnsDiscovery::new(),
+                discovered: Mutex::new(HashMap::new()),
+            }
     }
 }
 
@@ -113,6 +122,10 @@ pub fn run() {
                 let g = state.config.lock();
                 (g.enable_mdns, g.listen_port)
             };
+            // 用持久化配置里的配对码覆盖 hub 默认，使改过的配对码重启后仍生效
+            state
+                .hub
+                .set_pairing_code(state.config.lock().pairing_code.clone());
             let identity = state.identity.clone();
 
             // 启动局域网发现（mDNS 广播本机 + 订阅对端），失败仅记录不阻断启动。
@@ -133,6 +146,14 @@ pub fn run() {
                 if let Err(e) = engine.start(handle).await {
                     tracing::error!("sync engine failed to start: {e}");
                 }
+            });
+
+            // 启动传输中枢（监听 / 连接对端 / SPAKE2 配对 / 加密转发），失败仅记录不阻断启动
+            let hub = app.state::<AppState>().hub.clone();
+            let hub_app = app.handle().clone();
+            let hub_port = listen_port;
+            tauri::async_runtime::spawn(async move {
+                hub.start(hub_app, hub_port).await;
             });
 
             Ok(())
