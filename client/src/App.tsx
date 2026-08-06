@@ -295,6 +295,10 @@ export default function App() {
               })}
             </ul>
           )}
+          <p className="hint">
+            若设备长时间「离线」：多为局域网发现（mDNS）被防火墙拦截。配对成功后本端会记住对方地址并自动重连；
+            仍连不上时，可在「设置 → 手动连接地址」填对方的 IP:端口 兜底直连。
+          </p>
         </section>
 
         <section className="peers">

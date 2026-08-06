@@ -21,6 +21,9 @@ pub struct PairedDevice {
     pub trust: TrustLevel,
     /// 最后在线时间戳（unix seconds）
     pub last_seen: u64,
+    /// 最后成功连接的对端可拨号地址（host:port）。配对成功后由发起方记录，
+    /// mDNS 失效时作为兜底重连地址，避免已配对设备因局域网发现不到而永远离线。
+    pub last_addr: Option<String>,
 }
 
 pub struct DeviceRegistry {

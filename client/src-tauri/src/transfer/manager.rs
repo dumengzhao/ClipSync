@@ -43,6 +43,7 @@ use crate::crypto::kdf::{derive_session_keys, split_keys};
 use crate::crypto::pake::{generate_pairing_code as gen_code, start_initiator, start_responder};
 use crate::device::identity::DeviceIdentity;
 use crate::device::registry::{PairedDevice, TrustLevel};
+use crate::config::settings::ManualAddress;
 use crate::discovery::DiscoveredPeer;
 use crate::sync::engine::{SyncEngine, SyncEvent};
 use crate::transfer::websocket::{FileChunkResponsePayload, FileFrame, MessageFrame, MessageType};
@@ -163,6 +164,9 @@ pub struct ConnectionHub {
     pending_code: Mutex<Option<(String, Instant)>>,
     /// 已建立加密通道的对端（key 为 device_id）
     peers: Mutex<HashMap<String, Peer>>,
+    /// 当前已连地址集合（key = remote `host:port`），用于 mDNS 失效时按手动/已知地址
+    /// 兜底重连的去重：避免对已连地址反复发起连接尝试。
+    connected_addrs: Mutex<HashSet<String>>,
     /// 正在发起连接的对端地址集合，避免重复连接（key = addr:port）
     connecting: Mutex<HashSet<String>>,
     /// 本端作为发送方的活动传输（transfer_id -> 本地文件清单 + 绝对路径）
@@ -185,6 +189,7 @@ impl ConnectionHub {
             paired_codes: Mutex::new(HashMap::new()),
             pending_code: Mutex::new(None),
             peers: Mutex::new(HashMap::new()),
+            connected_addrs: Mutex::new(HashSet::new()),
             connecting: Mutex::new(HashSet::new()),
             active_offers: Mutex::new(HashMap::new()),
             pending_offers: Mutex::new(HashMap::new()),
@@ -820,7 +825,7 @@ impl ConnectionHub {
             });
         }
 
-        // 4) 连接监控：周期巡检「已配对 + 已发现 + 未连接」的对端并重连。
+        // 4) 连接监控：周期巡检「已配对 + 已发现/已知地址 + 未连接」的对端并重连。
         //    不能只靠上面的发现事件——进程重启后 mDNS 可能早已把对端解析完毕、
         //    不再重复推送，那样已配对设备会一直停在离线状态。
         {
@@ -829,13 +834,43 @@ impl ConnectionHub {
             tauri::async_runtime::spawn(async move {
                 loop {
                     tokio::time::sleep(RECONNECT_INTERVAL).await;
-                    let peers: Vec<DiscoveredPeer> = {
-                        let state = app.state::<AppState>();
-                        let g = state.discovered.lock();
-                        g.values().cloned().collect()
-                    };
-                    for peer in peers {
-                        hub.clone().spawn_reconnect_if_paired(peer);
+                    let state = app.state::<AppState>();
+
+                    // 4a) mDNS 发现到的对端（仅已配对的才连）
+                    {
+                        let peers: Vec<DiscoveredPeer> = {
+                            let g = state.discovered.lock();
+                            g.values().cloned().collect()
+                        };
+                        for peer in peers {
+                            hub.clone().spawn_reconnect_if_paired(peer);
+                        }
+                    }
+
+                    // 4b) 手动地址簿：mDNS 被防火墙拦截时的兜底直连。
+                    //     只有对端确实已配对（握手阶段命中 link secret）才会真正连上，
+                    //     指向陌生人的手动地址会在握夹持早失败，不会误连。
+                    {
+                        let manual: Vec<ManualAddress> = state.manual.lock().list();
+                        for m in manual {
+                            hub.clone().spawn_connect_addr(m.addr.clone(), m.port);
+                        }
+                    }
+
+                    // 4c) 已配对设备的最后已知地址：配对成功后由发起方记录，
+                    //     mDNS 失效也能自愈重连（重启后从磁盘恢复）。
+                    {
+                        let paired = state.registry.lock().list();
+                        for d in paired {
+                            if let Some(addr) = d.last_addr {
+                                if hub.peers.lock().unwrap().contains_key(&d.device_id.0) {
+                                    continue; // 当前已连，跳过
+                                }
+                                if let Some((h, p)) = parse_host_port(&addr) {
+                                    hub.clone().spawn_connect_addr(h, p);
+                                }
+                            }
+                        }
                     }
                 }
             });
@@ -854,9 +889,39 @@ impl ConnectionHub {
             return;
         }
         let key = format!("{}:{}", peer.addr, peer.port);
+        if self.connected_addrs.lock().unwrap().contains(&key) {
+            return;
+        }
         if self.connecting.lock().unwrap().contains(&key) {
             return;
         }
+        tauri::async_runtime::spawn(async move {
+            self.reconnect_once(peer).await;
+        });
+    }
+
+    /// 按地址直接尝试连接（不预检配对状态）。
+    ///
+    /// 只有对端在握手阶段被识别为「已配对」（Hello 拿到的真实 device_id 命中 link
+    /// secret 缓存）才会真正建立通道；未配对对端会因「未提供配对码」在握夹持早失败，
+    /// 不会误连陌生人。用于 mDNS 失效时的兜底：手填的手动地址 + 已配对设备的最后已知地址。
+    ///
+    /// 由 `connected_addrs` / `connecting` 按 `addr:port` 双重去重，避免对已连或正在
+    /// 连接中的地址反复发起尝试。
+    fn spawn_connect_addr(self: Arc<Self>, addr: String, port: u16) {
+        let key = format!("{addr}:{port}");
+        if self.connected_addrs.lock().unwrap().contains(&key) {
+            return;
+        }
+        if self.connecting.lock().unwrap().contains(&key) {
+            return;
+        }
+        let peer = DiscoveredPeer {
+            device_id: String::new(),
+            device_name: "手动/已知地址".to_string(),
+            addr,
+            port,
+        };
         tauri::async_runtime::spawn(async move {
             self.reconnect_once(peer).await;
         });
@@ -1085,15 +1150,34 @@ impl ConnectionHub {
             }
 
             let state = app.state::<AppState>();
+            // 仅发起方（本端拨号出去的一方）才知道对端的可拨号地址 host:port；
+            // 应答方只拿到对端的临时源端口，无法用于重连，故只在发起方记录 last_addr。
+            // 重连地址用于 mDNS 失效时兜底直连，避免已配对设备因发现不到而永远离线。
+            let last_addr = if matches!(role, Role::Initiator) {
+                Some(peer_addr.clone())
+            } else {
+                state
+                    .registry
+                    .lock()
+                    .get(&DeviceId(peer_id.clone()))
+                    .and_then(|d| d.last_addr.clone())
+            };
             state.registry.lock().add(PairedDevice {
                 device_id: DeviceId(peer_id.clone()),
                 device_name: peer_name.clone(),
                 fingerprint: fingerprint.clone(),
                 trust: TrustLevel::Verified,
                 last_seen: now_secs(),
+                last_addr,
             });
             let devices = state.registry.lock().list();
             crate::device::store::save_devices(&app, &devices);
+
+            // 记录当前已连地址，供兜底重连去重（同样只在发起方有效，
+            // 此时 peer_addr 才是对端真实监听地址 host:port）。
+            if matches!(role, Role::Initiator) {
+                self.connected_addrs.lock().unwrap().insert(peer_addr.clone());
+            }
 
             let _ = app.emit(
                 "peer-paired",
@@ -1246,6 +1330,8 @@ impl ConnectionHub {
         } else {
             tracing::debug!("{peer_name} 的旧连接 #{conn_id} 退出，当前连接不受影响");
         }
+        // 移出已连地址集合，允许监控任务在断线后重新兜底重连
+        self.connected_addrs.lock().unwrap().remove(&peer_addr);
         Ok(())
     }
 }
@@ -1343,6 +1429,21 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// 从 `host:port` 解析出 (host, port)；空串或端口非法时返回 None。
+/// 取最后一个 `:` 作为分隔，兼容大多数 IPv4/域名地址（IPv6 不在 MVP 局域网范围内）。
+fn parse_host_port(s: &str) -> Option<(String, u16)> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (h, p) = s.rsplit_once(':')?;
+    let port: u16 = p.parse().ok()?;
+    if h.is_empty() {
+        return None;
+    }
+    Some((h.to_string(), port))
 }
 
 #[cfg(test)]
