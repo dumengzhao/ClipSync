@@ -46,3 +46,6 @@ crash_dumps/
 
 # Cargo lock is committed for binary, ignored for library
 # This is a binary app, so Cargo.lock IS committed
+
+# Agent workspace memory (local only, never commit)
+.workbuddy/

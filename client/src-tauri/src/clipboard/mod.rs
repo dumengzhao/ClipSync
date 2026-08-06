@@ -7,12 +7,12 @@
 
 pub mod types;
 
-#[cfg(target_os = "windows")]
-mod windows;
-#[cfg(target_os = "macos")]
-mod macos;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "windows")]
+mod windows;
 
 use anyhow::Result;
 use async_trait::async_trait;

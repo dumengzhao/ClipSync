@@ -12,6 +12,9 @@ pub struct DeviceId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SyncId(pub String);
 
+/// 图片同步默认体积上限（字节）：50MB
+pub const DEFAULT_MAX_IMAGE_SIZE: u32 = 50 * 1024 * 1024;
+
 /// 文件元数据（跨端统一传输结构）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileMeta {
@@ -28,15 +31,9 @@ pub struct FileMeta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClipboardContent {
     Text(String),
-    Image {
-        data: Vec<u8>,
-        max_size: u32,
-    },
+    Image { data: Vec<u8>, max_size: u32 },
     Files(Vec<FileMeta>),
-    Html {
-        html: String,
-        text: String,
-    },
+    Html { html: String, text: String },
 }
 
 /// 防回环同步标记
