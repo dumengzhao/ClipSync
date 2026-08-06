@@ -48,8 +48,13 @@ pub fn init_file_logging() {
     let file_appender = rolling::daily(&dir, "clipsync.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,clipsync=debug"));
+    // mdns-sd 在多网卡主机上会对每个链路本地 IPv6 地址刷 ERROR
+    // （`Cannot find valid addrs for TYPE_SRV/TYPE_A ...`），属已知的无害噪音，
+    // 但会把真正有用的同步日志淹没，故默认关闭其自带日志（本项目在
+    // `discovery::mdns` 里有自己的记录）。需要排查 mDNS 时用
+    // `RUST_LOG=info,clipsync=debug,mdns_sd=debug` 覆盖即可。
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,clipsync=debug,mdns_sd=off"));
 
     let stderr_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
