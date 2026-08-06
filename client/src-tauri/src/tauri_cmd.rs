@@ -155,6 +155,15 @@ pub fn pair_with(state: State<AppState>, device_id: String, code: String) -> Res
     Ok(())
 }
 
+/// 取消与某设备的配对：删除持久化的重连口令与设备记录，并断开当前连接。
+///
+/// 对端仍会保留自己那一侧的记录，但因本端不再接受它的静默重连，
+/// 它会停在「离线」状态；双方都需重新配对才能恢复同步。
+#[tauri::command]
+pub fn unpair(state: State<AppState>, device_id: String) {
+    state.hub.unpair(&device_id);
+}
+
 // 注意：以下两个命令必须复用引擎持有的常驻剪贴板句柄，不能自建临时实例。
 // X11/Wayland 下临时实例一旦 Drop 就会失去 selection 所有权，写入等于白写。
 

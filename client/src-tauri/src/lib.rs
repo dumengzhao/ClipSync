@@ -120,6 +120,32 @@ pub fn run() {
             };
             let identity = state.identity.clone();
 
+            // 恢复已配对设备：设备表从磁盘读，重连口令从密钥链读。必须在传输中枢
+            // 启动**之前**装载完，否则监控任务首轮巡检时还认不出这些设备是已配对的。
+            {
+                let devices = crate::device::store::load_devices(&handle);
+                let mut secrets = HashMap::new();
+                {
+                    let mut reg = state.registry.lock();
+                    for d in devices {
+                        let id = d.device_id.0.clone();
+                        match crate::device::store::load_secret(&handle, &id) {
+                            Some(secret) => {
+                                secrets.insert(id, secret);
+                                reg.add(d);
+                            }
+                            // 没有口令就无法静默重连。留在表里只会显示成一台永远
+                            // 连不上的「已配对」设备，不如剔除，让用户重新配对。
+                            None => tracing::warn!(
+                                "设备 {} 的配对口令已丢失，需重新配对",
+                                d.device_name
+                            ),
+                        }
+                    }
+                }
+                state.hub.restore_paired(secrets);
+            }
+
             // 启动局域网发现（mDNS 广播本机 + 订阅对端），失败仅记录不阻断启动。
             // 端口来自配置（默认 24681，可改）；发现方从对端广告动态读取端口，不写死。
             if enable_mdns {
@@ -178,6 +204,7 @@ pub fn run() {
             tauri_cmd::cancel_pairing,
             tauri_cmd::get_pending_pairing,
             tauri_cmd::pair_with,
+            tauri_cmd::unpair,
             tauri_cmd::open_settings,
             tauri_cmd::quit_app,
         ])

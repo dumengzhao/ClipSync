@@ -66,6 +66,11 @@ export async function pairWith(deviceId: string, code: string): Promise<void> {
   return invoke<void>('pair_with', { deviceId, code });
 }
 
+/** 取消与某设备的配对：清除持久化口令与设备记录并断开连接 */
+export async function unpair(deviceId: string): Promise<void> {
+  return invoke<void>('unpair', { deviceId });
+}
+
 /** 应用配置（与 Rust 端 `AppConfig` 字段保持一致） */
 export interface AppConfig {
   device_name: string;

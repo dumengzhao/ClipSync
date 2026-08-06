@@ -9,6 +9,7 @@ import {
   cancelPairing,
   getPendingPairing,
   pairWith,
+  unpair,
   type DiscoveredPeer,
   type PairedDeviceInfo,
 } from './api/tauri';
@@ -94,6 +95,14 @@ export default function App() {
       'pairing-failed',
       (e) => flash(`配对失败：${e.payload.reason}`),
     );
+    const unlistenUnpaired = listen<string>('peer-unpaired', (e) => {
+      setPaired((prev) => prev.filter((p) => p.id !== e.payload));
+      setConnected((prev) => {
+        const n = new Set(prev);
+        n.delete(e.payload);
+        return n;
+      });
+    });
 
     return () => {
       unlistenSettings.then((u) => u());
@@ -103,6 +112,7 @@ export default function App() {
       unlistenDisconnected.then((u) => u());
       unlistenPaired.then((u) => u());
       unlistenFailed.then((u) => u());
+      unlistenUnpaired.then((u) => u());
     };
   }, []);
 
@@ -142,7 +152,17 @@ export default function App() {
     }
   };
 
+  const removePairing = async (p: PairedDeviceInfo) => {
+    try {
+      await unpair(p.id);
+      flash(`已取消与「${p.name}」的配对`);
+    } catch (e) {
+      flash('取消配对失败: ' + String(e));
+    }
+  };
+
   const pairedIds = new Set(paired.map((p) => p.id));
+  const discoveredIds = new Set(discovered.map((p) => p.device_id));
   // 已配对设备不重复出现在「发现」列表中
   const discoveredOnly = discovered.filter((p) => !pairedIds.has(p.device_id));
 
@@ -175,14 +195,23 @@ export default function App() {
             <ul className="peer-list">
               {paired.map((p) => {
                 const isConnected = connected.has(p.id);
+                // 已被发现却还没连上，说明后台正在重连——如实告知，避免误以为卡死
+                const status = isConnected
+                  ? '已连接'
+                  : discoveredIds.has(p.id)
+                    ? '连接中…'
+                    : '离线';
                 return (
-                  <li key={p.id} className="peer-item">
+                  <li key={p.id} className="peer-item peer-item-action">
                     <span className={`peer-dot ${isConnected ? 'on' : 'off'}`} />
                     <span className="peer-name">{p.name}</span>
                     <span className="peer-addr">
-                      {isConnected ? '已连接' : '离线'}
+                      {status}
                       {p.fingerprint ? ` · ${p.fingerprint.slice(0, 8)}` : ''}
                     </span>
+                    <button className="btn btn-ghost btn-sm" onClick={() => removePairing(p)}>
+                      取消配对
+                    </button>
                   </li>
                 );
               })}
@@ -252,6 +281,7 @@ export default function App() {
         <p className="hint">
           局域网剪贴板同步（mDNS 自动发现 + 强制交互式 SPAKE2 配对）。一方「生成配对码」，
           另一方在「局域网发现的设备」中点击「配对」并输入该码即可建立加密通道。
+          配对只需一次——之后重启会自动重连。
         </p>
       </main>
     </div>

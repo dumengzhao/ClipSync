@@ -10,7 +10,12 @@
 //!   * 另一方在「局域网发现的设备」中点击「配对」并输入该码 → 本端作为发起方用该码连接。
 //!   * 双方先交换 Hello（含身份/公钥），再用该码跑 SPAKE2 握手派生会话密钥，
 //!     并以 HMAC 校验确认两端使用同一口令；校验通过后把对端登记为「已配对」。
-//! - 已配对对端断线后，本端用之前缓存的口令自动重连（无需再次交互）。
+//! - 配对成功后双方各自派生同一个高熵 **link secret**（由会话密钥派生，不复用
+//!   用户看到的 6 位码），持久化到系统密钥链。此后重连一律用它当 SPAKE2 口令，
+//!   **重启也不需要再配对**。
+//! - 一个后台监控任务周期性巡检：凡是「已配对 + 已被发现 + 未连接」的对端，
+//!   立即发起重连。不依赖 mDNS 事件时序，因此进程重启、对端重启、网络抖动后
+//!   都能自愈。
 //! - 用 AES-GCM 加密通道传输剪贴板同步包（`SyncEnvelope`）。
 
 use std::collections::HashMap;
@@ -49,6 +54,12 @@ const MAX_PAIRING_ATTEMPTS: u32 = 24;
 
 /// 口令确认标签的域分隔串，避免该 HMAC 与其它用途的 MAC 混淆。
 const VERIFY_CONTEXT: &[u8] = b"clipsync-verify-v1";
+
+/// 长期重连口令（link secret）的派生域分隔串。
+const LINK_CONTEXT: &[u8] = b"clipsync-link-v1";
+
+/// 连接监控巡检间隔：每轮检查所有「已配对但未连接」的对端并尝试重连。
+const RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
 
 /// 握手阶段可区分的失败原因，供上层决定是否重试。
 #[derive(Debug)]
@@ -106,7 +117,8 @@ struct HelloPayload {
 pub struct ConnectionHub {
     identity: Arc<DeviceIdentity>,
     engine: Arc<SyncEngine>,
-    /// 已配对对端的口令缓存（key = device_id），用于断线后自动重连，无需再次交互。
+    /// 已配对对端的 **link secret**（key = device_id）：配对成功时由会话密钥派生，
+    /// 同时写入密钥链持久化。断线/重启后都用它当 SPAKE2 口令静默重连，无需再次交互。
     paired_codes: Mutex<HashMap<String, String>>,
     /// 当前「武装」的配对码（生成配对码后设置），应答方仅在武装状态下接受新配对。
     pending_code: Mutex<Option<(String, Instant)>>,
@@ -167,6 +179,33 @@ impl ConnectionHub {
 
     pub fn is_paired(&self, device_id: &str) -> bool {
         self.paired_codes.lock().unwrap().contains_key(device_id)
+    }
+
+    /// 启动时把磁盘上恢复出来的 link secret 装回内存，使已配对设备无需再次交互即可重连。
+    pub fn restore_paired(&self, secrets: HashMap<String, String>) {
+        if secrets.is_empty() {
+            return;
+        }
+        tracing::info!("已恢复 {} 台设备的配对状态", secrets.len());
+        self.paired_codes.lock().unwrap().extend(secrets);
+    }
+
+    /// 取消与某设备的配对：清掉 link secret 与持久化记录，并断开当前连接。
+    ///
+    /// 移除 `peers` 表项会 drop 该连接的发送端，加密循环随即结束——因此这里
+    /// 不需要额外的中断信号。
+    pub fn unpair(&self, device_id: &str) {
+        self.paired_codes.lock().unwrap().remove(device_id);
+        self.peers.lock().unwrap().remove(device_id);
+        if let Some(app) = self.app.lock().unwrap().clone() {
+            crate::device::store::delete_secret(&app, device_id);
+            let state = app.state::<AppState>();
+            state.registry.lock().remove(&DeviceId(device_id.to_string()));
+            let devices = state.registry.lock().list();
+            crate::device::store::save_devices(&app, &devices);
+            let _ = app.emit("peer-unpaired", device_id);
+        }
+        tracing::info!("已取消与 {device_id} 的配对");
     }
 
     /// 返回当前已建立加密通道的对端 device_id 集合（供前端挂载时主动查询一次）。
@@ -260,30 +299,59 @@ impl ConnectionHub {
             });
         }
 
-        // 3) 订阅 mDNS 发现事件：仅当对端已配对时才自动重连（强制交互式——
+        // 3) 订阅 mDNS 发现事件：仅当对端已配对时才自动连接（强制交互式——
         //    未配对对端必须用户在前端手动发起配对，绝不静默自动连接）。
+        //    这条路径只为「刚发现就立刻连上」的响应速度服务，可靠性由下面的监控任务兜底。
         {
             let hub = self.clone();
             app.listen("peer-discovered", move |event| {
-                let hub = hub.clone();
                 let payload = event.payload().to_string();
                 if let Ok(peer) = serde_json::from_str::<DiscoveredPeer>(&payload) {
-                    if !hub.is_paired(&peer.device_id) {
-                        return;
-                    }
-                    let key = format!("{}:{}", peer.addr, peer.port);
-                    let already = hub.peers.lock().unwrap().contains_key(&peer.device_id)
-                        || hub.connecting.lock().unwrap().contains(&key);
-                    if already {
-                        return;
-                    }
-                    let hub2 = hub.clone();
-                    tauri::async_runtime::spawn(async move {
-                        hub2.connect_to(peer, None).await;
-                    });
+                    hub.clone().spawn_reconnect_if_paired(peer);
                 }
             });
         }
+
+        // 4) 连接监控：周期巡检「已配对 + 已发现 + 未连接」的对端并重连。
+        //    不能只靠上面的发现事件——进程重启后 mDNS 可能早已把对端解析完毕、
+        //    不再重复推送，那样已配对设备会一直停在离线状态。
+        {
+            let hub = self.clone();
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(RECONNECT_INTERVAL).await;
+                    let peers: Vec<DiscoveredPeer> = {
+                        let state = app.state::<AppState>();
+                        let g = state.discovered.lock();
+                        g.values().cloned().collect()
+                    };
+                    for peer in peers {
+                        hub.clone().spawn_reconnect_if_paired(peer);
+                    }
+                }
+            });
+        }
+    }
+
+    /// 若对端已配对且当前既没连上、也没有正在进行的连接尝试，则后台发起一次重连。
+    ///
+    /// 幂等：重复调用（发现事件 + 定时巡检同时命中）不会产生并发连接，
+    /// 由 `connecting` 守卫按 `addr:port` 去重。
+    fn spawn_reconnect_if_paired(self: Arc<Self>, peer: DiscoveredPeer) {
+        if !self.is_paired(&peer.device_id) {
+            return;
+        }
+        if self.peers.lock().unwrap().contains_key(&peer.device_id) {
+            return;
+        }
+        let key = format!("{}:{}", peer.addr, peer.port);
+        if self.connecting.lock().unwrap().contains(&key) {
+            return;
+        }
+        tauri::async_runtime::spawn(async move {
+            self.reconnect_once(peer).await;
+        });
     }
 
     /// 用户在前端手动发起配对：作为发起方，使用用户输入的口令连接对端。
@@ -367,27 +435,20 @@ impl ConnectionHub {
             .await
     }
 
-    /// 主动连接一个已配对对端（作为 SPAKE2 发起方），断开后每 5 秒自动重连（持久循环）。
+    /// 对已配对对端发起**一次**连接尝试（作为 SPAKE2 发起方），用缓存的 link secret
+    /// 静默握手；连接建立后会一直跑到断开才返回。
     ///
-    /// `outgoing_code` 为本次发起携带的配对码；已配对对端重连时传 `None`，
-    /// 由 `run_connection` 改用缓存口令。
-    pub async fn connect_to(self: Arc<Self>, peer: DiscoveredPeer, outgoing_code: Option<String>) {
+    /// 这里刻意不做无限重连循环——重试统一由监控任务驱动。否则对端换了 IP 之后，
+    /// 旧循环会一直占着按 `addr:port` 建立的守卫空转，而它永远也连不上了。
+    async fn reconnect_once(self: Arc<Self>, peer: DiscoveredPeer) {
         let key = format!("{}:{}", peer.addr, peer.port);
-        {
-            let mut g = self.connecting.lock().unwrap();
-            if g.contains(&key) {
-                return;
-            }
-            g.insert(key.clone());
+        if !self.connecting.lock().unwrap().insert(key.clone()) {
+            return;
         }
-        loop {
-            match self.clone().connect_once(peer.clone(), outgoing_code.clone()).await {
-                Ok(()) => {}
-                Err(e) => tracing::warn!("peer {} connection ended: {e}", peer.device_name),
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            tracing::debug!("retrying connection to {}", peer.device_name);
+        if let Err(e) = self.clone().connect_once(peer.clone(), None).await {
+            tracing::debug!("与 {} 的连接结束：{e}", peer.device_name);
         }
+        self.connecting.lock().unwrap().remove(&key);
     }
 
     /// 处理一条已建立的 WebSocket 连接：Hello 交换 → 选口令 → SPAKE2 → HMAC 校验 →
@@ -424,26 +485,21 @@ impl ConnectionHub {
             anyhow::bail!("拒绝与自身建立连接");
         }
 
-        // 2) 选择口令
-        let pw = match role {
-            Role::Initiator => {
-                // 已配对对端重连 → 用缓存口令；否则必须使用本次发起携带的口令
-                self.paired_codes
-                    .lock()
-                    .unwrap()
-                    .get(&peer_id)
-                    .cloned()
-                    .or(outgoing_code.clone())
-                    .ok_or_else(|| anyhow::anyhow!("未提供配对码"))?
-            }
-            Role::Responder => {
-                // 已配对对端重连 → 用缓存口令（静默）；否则必须处于武装状态
-                if let Some(code) = self.paired_codes.lock().unwrap().get(&peer_id).cloned() {
-                    code
-                } else {
-                    self.is_armed()
-                        .ok_or_else(|| anyhow::anyhow!("对端未发起配对或本端未生成配对码"))?
-                }
+        // 2) 选择口令：已配对 → 用持久化的 link secret 静默重连（含重启后）；
+        //    未配对 → 必须是一次真实的交互配对（发起方带用户输入的码，应答方处于武装态）。
+        let cached = self.paired_codes.lock().unwrap().get(&peer_id).cloned();
+        let (pw, is_fresh_pairing) = match cached {
+            Some(secret) => (secret, false),
+            None => {
+                let code = match role {
+                    Role::Initiator => outgoing_code
+                        .clone()
+                        .ok_or_else(|| anyhow::anyhow!("未提供配对码"))?,
+                    Role::Responder => self
+                        .is_armed()
+                        .ok_or_else(|| anyhow::anyhow!("对端未发起配对或本端未生成配对码"))?,
+                };
+                (code, true)
             }
         };
 
@@ -496,25 +552,41 @@ impl ConnectionHub {
             return Err(HandshakeError::CodeMismatch.into());
         }
 
-        tracing::info!("paired with {} ({})", peer_name, peer_addr);
+        if is_fresh_pairing {
+            tracing::info!("paired with {} ({})", peer_name, peer_addr);
+        } else {
+            tracing::info!("reconnected to {} ({})", peer_name, peer_addr);
+        }
 
-        // 5) 登记为已配对：写注册表 + 缓存口令 + 通知前端
+        // 5) 登记为已配对：持久化 link secret + 写注册表并落盘 + 通知前端
         if let Some(app) = self.app.lock().unwrap().clone() {
             let pk = base64::engine::general_purpose::STANDARD
                 .decode(&peer_hello.public_key)
                 .map_err(|e| anyhow::anyhow!("bad peer public key: {e}"))?;
             let fingerprint = sha256_hex(&pk).get(..32).unwrap_or("").to_string();
-            app.state::<AppState>().registry.lock().add(PairedDevice {
+
+            // 只有**首次配对**才派生并保存 link secret。重连时会话密钥是用 link secret
+            // 本身派生的，若此时再派生一次并覆盖，两端一旦有一方保存失败就会永久失配。
+            if is_fresh_pairing {
+                let link = derive_link_secret(&key);
+                self.paired_codes
+                    .lock()
+                    .unwrap()
+                    .insert(peer_id.clone(), link.clone());
+                crate::device::store::store_secret(&app, &peer_id, &link);
+            }
+
+            let state = app.state::<AppState>();
+            state.registry.lock().add(PairedDevice {
                 device_id: DeviceId(peer_id.clone()),
                 device_name: peer_name.clone(),
                 fingerprint: fingerprint.clone(),
                 trust: TrustLevel::Verified,
                 last_seen: now_secs(),
             });
-            self.paired_codes
-                .lock()
-                .unwrap()
-                .insert(peer_id.clone(), pw.clone());
+            let devices = state.registry.lock().list();
+            crate::device::store::save_devices(&app, &devices);
+
             let _ = app.emit(
                 "peer-paired",
                 serde_json::json!({
@@ -541,14 +613,15 @@ impl ConnectionHub {
 
         // 6) 注册对端，进入加密同步循环
         let conn_id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
+        // 发送端**只**存放在 peers 表里（不在本地留 clone）：这样取消配对时
+        // 把表项一移除，tx 即被 drop，下面的 rx 立刻收到 None 并结束本连接。
         let (tx, mut rx) = mpsc::unbounded_channel::<SyncEnvelope>();
-        if let Some(old) = self.peers.lock().unwrap().insert(
-            peer_id.clone(),
-            Peer {
-                conn_id,
-                tx: tx.clone(),
-            },
-        ) {
+        if let Some(old) = self
+            .peers
+            .lock()
+            .unwrap()
+            .insert(peer_id.clone(), Peer { conn_id, tx })
+        {
             tracing::debug!(
                 "与 {peer_name} 的连接 #{} 已被新连接 #{conn_id} 取代",
                 old.conn_id
@@ -690,6 +763,21 @@ fn verify_tag(key: &[u8; 32], device_id: &str) -> Vec<u8> {
     mac.finalize().into_bytes().to_vec()
 }
 
+/// 派生长期重连口令：`hex(HMAC(session_key, LINK_CONTEXT))`。
+///
+/// 两端会话密钥相同 → 派生结果必然相同，因此双方无需再交换任何东西即可各自
+/// 保存同一个口令。用它替代用户输入的 6 位码有两点好处：熵高得多（256 bit
+/// 而非 20 bit），且用户可见的配对码不会变成长期凭据。
+fn derive_link_secret(key: &[u8; 32]) -> String {
+    let mut mac = HmacSha256::new_from_slice(key).expect("hmac accepts 32-byte key");
+    mac.update(LINK_CONTEXT);
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
+}
+
 /// 定长常量时间比较，避免通过比较耗时泄漏标签前缀信息。
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
@@ -751,6 +839,36 @@ mod tests {
             &verify_tag(&k_a, "device-a"),
             &verify_tag(&k_b, "device-a")
         ));
+    }
+
+    /// 两端必须从各自算出的会话密钥派生出**同一个** link secret，
+    /// 否则重启后一方用 A、另一方用 B，静默重连会永远失败。
+    #[test]
+    fn link_secret_matches_on_both_sides() {
+        let pw = "482913";
+        let init = start_initiator(pw);
+        let resp = start_responder(pw);
+        let init_msg = init.message.clone();
+        let k_a = derive_session_key(&init.finish(&resp.message).unwrap()).unwrap();
+        let k_b = derive_session_key(&resp.finish(&init_msg).unwrap()).unwrap();
+
+        let link_a = derive_link_secret(&k_a);
+        let link_b = derive_link_secret(&k_b);
+        assert_eq!(link_a, link_b);
+        // 应为 32 字节 HMAC 的十六进制，且不得等于用户输入的配对码
+        assert_eq!(link_a.len(), 64);
+        assert_ne!(link_a, pw);
+    }
+
+    /// link secret 必须与口令确认标签互不相同，避免把校验值当长期凭据外泄。
+    #[test]
+    fn link_secret_differs_from_verify_tag() {
+        let key = [7u8; 32];
+        let tag_hex: String = verify_tag(&key, "")
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        assert_ne!(derive_link_secret(&key), tag_hex);
     }
 
     #[test]
