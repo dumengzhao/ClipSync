@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use secret_service::{EncryptionType, SecretService};
+use dbus_secret_service::{EncryptionType, SecretService};
 
 pub fn store(service: &str, account: &str, data: &[u8]) -> Result<(), String> {
     let service_api = SecretService::connect(EncryptionType::Dh)
@@ -19,7 +19,7 @@ pub fn store(service: &str, account: &str, data: &[u8]) -> Result<(), String> {
     attributes.insert("account", account);
 
     collection
-        .create_item(account, attributes, data, true)
+        .create_item(account, attributes, data, true, "application/octet-stream")
         .map_err(|e| format!("create item failed: {e}"))?;
 
     Ok(())
