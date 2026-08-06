@@ -43,10 +43,24 @@ fn default_pairing_code() -> String {
     "000000".to_string()
 }
 
+/// 默认设备名取本机机器名（hostname），使不同设备默认即可区分。
+/// 取不到（或为空）时回退到固定占位名，避免空名称。
+pub fn default_device_name() -> String {
+    let host = gethostname::gethostname().to_string_lossy().trim().to_string();
+    if host.is_empty() {
+        "ClipSync-Device".to_string()
+    } else {
+        host
+    }
+}
+
+/// 旧版默认设备名（写死的占位串）。用于识别并迁移历史配置。
+pub const LEGACY_DEFAULT_DEVICE_NAME: &str = "ClipSync-Device";
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            device_name: "ClipSync-Device".to_string(),
+            device_name: default_device_name(),
             auto_start: true,
             sync_text: true,
             sync_image: true,

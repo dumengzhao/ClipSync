@@ -65,6 +65,7 @@ parking_lot = "0.12"
 crossbeam-channel = "0.5"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
+gethostname = "0.5"
 
 # Windows-specific
 [target.'cfg(target_os = "windows")'.dependencies]

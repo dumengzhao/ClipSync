@@ -28,6 +28,9 @@ use std::net::{IpAddr, UdpSocket};
 #[cfg(feature = "mdns")]
 use tauri::{Emitter, Manager};
 
+#[cfg(feature = "mdns")]
+use crate::AppState;
+
 /// 局域网发现控制器
 ///
 /// 内部用 `Mutex<Option<ServiceDaemon>>` 持有 mDNS 守护进程，支持启动 / 重新配置 / 关停。
@@ -75,10 +78,17 @@ impl MdnsDiscovery {
         // 取本机用于访问外网的 IPv4 作为广播地址；离线时退化为回环地址（无害）
         let ip = local_ipv4().unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
 
-        // TXT 记录携带设备标识；端口不在此写死，由对端从 SRV 记录读取
+        // TXT 记录携带设备标识；端口不在此写死，由对端从 SRV 记录读取。
+        // 设备名取运行时配置（默认即本机机器名），改名后重广播即生效。
+        let device_name = app
+            .state::<AppState>()
+            .config
+            .lock()
+            .device_name
+            .clone();
         let mut props = HashMap::new();
         props.insert("device_id".to_string(), identity.id.0.clone());
-        props.insert("device_name".to_string(), identity.name.clone());
+        props.insert("device_name".to_string(), device_name);
 
         // host 必须以 `.local.` 结尾，否则 mdns-sd 拒绝注册
         let host = format!("{instance}.local.");
