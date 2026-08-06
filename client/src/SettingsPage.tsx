@@ -117,6 +117,17 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         />
       </div>
 
+      <div className="section">文件同步</div>
+      <div className="row">
+        <label>文件同步目录（留空则用系统下载目录）</label>
+        <input
+          type="text"
+          placeholder="例如 D:/ClipSync 或 /home/user/ClipSync"
+          value={cfg.sync_dir ?? ''}
+          onChange={(e) => update('sync_dir', e.target.value)}
+        />
+      </div>
+
       <div className="section">缓存</div>
       <div className="row">
         <label>文件缓存有效期 (小时)</label>

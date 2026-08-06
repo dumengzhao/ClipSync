@@ -10,6 +10,8 @@ use crate::device::identity::DeviceIdentity;
 use crate::sync::anti_loop::{content_hash, AntiLoop};
 use anyhow::Result;
 use serde::Serialize;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
@@ -20,6 +22,11 @@ pub enum SyncEvent {
         /// 本次写出的同步标记（含 sync_id / device_id / lamport / 内容哈希）
         mark: SyncMark,
         content: ClipboardContent,
+    },
+    /// 本地拷贝了文件/目录：携带绝对路径（仅本端使用，绝不外传），
+    /// 由传输层广播「可拉取」清单给对端，而非把路径塞进远端剪贴板。
+    LocalFilesCopied {
+        paths: Vec<PathBuf>,
     },
 }
 
@@ -71,6 +78,11 @@ pub struct SyncEngine {
     signal_tx: tokio::sync::broadcast::Sender<()>,
     event_tx: tokio::sync::broadcast::Sender<SyncEvent>,
     last_emitted: Arc<Mutex<Option<String>>>,
+    /// 最近一次本地文件拷贝的路径哈希，避免轮询式监听（Linux）重复广播同一份 Offer。
+    last_file_hash: Arc<Mutex<Option<String>>>,
+    /// 程序化写剪贴板（拉取完成后自动粘贴）期间置位，抑制由此引发的「文件拷贝」误判，
+    /// 否则会触发新一轮 Offer 广播，形成回环。用 `Arc` 包裹以便克隆进常驻监听任务。
+    file_offer_suppressed: Arc<AtomicBool>,
 }
 
 impl SyncEngine {
@@ -84,6 +96,8 @@ impl SyncEngine {
             signal_tx,
             event_tx,
             last_emitted: Arc::new(Mutex::new(None)),
+            last_file_hash: Arc::new(Mutex::new(None)),
+            file_offer_suppressed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -97,6 +111,12 @@ impl SyncEngine {
     /// 所有剪贴板读写都必须走它，不要另建临时实例——原因见 `clipboard` 字段注释。
     pub fn clipboard(&self) -> Arc<PlatformClipboard> {
         self.clipboard.clone()
+    }
+
+    /// 拉取完成后自动写剪贴板前调用：置位抑制标志，避免「自动写」被本地监听误判为
+    /// 一次新的文件拷贝，进而触发 Offer 回环广播。
+    pub fn set_file_offer_suppressed(&self, v: bool) {
+        self.file_offer_suppressed.store(v, Ordering::SeqCst);
     }
 
     /// 启动引擎：开始监听剪贴板并将变化广播为 Tauri 事件
@@ -118,6 +138,8 @@ impl SyncEngine {
         let identity = self.identity.clone();
         let event_tx = self.event_tx.clone();
         let last_emitted = self.last_emitted.clone();
+        let last_file_hash = self.last_file_hash.clone();
+        let file_offer_suppressed = self.file_offer_suppressed.clone();
         let clipboard = self.clipboard.clone();
         tauri::async_runtime::spawn(async move {
             loop {
@@ -132,6 +154,35 @@ impl SyncEngine {
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
+                // 1) 先探测文件/目录拷贝：拿到绝对路径后广播「可拉取」清单，
+                //    绝不把路径塞进远端剪贴板（对端无此路径无意义）。
+                if let Ok(paths) = clipboard.read_file_paths().await {
+                    if !paths.is_empty() {
+                        if file_offer_suppressed.load(Ordering::SeqCst) {
+                            // 本次是「拉取完成后自动写剪贴板」触发的，抑制回环
+                            file_offer_suppressed.store(false, Ordering::SeqCst);
+                        } else {
+                            let h = file_paths_hash(&paths);
+                            let should_emit = {
+                                let mut g = last_file_hash.lock().unwrap();
+                                if g.as_ref() == Some(&h) {
+                                    false
+                                } else {
+                                    *g = Some(h);
+                                    true
+                                }
+                            };
+                            if should_emit {
+                                let _ = event_tx.send(SyncEvent::LocalFilesCopied { paths });
+                            }
+                        }
+                        continue;
+                    } else {
+                        // 剪贴板不再是文件：清空哈希，下次文件拷贝可重新触发
+                        *last_file_hash.lock().unwrap() = None;
+                    }
+                }
+                // 2) 文本/图片（原有逻辑）
                 let content = match clipboard.read().await {
                     Ok(c) => c,
                     Err(e) => {
@@ -176,10 +227,11 @@ impl SyncEngine {
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 };
-                let SyncEvent::LocalClipboardChanged { mark, content } = ev;
-                let payload =
-                    ClipboardChangedPayload::from_content(&mark.sync_id, &mark.device_id, &content);
-                let _ = app_handle.emit("clipboard-changed", payload);
+                if let SyncEvent::LocalClipboardChanged { mark, content } = ev {
+                    let payload =
+                        ClipboardChangedPayload::from_content(&mark.sync_id, &mark.device_id, &content);
+                    let _ = app_handle.emit("clipboard-changed", payload);
+                }
             }
         });
 
@@ -194,6 +246,12 @@ impl SyncEngine {
         {
             let mut g = self.last_emitted.lock().unwrap();
             *g = Some(content_hash(&content));
+        }
+        // 文件/目录走「可拉取清单 + 按需下载」模型，不经剪贴板镜像（对端无此绝对路径）。
+        // 这里理论上不会收到 `Files`（走的是 Offer/拉取流程），作防御性跳过。
+        if matches!(content, ClipboardContent::Files(_)) {
+            tracing::debug!("忽略经 Sync 通道到达的文件内容（应使用文件拉取流程）");
+            return;
         }
         let kind = content_kind(&content);
         // 用常驻实例写入：X11/Wayland 下临时实例被 Drop 会立即失去 selection 所有权，
@@ -213,4 +271,14 @@ fn content_kind(content: &ClipboardContent) -> &'static str {
         ClipboardContent::Files(_) => "files",
         ClipboardContent::Html { .. } => "html",
     }
+}
+
+/// 对一组路径排序后求哈希，用于判断「是否同一份文件拷贝」，避免轮询式监听重复广播。
+fn file_paths_hash(paths: &[PathBuf]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut sorted: Vec<String> = paths.iter().map(|p| p.to_string_lossy().to_string()).collect();
+    sorted.sort();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    sorted.hash(&mut hasher);
+    format!("{:x}", hasher.finish())
 }

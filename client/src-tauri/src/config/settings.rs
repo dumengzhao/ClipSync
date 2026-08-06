@@ -23,6 +23,10 @@ pub struct AppConfig {
     pub sync_primary_selection: bool,
     pub cache_ttl_hours: u32,
     pub theme: Theme,
+    /// 文件同步落盘目录（各端自选）。为空时回退到系统「下载」目录。
+    /// 对端点击「拉取」后，文件下载到 `<sync_dir>/<对方设备名>/<相对路径>`。
+    #[serde(default)]
+    pub sync_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +77,7 @@ impl Default for AppConfig {
             manual_addresses: Vec::new(),
             sync_primary_selection: false,
             cache_ttl_hours: 24,
+            sync_dir: None,
             theme: Theme::System,
         }
     }

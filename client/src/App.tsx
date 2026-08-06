@@ -10,8 +10,11 @@ import {
   getPendingPairing,
   pairWith,
   unpair,
+  listPendingOffers,
+  pullFiles,
   type DiscoveredPeer,
   type PairedDeviceInfo,
+  type PendingOffer,
 } from './api/tauri';
 import SettingsPage from './SettingsPage';
 
@@ -33,6 +36,14 @@ export default function App() {
   const [pairingTarget, setPairingTarget] = useState<DiscoveredPeer | null>(null);
   const [pairInput, setPairInput] = useState('');
   const [msg, setMsg] = useState('');
+  // 「待拉取」文件清单（对端拷贝后广播过来，本端显示，用户点「拉取」才下载）
+  const [pendingOffers, setPendingOffers] = useState<PendingOffer[]>([]);
+  // 正在拉取中的传输 ID 集合（拉取中禁用按钮、显示「拉取中…」）
+  const [pulling, setPulling] = useState<Set<string>>(new Set());
+  // 已完成的拉取结果：transfer_id -> 落盘目录与文件数，供用户在主页查看下载位置
+  const [pullResults, setPullResults] = useState<
+    Record<string, { device_name: string; target_dir: string; file_count: number }>
+  >({});
 
   const flash = (m: string) => {
     setMsg(m);
@@ -51,6 +62,43 @@ export default function App() {
       .then((ids) => setConnected(new Set(ids)))
       .catch(() => {});
     getPendingPairing().then(setPendingCode).catch(() => {});
+    // 待拉取清单：挂载时主动查一次（兜底事件丢失），并实时订阅对端广播
+    listPendingOffers().then(setPendingOffers).catch(() => {});
+
+    // 对端拷贝文件后广播「待拉取」；本端点击拉取后收到开始/完成事件
+    const unlistenFileOffer = listen<PendingOffer>('file-offer', (e) => {
+      setPendingOffers((prev) => {
+        if (prev.some((o) => o.transfer_id === e.payload.transfer_id)) return prev;
+        return [...prev, e.payload];
+      });
+    });
+    const unlistenPullStart = listen<{ transfer_id: string }>(
+      'file-pull-start',
+      (e) => {
+        setPulling((prev) => new Set(prev).add(e.payload.transfer_id));
+      },
+    );
+    const unlistenPullComplete = listen<{
+      transfer_id: string;
+      device_name: string;
+      target_dir: string;
+      file_count: number;
+    }>('file-pull-complete', (e) => {
+      setPulling((prev) => {
+        const n = new Set(prev);
+        n.delete(e.payload.transfer_id);
+        return n;
+      });
+      setPullResults((prev) => ({
+        ...prev,
+        [e.payload.transfer_id]: {
+          device_name: e.payload.device_name,
+          target_dir: e.payload.target_dir,
+          file_count: e.payload.file_count,
+        },
+      }));
+      flash(`已从「${e.payload.device_name}」拉取 ${e.payload.file_count} 个文件`);
+    });
 
     // 实时订阅局域网发现 / 配对 / 连接状态
     const unlistenDiscovered = listen<DiscoveredPeer>('peer-discovered', (e) => {
@@ -113,6 +161,9 @@ export default function App() {
       unlistenPaired.then((u) => u());
       unlistenFailed.then((u) => u());
       unlistenUnpaired.then((u) => u());
+      unlistenFileOffer.then((u) => u());
+      unlistenPullStart.then((u) => u());
+      unlistenPullComplete.then((u) => u());
     };
   }, []);
 
@@ -158,6 +209,31 @@ export default function App() {
       flash(`已取消与「${p.name}」的配对`);
     } catch (e) {
       flash('取消配对失败: ' + String(e));
+    }
+  };
+
+  /// 把字节数格式化为可读字符串（B / KB / MB / GB）
+  const fmtSize = (n: number): string => {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+    return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  };
+
+  /// 点击「拉取」：向对端请求文件，本端下载到 sync_dir，完成后自动写本机剪贴板。
+  const doPull = async (transferId: string) => {
+    setPulling((prev) => new Set(prev).add(transferId));
+    try {
+      await pullFiles(transferId);
+      // 后端收到请求后会把该 transfer 从待拉取清单移除，这里同步清掉前端展示
+      setPendingOffers((prev) => prev.filter((o) => o.transfer_id !== transferId));
+    } catch (e) {
+      setPulling((prev) => {
+        const n = new Set(prev);
+        n.delete(transferId);
+        return n;
+      });
+      flash('拉取失败: ' + String(e));
     }
   };
 
@@ -272,6 +348,51 @@ export default function App() {
             生成配对码
           </button>
         </section>
+
+        <section className="peers">
+          <h2>待拉取文件</h2>
+          {pendingOffers.length === 0 ? (
+            <p className="hint">还没有待拉取的文件。当对端拷贝文件/图片后，会出现在这里</p>
+          ) : (
+            <ul className="peer-list">
+              {pendingOffers.map((o) => {
+                const isPulling = pulling.has(o.transfer_id);
+                return (
+                  <li key={o.transfer_id} className="peer-item peer-item-action">
+                    <span className="peer-name">{o.device_name || o.device_id}</span>
+                    <span className="peer-addr">
+                      {o.files.length} 个文件 · {fmtSize(o.total_size)}
+                    </span>
+                    {isPulling ? (
+                      <span className="peer-addr">拉取中…</span>
+                    ) : (
+                      <button className="btn btn-sm" onClick={() => doPull(o.transfer_id)}>
+                        拉取
+                      </button>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
+
+        {Object.keys(pullResults).length > 0 && (
+          <section className="peers">
+            <h2>已拉取的文件</h2>
+            <ul className="peer-list">
+              {Object.entries(pullResults).map(([tid, r]) => (
+                <li key={tid} className="peer-item">
+                  <span className="peer-name">{r.device_name}</span>
+                  <span className="peer-addr">
+                    已保存 {r.file_count} 个文件到：{r.target_dir}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <p className="hint">完成后文件已自动写入本机剪贴板，直接 Ctrl+V 即可粘贴到目标位置</p>
+          </section>
+        )}
 
         {msg && <div className="msg">{msg}</div>}
 

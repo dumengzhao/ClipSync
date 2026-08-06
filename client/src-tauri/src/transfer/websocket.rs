@@ -3,8 +3,9 @@
 //! 二进制帧首字节区分消息类型：信令 JSON / 文件分片请求(Bincode) / 文件分片响应 / 心跳。
 //! 连接管理（connect / listen，基于 tokio-tungstenite）为阶段二实现，见模块底部说明。
 
+use crate::clipboard::types::FileMeta;
 use crate::error::TransferError;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// 消息类型（二进制帧首字节）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +22,10 @@ pub enum MessageType {
     Hello = 0x06,
     /// 配对校验帧：携带 HMAC-SHA256(会话密钥, 对端 device_id)，用于确认两端使用同一口令。
     Verify = 0x07,
+    /// 加密文件传输包：payload = [12 字节 nonce][AES-GCM 密文]，明文为 bincode 序列化的
+    /// `FileFrame`（文件清单 / 拉取请求 / 分片）。与 `Sync` 共用同一会话密钥，确保
+    /// 文件名、大小、内容均不在局域网裸奔。
+    File = 0x08,
 }
 
 impl MessageType {
@@ -30,11 +35,50 @@ impl MessageType {
             0x02 => Some(Self::FileChunkRequest),
             0x03 => Some(Self::FileChunkResponse),
             0x04 => Some(Self::Heartbeat),
+            0x05 => Some(Self::Sync),
             0x06 => Some(Self::Hello),
             0x07 => Some(Self::Verify),
+            0x08 => Some(Self::File),
             _ => None,
         }
     }
+}
+
+/// 文件传输控制 / 数据帧（加密前 / 解密后的明文，bincode 序列化）
+///
+/// 一条连接上文件收发共用此枚举，由 `run_connection` 按角色路由：
+/// - 发送方（拷贝者）广播 `Offer`、收到 `PullRequest` 后流式发 `Chunk`、结束发 `Complete`；
+/// - 接收方（拉取者）收到 `Offer` 入「待拉取」列表、点拉取发 `PullRequest`、
+///   收到 `Chunk` 落盘、`Complete` 收尾后自动写本机剪贴板。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum FileFrame {
+    /// 发送方广播「我这里有这些文件可拉取」。本地绝对路径**不**进此结构，仅发元数据。
+    Offer {
+        transfer_id: String,
+        device_id: String,
+        device_name: String,
+        files: Vec<FileMeta>,
+    },
+    /// 接收方请求拉取（file_indices 为 `Offer.files` 的下标，目前恒为全部）。
+    PullRequest {
+        transfer_id: String,
+        file_indices: Vec<usize>,
+    },
+    /// 任一方取消传输。
+    PullCancel { transfer_id: String },
+    /// 发送方通知：所有分片已发完。
+    Complete { transfer_id: String },
+    /// 单块文件数据。offset 为文件内偏移，接收方按 file_index+offset 顺序落盘。
+    Chunk(FileChunkResponsePayload),
+}
+
+/// 文件分片载荷（bincode 序列化后随 `FileFrame::Chunk` 加密传输）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileChunkResponsePayload {
+    pub transfer_id: String,
+    pub file_index: usize,
+    pub offset: u64,
+    pub data: Vec<u8>,
 }
 
 /// 消息帧：类型标签 + 载荷

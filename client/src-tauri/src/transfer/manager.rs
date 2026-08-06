@@ -23,6 +23,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
@@ -35,7 +36,8 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
-use crate::clipboard::types::{ClipboardContent, DeviceId, SyncMark};
+use crate::clipboard::types::{ClipboardContent, DeviceId, FileMeta, SyncMark};
+use crate::clipboard::ClipboardProvider;
 use crate::crypto::aead::{decrypt, encrypt};
 use crate::crypto::kdf::{derive_session_keys, split_keys};
 use crate::crypto::pake::{generate_pairing_code as gen_code, start_initiator, start_responder};
@@ -43,8 +45,9 @@ use crate::device::identity::DeviceIdentity;
 use crate::device::registry::{PairedDevice, TrustLevel};
 use crate::discovery::DiscoveredPeer;
 use crate::sync::engine::{SyncEngine, SyncEvent};
-use crate::transfer::websocket::{MessageFrame, MessageType};
+use crate::transfer::websocket::{FileChunkResponsePayload, FileFrame, MessageFrame, MessageType};
 use crate::AppState;
+use std::path::PathBuf;
 
 /// 配对码「武装」后的有效时长。过期后未完成的配对自动失效，需重新生成。
 const PAIRING_ARM_TIMEOUT: Duration = Duration::from_secs(120);
@@ -94,13 +97,47 @@ enum Role {
 /// 连接序号发生器，用于区分同一对端的新旧连接。
 static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 
-/// 单个已连接对端（用于把本地剪贴板变化转发给它）
+/// 经由本连接出站的消息。两类都经会话密钥 AES-GCM 加密后发出：
+/// - `Sync`：剪贴板内容信封（文本/图片）
+/// - `File`：文件传输帧（清单/拉取请求/分片），见 `FileFrame`
+enum Outgoing {
+    Sync(SyncEnvelope),
+    File(FileFrame),
+}
+
+/// 单个已连接对端（用于把本地剪贴板变化 / 文件帧转发给它）
 #[derive(Clone)]
 struct Peer {
     /// 本条连接的唯一序号。清理时据此判断表中登记的是否仍是自己，
     /// 避免**已过期的旧连接把刚建立的新连接从表里删掉**（那会导致本机只收不发）。
     conn_id: u64,
-    tx: mpsc::UnboundedSender<SyncEnvelope>,
+    tx: mpsc::UnboundedSender<Outgoing>,
+}
+
+/// 本端作为「发送方」（拷贝者）时保存的一次传输：仅本端持有本地绝对路径，绝不外传。
+#[derive(Clone)]
+struct OfferState {
+    device_name: String,
+    files: Vec<FileMeta>,
+    local_paths: Vec<PathBuf>,
+}
+
+/// 本端作为「接收方」收到的待拉取清单（由对端 `Offer` 填入，不含本地路径）。
+#[derive(Clone)]
+struct PendingOffer {
+    transfer_id: String,
+    device_id: String,
+    device_name: String,
+    files: Vec<FileMeta>,
+}
+
+/// 本端正在拉取的传输：写入任务通过 `chunk_tx` 接收分片，最终自动写本机剪贴板。
+struct PullState {
+    chunk_tx: tokio::sync::mpsc::Sender<Option<FileChunkResponsePayload>>,
+    target_dir: PathBuf,
+    files: Vec<FileMeta>,
+    device_id: String,
+    total_bytes: u64,
 }
 
 /// Hello 握手帧：在 SPAKE2 之前交换身份，用于应答方在已知对端身份的前提下选择口令
@@ -126,7 +163,15 @@ pub struct ConnectionHub {
     peers: Mutex<HashMap<String, Peer>>,
     /// 正在发起连接的对端地址集合，避免重复连接（key = addr:port）
     connecting: Mutex<HashSet<String>>,
-    /// 应用句柄（用于广播连接状态事件 / 写注册表）
+    /// 本端作为发送方的活动传输（transfer_id -> 本地文件清单 + 绝对路径）
+    active_offers: Mutex<HashMap<String, OfferState>>,
+    /// 本端作为接收方收到的待拉取清单（transfer_id -> 对端 offer）
+    pending_offers: Mutex<HashMap<String, PendingOffer>>,
+    /// 本端正在拉取的传输（transfer_id -> 写入通道 + 落盘目录 + 进度）
+    active_pulls: Mutex<HashMap<String, PullState>>,
+    /// 文件分片大小（字节）
+    chunk_size: usize,
+    /// 应用句柄（用于广播连接状态事件 / 写注册表 / 解析下载目录）
     app: Mutex<Option<AppHandle>>,
 }
 
@@ -139,6 +184,10 @@ impl ConnectionHub {
             pending_code: Mutex::new(None),
             peers: Mutex::new(HashMap::new()),
             connecting: Mutex::new(HashSet::new()),
+            active_offers: Mutex::new(HashMap::new()),
+            pending_offers: Mutex::new(HashMap::new()),
+            active_pulls: Mutex::new(HashMap::new()),
+            chunk_size: 256 * 1024, // 256 KiB/片
             app: Mutex::new(None),
         })
     }
@@ -213,6 +262,428 @@ impl ConnectionHub {
         self.peers.lock().unwrap().keys().cloned().collect()
     }
 
+    /// 当前接收到的「待拉取」文件清单快照（前端挂载时查询一次，兜底事件丢失）。
+    pub fn pending_offers_snapshot(&self) -> Vec<serde_json::Value> {
+        self.pending_offers
+            .lock()
+            .unwrap()
+            .values()
+            .map(|o| {
+                serde_json::json!({
+                    "transfer_id": o.transfer_id,
+                    "device_id": o.device_id,
+                    "device_name": o.device_name,
+                    "files": o.files.iter().map(|f| serde_json::json!({
+                        "file_name": f.file_name,
+                        "file_size": f.file_size,
+                        "is_dir": f.is_dir,
+                        "relative_path": f.relative_path,
+                    })).collect::<Vec<_>>(),
+                    "total_size": o.files.iter().map(|f| f.file_size).sum::<u64>(),
+                })
+            })
+            .collect()
+    }
+
+    /// 解析文件同步落盘目录：配置优先，否则回退系统下载目录。
+    fn resolve_sync_dir(&self, app: Option<&AppHandle>) -> PathBuf {
+        let configured = app.and_then(|a| a.state::<AppState>().config.lock().sync_dir.clone());
+        if let Some(dir) = configured {
+            if !dir.trim().is_empty() {
+                return PathBuf::from(dir.trim());
+            }
+        }
+        if let Some(a) = app {
+            if let Ok(dir) = a.path().download_dir() {
+                return dir;
+            }
+        }
+        PathBuf::from("Downloads")
+    }
+
+    /// 本地拷贝了文件/目录：生成传输 ID，展开为文件清单，向所有已连接对端广播「可拉取」。
+    ///
+    /// 绝对路径**只留在本端** `active_offers`，从不进网络；对端仅收到 `FileMeta` 元数据。
+    pub fn offer_local_files(&self, paths: Vec<PathBuf>) {
+        let existing: Vec<PathBuf> = paths.into_iter().filter(|p| p.exists()).collect();
+        if existing.is_empty() {
+            return;
+        }
+        let root = Self::common_root(&existing);
+        let mut files: Vec<FileMeta> = Vec::new();
+        let mut local_paths: Vec<PathBuf> = Vec::new();
+        for p in &existing {
+            if p.is_dir() {
+                // 目录：递归展开为其中的文件（保留相对结构）
+                if let Ok(entries) = std::fs::read_dir(p) {
+                    for e in entries.flatten() {
+                        let child = e.path();
+                        if child.is_file() {
+                            if let Some(meta) = Self::build_file_meta(&child, &root) {
+                                local_paths.push(child);
+                                files.push(meta);
+                            }
+                        }
+                    }
+                }
+            } else if p.is_file() {
+                if let Some(meta) = Self::build_file_meta(p, &root) {
+                    local_paths.push(p.clone());
+                    files.push(meta);
+                }
+            }
+        }
+        if files.is_empty() {
+            return;
+        }
+        let transfer_id = Uuid::new_v4().to_string();
+        let my_id = self.identity.id.0.clone();
+        let my_name = self.identity.name.clone();
+        self.active_offers.lock().unwrap().insert(
+            transfer_id.clone(),
+            OfferState {
+                device_name: my_name.clone(),
+                files: files.clone(),
+                local_paths,
+            },
+        );
+        let peers = self.peers.lock().unwrap().clone();
+        if peers.is_empty() {
+            tracing::warn!("本地拷贝了文件，但当前没有已连接对端，未广播可拉取清单");
+            return;
+        }
+        let frame = FileFrame::Offer {
+            transfer_id: transfer_id.clone(),
+            device_id: my_id,
+            device_name: my_name,
+            files,
+        };
+        for (id, p) in &peers {
+            if p.tx.send(Outgoing::File(frame.clone())).is_err() {
+                tracing::warn!("对端 {id} 发送通道关闭，可拉取清单未送达");
+            }
+        }
+        tracing::info!("已广播文件可拉取清单 {transfer_id} 给 {} 个对端", peers.len());
+    }
+
+    /// 处理对端发来的文件帧（按角色路由：发送方流式发片，接收方落盘）。
+    pub async fn handle_file_frame(
+        self: Arc<Self>,
+        ff: FileFrame,
+        tx: &mpsc::UnboundedSender<Outgoing>,
+        _peer_id: &str,
+    ) {
+        match ff {
+            FileFrame::Offer {
+                transfer_id,
+                device_id,
+                device_name,
+                files,
+            } => {
+                if device_id == self.identity.id.0 {
+                    return; // 忽略自己
+                }
+                self.pending_offers.lock().unwrap().insert(
+                    transfer_id.clone(),
+                    PendingOffer {
+                        transfer_id: transfer_id.clone(),
+                        device_id: device_id.clone(),
+                        device_name: device_name.clone(),
+                        files: files.clone(),
+                    },
+                );
+                if let Some(app) = self.app.lock().unwrap().clone() {
+                    let _ = app.emit(
+                        "file-offer",
+                        serde_json::json!({
+                            "transfer_id": transfer_id,
+                            "device_id": device_id,
+                            "device_name": device_name,
+                            "files": files.iter().map(|f| serde_json::json!({
+                                "file_name": f.file_name,
+                                "file_size": f.file_size,
+                                "is_dir": f.is_dir,
+                                "relative_path": f.relative_path,
+                            })).collect::<Vec<_>>(),
+                            "total_size": files.iter().map(|f| f.file_size).sum::<u64>(),
+                        }),
+                    );
+                }
+            }
+            FileFrame::PullRequest {
+                transfer_id,
+                file_indices,
+            } => {
+                // 本端是发送方：流式读取本地文件并发片
+                let offer = self.active_offers.lock().unwrap().get(&transfer_id).cloned();
+                let Some(offer) = offer else {
+                    tracing::warn!("收到拉取请求但本端没有该传输 {transfer_id}");
+                    return;
+                };
+                let tx = tx.clone();
+                let chunk_size = self.chunk_size;
+                tauri::async_runtime::spawn(async move {
+                    for &idx in &file_indices {
+                        if idx >= offer.local_paths.len() {
+                            continue;
+                        }
+                        let path = &offer.local_paths[idx];
+                        if let Ok(mut file) = tokio::fs::File::open(path).await {
+                            use tokio::io::AsyncReadExt;
+                            let mut offset: u64 = 0;
+                            let mut buf = vec![0u8; chunk_size];
+                            loop {
+                                match file.read(&mut buf).await {
+                                    Ok(0) => break,
+                                    Ok(n) => {
+                                        let data = buf[..n].to_vec();
+                                        if tx
+                                            .send(Outgoing::File(FileFrame::Chunk(
+                                                FileChunkResponsePayload {
+                                                    transfer_id: transfer_id.clone(),
+                                                    file_index: idx,
+                                                    offset,
+                                                    data,
+                                                },
+                                            )))
+                                            .is_err()
+                                        {
+                                            return;
+                                        }
+                                        offset += n as u64;
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("读文件失败 {}: {e}", path.display());
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let _ = tx.send(Outgoing::File(FileFrame::Complete {
+                        transfer_id: transfer_id.clone(),
+                    }));
+                    tracing::info!("传输 {transfer_id} 分片发送完毕");
+                });
+            }
+            FileFrame::PullCancel { transfer_id } => {
+                self.active_offers.lock().unwrap().remove(&transfer_id);
+                self.active_pulls.lock().unwrap().remove(&transfer_id);
+            }
+            FileFrame::Complete { transfer_id } => {
+                let tx_opt = self
+                    .active_pulls
+                    .lock()
+                    .unwrap()
+                    .get(&transfer_id)
+                    .map(|s| s.chunk_tx.clone());
+                if let Some(ctx) = tx_opt {
+                    let _ = ctx.send(None).await;
+                }
+            }
+            FileFrame::Chunk(payload) => {
+                let tx_opt = self
+                    .active_pulls
+                    .lock()
+                    .unwrap()
+                    .get(&payload.transfer_id)
+                    .map(|s| s.chunk_tx.clone());
+                if let Some(ctx) = tx_opt {
+                    if ctx.send(Some(payload)).await.is_err() {
+                        tracing::warn!("写盘任务已退出，丢弃分片");
+                    }
+                } else {
+                    tracing::warn!("收到未知传输的分片 {}", payload.transfer_id);
+                }
+            }
+        }
+    }
+
+    /// 接收方点击「拉取」：建立落盘任务、发拉取请求，分片到位后写入 `sync_dir`，
+    /// 完成后自动把下载路径写进本机剪贴板（用户直接 Ctrl+V 即可粘贴）。
+    pub async fn pull_files(self: Arc<Self>, transfer_id: String) {
+        let offer = {
+            let mut g = self.pending_offers.lock().unwrap();
+            match g.remove(&transfer_id) {
+                Some(o) => o,
+                None => {
+                    tracing::warn!("拉取失败：找不到传输 {transfer_id}");
+                    return;
+                }
+            }
+        };
+        let peer_tx = {
+            let g = self.peers.lock().unwrap();
+            match g.get(&offer.device_id) {
+                Some(p) => p.tx.clone(),
+                None => {
+                    tracing::warn!("拉取失败：对端 {} 未连接", offer.device_id);
+                    self.pending_offers
+                        .lock()
+                        .unwrap()
+                        .insert(transfer_id.clone(), offer);
+                    return;
+                }
+            }
+        };
+        let app = self.app.lock().unwrap().clone();
+        let sync_dir = self.resolve_sync_dir(app.as_ref());
+        let root = sync_dir
+            .join(Self::sanitize_name(&offer.device_name))
+            .join(&transfer_id);
+        let total: u64 = offer.files.iter().map(|f| f.file_size).sum();
+        // 预建目录结构
+        for f in &offer.files {
+            let target = root.join(&f.relative_path);
+            if let Some(parent) = target.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+        let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<Option<FileChunkResponsePayload>>(32);
+        self.active_pulls.lock().unwrap().insert(
+            transfer_id.clone(),
+            PullState {
+                chunk_tx: chunk_tx.clone(),
+                target_dir: root.clone(),
+                files: offer.files.clone(),
+                device_id: offer.device_id.clone(),
+                total_bytes: total,
+            },
+        );
+        let _ = peer_tx.send(Outgoing::File(FileFrame::PullRequest {
+            transfer_id: transfer_id.clone(),
+            file_indices: (0..offer.files.len()).collect(),
+        }));
+        if let Some(a) = &app {
+            let _ = a.emit(
+                "file-pull-start",
+                serde_json::json!({
+                    "transfer_id": transfer_id,
+                    "device_name": offer.device_name,
+                    "total_size": total,
+                    "target_dir": root.to_string_lossy(),
+                }),
+            );
+        }
+        // 写盘任务
+        let engine = self.engine.clone();
+        let tid = transfer_id.clone();
+        let device_name = offer.device_name.clone();
+        let targets: Vec<PathBuf> = offer
+            .files
+            .iter()
+            .map(|f| root.join(&f.relative_path))
+            .collect();
+        tauri::async_runtime::spawn(async move {
+            use tokio::io::AsyncSeekExt;
+            use tokio::io::AsyncWriteExt;
+            let mut written: u64 = 0;
+            let mut received: Vec<PathBuf> = Vec::new();
+            while let Some(chunk) = chunk_rx.recv().await {
+                let Some(payload) = chunk else { break; };
+                if payload.file_index < targets.len() {
+                    let path = &targets[payload.file_index];
+                    if let Ok(mut file) = tokio::fs::OpenOptions::new()
+                        .create(true)
+                        .write(true)
+                        .open(path)
+                        .await
+                    {
+                        let _ = file.seek(std::io::SeekFrom::Start(payload.offset)).await;
+                        if file.write_all(&payload.data).await.is_ok() {
+                            written += payload.data.len() as u64;
+                            if !received.contains(path) {
+                                received.push(path.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            // 落盘完成：自动写本机剪贴板（带抑制标志，避免触发新一轮 Offer 广播）
+            if !received.is_empty() {
+                engine.set_file_offer_suppressed(true);
+                let _ = engine.clipboard().write_file_paths(&received).await;
+                engine.set_file_offer_suppressed(false);
+            }
+            if let Some(a) = &app {
+                let _ = a.emit(
+                    "file-pull-complete",
+                    serde_json::json!({
+                        "transfer_id": tid,
+                        "device_name": device_name,
+                        "target_dir": root.to_string_lossy(),
+                        "file_count": received.len(),
+                    }),
+                );
+            }
+            tracing::info!("拉取 {tid} 完成，共写入 {written} 字节");
+        });
+    }
+
+    /// 计算多条路径的最长公共父目录（用于还原相对结构）
+    fn common_root(paths: &[PathBuf]) -> PathBuf {
+    let mut root: Option<PathBuf> = None;
+    for p in paths {
+        let parent = p.parent().unwrap_or(p).to_path_buf();
+        root = Some(match root {
+            None => parent,
+            Some(r) => Self::common_prefix(&r, &parent),
+        });
+    }
+    root.unwrap_or_else(|| PathBuf::from("/"))
+}
+
+    fn common_prefix(a: &std::path::Path, b: &std::path::Path) -> PathBuf {
+    let mut res = PathBuf::new();
+    for (x, y) in a.components().zip(b.components()) {
+        if x == y {
+            res.push(x.as_os_str());
+        } else {
+            break;
+        }
+    }
+    res
+}
+
+    /// 由本地绝对路径构造 `FileMeta`（相对路径相对于公共根）
+    fn build_file_meta(path: &std::path::Path, root: &std::path::Path) -> Option<FileMeta> {
+    let meta = std::fs::metadata(path).ok()?;
+    let relative_path = path
+        .strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let file_name = path.file_name()?.to_string_lossy().to_string();
+    let modified_at = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Some(FileMeta {
+        file_name,
+        file_size: meta.len(),
+        is_dir: meta.is_dir(),
+        relative_path,
+        modified_at,
+        mime_type: String::new(),
+        hash: None,
+    })
+}
+
+    /// 把设备名等非安全字符净化为目录名
+    fn sanitize_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
     /// 启动监听器、本地剪贴板广播器，并订阅 mDNS 发现事件（仅对已配对对端自动重连）。
     pub async fn start(self: Arc<Self>, app: AppHandle, listen_port: u16) {
         *self.app.lock().unwrap() = Some(app.clone());
@@ -235,17 +706,25 @@ impl ConnectionHub {
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     };
-                    let SyncEvent::LocalClipboardChanged { mark, content } = ev;
-                    let env = SyncEnvelope { mark, content };
-                    let peers = hub.peers.lock().unwrap().clone();
-                    if peers.is_empty() {
-                        tracing::warn!("本地剪贴板已变化，但当前没有已连接对端，内容未发出");
-                        continue;
-                    }
-                    tracing::debug!("向 {} 个对端转发本地剪贴板变化", peers.len());
-                    for (id, p) in peers {
-                        if p.tx.send(env.clone()).is_err() {
-                            tracing::warn!("对端 {id} 的发送通道已关闭，本次内容未送达");
+                    match ev {
+                        SyncEvent::LocalClipboardChanged { mark, content } => {
+                            let env = SyncEnvelope { mark, content };
+                            let peers = hub.peers.lock().unwrap().clone();
+                            if peers.is_empty() {
+                                tracing::warn!("本地剪贴板已变化，但当前没有已连接对端，内容未发出");
+                                continue;
+                            }
+                            tracing::debug!("向 {} 个对端转发本地剪贴板变化", peers.len());
+                            for (id, p) in peers {
+                                if p.tx.send(Outgoing::Sync(env.clone())).is_err() {
+                                    tracing::warn!("对端 {id} 的发送通道已关闭，本次内容未送达");
+                                }
+                            }
+                        }
+                        SyncEvent::LocalFilesCopied { paths } => {
+                            // 本地拷贝了文件/目录：广播「可拉取」清单给所有对端。
+                            // 注意不把绝对路径外传——对端只拿到元数据，文件内容走拉取。
+                            hub.offer_local_files(paths);
                         }
                     }
                 }
@@ -615,7 +1094,10 @@ impl ConnectionHub {
         let conn_id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
         // 发送端**只**存放在 peers 表里（不在本地留 clone）：这样取消配对时
         // 把表项一移除，tx 即被 drop，下面的 rx 立刻收到 None 并结束本连接。
-        let (tx, mut rx) = mpsc::unbounded_channel::<SyncEnvelope>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Outgoing>();
+        // handle_file_frame 需要在解密循环里用发送端回传分片，而 tx 已被移入 Peer
+        // 表项（用于转发任务）。此处克隆一份专供文件帧回传，避免「move 后借用」。
+        let tx_for_file = tx.clone();
         if let Some(old) = self
             .peers
             .lock()
@@ -635,16 +1117,27 @@ impl ConnectionHub {
             tokio::select! {
                 outgoing = rx.recv() => {
                     match outgoing {
-                        Some(env) => {
-                            let pt = bincode::serialize(&env)
-                                .map_err(|e| anyhow::anyhow!("serialize envelope: {e}"))?;
+                        Some(out) => {
+                            // Sync / File 两类帧统一在此用会话密钥加密后发出
+                            let (msg_type, pt) = match out {
+                                Outgoing::Sync(env) => (
+                                    MessageType::Sync,
+                                    bincode::serialize(&env)
+                                        .map_err(|e| anyhow::anyhow!("serialize envelope: {e}"))?,
+                                ),
+                                Outgoing::File(ff) => (
+                                    MessageType::File,
+                                    bincode::serialize(&ff)
+                                        .map_err(|e| anyhow::anyhow!("serialize file frame: {e}"))?,
+                                ),
+                            };
                             let nonce: [u8; 12] = rand::random();
                             let ct = encrypt(&key, &nonce, &pt)
                                 .map_err(|e| anyhow::anyhow!("encrypt: {e}"))?;
                             let mut payload = Vec::with_capacity(12 + ct.len());
                             payload.extend_from_slice(&nonce);
                             payload.extend_from_slice(&ct);
-                            let frame = MessageFrame::new(MessageType::Sync, payload).encode();
+                            let frame = MessageFrame::new(msg_type, payload).encode();
                             if write.send(Message::Binary(frame)).await.is_err() {
                                 break;
                             }
@@ -656,23 +1149,44 @@ impl ConnectionHub {
                     match incoming {
                         Some(Ok(Message::Binary(b))) => {
                             if let Ok(f) = MessageFrame::decode(&b) {
-                                if f.msg_type == MessageType::Sync {
-                                    if f.payload.len() < 12 {
-                                        continue;
-                                    }
-                                    let (nonce, ct) = f.payload.split_at(12);
-                                    let mut n = [0u8; 12];
-                                    n.copy_from_slice(nonce);
-                                    match decrypt(&key, &n, ct) {
-                                        Ok(pt) => {
-                                            if let Ok(env) =
-                                                bincode::deserialize::<SyncEnvelope>(&pt)
-                                            {
-                                                self.engine.apply_remote(env.mark, env.content).await;
-                                            }
+                                match f.msg_type {
+                                    MessageType::Sync => {
+                                        if f.payload.len() < 12 {
+                                            continue;
                                         }
-                                        Err(e) => tracing::warn!("decrypt failed: {e}"),
+                                        let (nonce, ct) = f.payload.split_at(12);
+                                        let mut n = [0u8; 12];
+                                        n.copy_from_slice(nonce);
+                                        match decrypt(&key, &n, ct) {
+                                            Ok(pt) => {
+                                                if let Ok(env) =
+                                                    bincode::deserialize::<SyncEnvelope>(&pt)
+                                                {
+                                                    self.engine.apply_remote(env.mark, env.content).await;
+                                                }
+                                            }
+                                            Err(e) => tracing::warn!("decrypt failed: {e}"),
+                                        }
                                     }
+                                    MessageType::File => {
+                                        if f.payload.len() < 12 {
+                                            continue;
+                                        }
+                                        let (nonce, ct) = f.payload.split_at(12);
+                                        let mut n = [0u8; 12];
+                                        n.copy_from_slice(nonce);
+                                        match decrypt(&key, &n, ct) {
+                                            Ok(pt) => {
+                                                if let Ok(ff) =
+                                                    bincode::deserialize::<FileFrame>(&pt)
+                                                {
+                                                    self.clone().handle_file_frame(ff, &tx_for_file, &peer_id).await;
+                                                }
+                                            }
+                                            Err(e) => tracing::warn!("file decrypt failed: {e}"),
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
                         }

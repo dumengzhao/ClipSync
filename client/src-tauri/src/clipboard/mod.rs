@@ -28,6 +28,13 @@ pub trait ClipboardProvider: Send + Sync {
     /// 写入剪贴板（基础模式）
     async fn write(&self, content: ClipboardContent) -> Result<()>;
 
+    /// 读取剪贴板中的文件/目录绝对路径（用于「文件同步」发送方探测）。
+    /// 剪贴板仅为文本/图片时返回空向量。
+    async fn read_file_paths(&self) -> Result<Vec<std::path::PathBuf>>;
+
+    /// 把一组本地绝对路径写回剪贴板（接收方拉取完成后自动调用，使用户可直接 Ctrl+V 粘贴）。
+    async fn write_file_paths(&self, paths: &[std::path::PathBuf]) -> Result<()>;
+
     /// 延迟渲染模式写入文件
     async fn write_delayed_files<F>(
         &self,
