@@ -27,6 +27,11 @@ pub struct AppConfig {
     /// 对端点击「拉取」后，文件下载到 `<sync_dir>/<对方设备名>/<相对路径>`。
     #[serde(default)]
     pub sync_dir: Option<String>,
+    /// 自动拉取阈值（MB）。对端拷贝的文件/图片若总大小**小于**此值，本端收到后自动
+    /// 拉取（下载到 `sync_dir` 并写本机剪贴板），无需手动点「拉取」。拷贝端自身除外。
+    /// 默认 1MB；可调大让更大文件也自动拉取，但过大（如 >10MB）会占用较多带宽/磁盘。
+    #[serde(default = "default_auto_pull_threshold_mb")]
+    pub auto_pull_threshold_mb: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +50,10 @@ pub enum Theme {
 
 fn default_pairing_code() -> String {
     "000000".to_string()
+}
+
+fn default_auto_pull_threshold_mb() -> u64 {
+    1
 }
 
 /// 默认设备名取本机机器名（hostname），使不同设备默认即可区分。
@@ -78,7 +87,41 @@ impl Default for AppConfig {
             sync_primary_selection: false,
             cache_ttl_hours: 24,
             sync_dir: None,
+            auto_pull_threshold_mb: 1,
             theme: Theme::System,
         }
+    }
+}
+
+impl AppConfig {
+    /// 自动拉取阈值（字节）。`auto_pull_threshold_mb` 为 0 时退化为「不自动拉取」。
+    pub fn auto_pull_threshold_bytes(&self) -> u64 {
+        self.auto_pull_threshold_mb.saturating_mul(1024 * 1024)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_pull_threshold_default_is_1mb() {
+        let c = AppConfig::default();
+        assert_eq!(c.auto_pull_threshold_mb, 1);
+        assert_eq!(c.auto_pull_threshold_bytes(), 1024 * 1024);
+    }
+
+    #[test]
+    fn auto_pull_threshold_bytes_scales() {
+        let c = AppConfig {
+            auto_pull_threshold_mb: 10,
+            ..AppConfig::default()
+        };
+        assert_eq!(c.auto_pull_threshold_bytes(), 10 * 1024 * 1024);
+        let z = AppConfig {
+            auto_pull_threshold_mb: 0,
+            ..AppConfig::default()
+        };
+        assert_eq!(z.auto_pull_threshold_bytes(), 0);
     }
 }

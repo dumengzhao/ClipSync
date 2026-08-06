@@ -100,7 +100,7 @@ static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 /// 经由本连接出站的消息。两类都经会话密钥 AES-GCM 加密后发出：
 /// - `Sync`：剪贴板内容信封（文本/图片）
 /// - `File`：文件传输帧（清单/拉取请求/分片），见 `FileFrame`
-enum Outgoing {
+pub(crate) enum Outgoing {
     Sync(SyncEnvelope),
     File(FileFrame),
 }
@@ -116,6 +116,7 @@ struct Peer {
 
 /// 本端作为「发送方」（拷贝者）时保存的一次传输：仅本端持有本地绝对路径，绝不外传。
 #[derive(Clone)]
+#[allow(dead_code)]
 struct OfferState {
     device_name: String,
     files: Vec<FileMeta>,
@@ -132,6 +133,7 @@ struct PendingOffer {
 }
 
 /// 本端正在拉取的传输：写入任务通过 `chunk_tx` 接收分片，最终自动写本机剪贴板。
+#[allow(dead_code)]
 struct PullState {
     chunk_tx: tokio::sync::mpsc::Sender<Option<FileChunkResponsePayload>>,
     target_dir: PathBuf,
@@ -280,6 +282,8 @@ impl ConnectionHub {
                         "relative_path": f.relative_path,
                     })).collect::<Vec<_>>(),
                     "total_size": o.files.iter().map(|f| f.file_size).sum::<u64>(),
+                    "auto_pull": o.files.iter().map(|f| f.file_size).sum::<u64>()
+                        < self.auto_pull_threshold_bytes(),
                 })
             })
             .collect()
@@ -299,6 +303,17 @@ impl ConnectionHub {
             }
         }
         PathBuf::from("Downloads")
+    }
+
+    /// 自动拉取阈值（字节）：各端自行配置 `auto_pull_threshold_mb`（默认 1MB）。
+    /// 对端传来的传输若总大小小于此值，本端收到后直接自动拉取，无需手动点「拉取」。
+    fn auto_pull_threshold_bytes(&self) -> u64 {
+        self.app
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|a| a.state::<AppState>().config.lock().auto_pull_threshold_bytes())
+            .unwrap_or(1024 * 1024)
     }
 
     /// 本地拷贝了文件/目录：生成传输 ID，展开为文件清单，向所有已连接对端广播「可拉取」。
@@ -367,7 +382,7 @@ impl ConnectionHub {
     }
 
     /// 处理对端发来的文件帧（按角色路由：发送方流式发片，接收方落盘）。
-    pub async fn handle_file_frame(
+    pub(crate) async fn handle_file_frame(
         self: Arc<Self>,
         ff: FileFrame,
         tx: &mpsc::UnboundedSender<Outgoing>,
@@ -381,8 +396,12 @@ impl ConnectionHub {
                 files,
             } => {
                 if device_id == self.identity.id.0 {
-                    return; // 忽略自己
+                    return; // 忽略自己（拷贝端不会收到自己的 Offer，这里双保险）
                 }
+                let total: u64 = files.iter().map(|f| f.file_size).sum();
+                // 自动拉取阈值：小于阈值则本端收到后直接拉取，免手动点击。
+                // 拷贝端自身已被上面的 device_id 守卫排除，所以这里一定是「其它端」。
+                let auto_pull = total < self.auto_pull_threshold_bytes();
                 self.pending_offers.lock().unwrap().insert(
                     transfer_id.clone(),
                     PendingOffer {
@@ -405,9 +424,18 @@ impl ConnectionHub {
                                 "is_dir": f.is_dir,
                                 "relative_path": f.relative_path,
                             })).collect::<Vec<_>>(),
-                            "total_size": files.iter().map(|f| f.file_size).sum::<u64>(),
+                            "total_size": total,
+                            "auto_pull": auto_pull,
                         }),
                     );
+                }
+                // 小于阈值的传输自动拉取：直接走与手动拉取相同的链路（写盘 + 写本机剪贴板）。
+                if auto_pull {
+                    let hub = self.clone();
+                    let tid = transfer_id.clone();
+                    tauri::async_runtime::spawn(async move {
+                        hub.pull_files(tid).await;
+                    });
                 }
             }
             FileFrame::PullRequest {
@@ -583,11 +611,12 @@ impl ConnectionHub {
                 let Some(payload) = chunk else { break; };
                 if payload.file_index < targets.len() {
                     let path = &targets[payload.file_index];
-                    if let Ok(mut file) = tokio::fs::OpenOptions::new()
-                        .create(true)
-                        .write(true)
-                        .open(path)
-                        .await
+                        if let Ok(mut file) = tokio::fs::OpenOptions::new()
+                            .create(true)
+                            .write(true)
+                            .truncate(false)
+                            .open(path)
+                            .await
                     {
                         let _ = file.seek(std::io::SeekFrom::Start(payload.offset)).await;
                         if file.write_all(&payload.data).await.is_ok() {
