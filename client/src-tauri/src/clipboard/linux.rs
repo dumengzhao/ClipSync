@@ -16,15 +16,19 @@
 //!   线格式不一致，跨平台图片同步仍不可用；文本完全可用。统一成 PNG 线格式是独立的后续任务。
 //! - `write_delayed_files`（文件同步）属于阶段五，尚未实现，与 Windows 侧一致返回未实现。
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
+use anyhow::anyhow;
 use arboard::Clipboard;
 use async_trait::async_trait;
 use parking_lot::Mutex;
+use x11rb::connection::Connection;
+use x11rb::protocol::xproto::ConnectionExt;
 
 use super::types::{ClipboardContent, FileMeta, SyncId, WatchHandle};
 use super::ClipboardProvider;
@@ -110,6 +114,17 @@ impl ClipboardProvider for LinuxClipboard {
         anyhow::bail!("延迟渲染文件写入尚未实现（阶段五）")
     }
 
+    async fn read_file_paths(&self) -> Result<Vec<PathBuf>> {
+        // 文件剪贴板走 X11 selection（text/uri-list 或 gnome-copied-files），arboard 不暴露此 API。
+        read_clipboard_files_x11()
+    }
+
+    async fn write_file_paths(&self, paths: &[PathBuf]) -> Result<()> {
+        // 拉取完成后自动写剪贴板：接管 CLIPBOARD selection 并应答 SelectionRequest，
+        // 提供 text/uri-list，使用户在文件管理器中直接 Ctrl+V 即可粘贴。
+        write_clipboard_files_x11(paths)
+    }
+
     async fn watch(&self, cb: Box<dyn Fn() + Send>) -> Result<WatchHandle> {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = stop.clone();
@@ -139,5 +154,244 @@ impl ClipboardProvider for LinuxClipboard {
     async fn has_sync_mark(&self, _sync_id: &SyncId) -> Result<bool> {
         // 与 Windows / macOS 侧一致：阶段三嵌入自定义格式后再实现防回环判定。
         Ok(false)
+    }
+}
+
+// ===========================================================================
+// X11 文件剪贴板（x11rb）—— arboard 不暴露文件 API，需直接操作 selection。
+//
+// 说明：此段仅 Linux 编译，无法在 Windows 主机验证；正确性依赖 x11rb 0.13 API
+// 与 Ubuntu 对端运行时联调。read 用于「探测本地文件拷贝」，write 用于「拉取后
+// 自动粘贴」（接管 CLIPBOARD 所有权并应答 SelectionRequest）。
+// ===========================================================================
+
+fn intern<C: Connection>(conn: &C, name: &[u8]) -> Result<u32> {
+    Ok(conn.intern_atom(false, name)?.reply()?.atom)
+}
+
+/// 读取本机 CLIPBOARD 中的文件 URI 列表（优先 gnome-copied-files，回退 text/uri-list）。
+fn read_clipboard_files_x11() -> Result<Vec<PathBuf>> {
+    use x11rb::protocol::Event;
+    use x11rb::protocol::xproto::WindowClass;
+
+    let (conn, screen) = x11rb::connect(None).map_err(|e| anyhow!("{e}"))?;
+    let root = conn.setup().roots[screen].root;
+
+    let clipboard_atom = intern(&conn, b"CLIPBOARD")?;
+    let owner = conn.get_selection_owner(clipboard_atom)?.reply()?.owner;
+    if owner == x11rb::NONE {
+        return Ok(Vec::new());
+    }
+
+    let gnome_atom = intern(&conn, b"x-special/gnome-copied-files")?;
+    let uri_atom = intern(&conn, b"text/uri-list")?;
+    let prop = intern(&conn, b"CLIPSYNC_FILE_PROP")?;
+
+    let req_win = conn.generate_id()?;
+    conn.create_window(
+        x11rb::COPY_DEPTH_FROM_PARENT as u8,
+        req_win,
+        root,
+        0,
+        0,
+        1,
+        1,
+        0,
+        WindowClass::INPUT_OUTPUT,
+        0,
+        &Default::default(),
+    )?;
+
+    // 依次尝试两种 mime；任一成功即解析返回。
+    for target in [gnome_atom, uri_atom] {
+        conn.convert_selection(req_win, clipboard_atom, target, prop, x11rb::CURRENT_TIME)?;
+        conn.flush()?;
+        let mut raw = Vec::new();
+        let mut got = false;
+        while let Ok(event) = conn.wait_for_event() {
+            if let Event::SelectionNotify(n) = event {
+                if n.selection == clipboard_atom && n.property != x11rb::NONE {
+                    raw = read_property(&conn, req_win, prop)?;
+                    got = true;
+                }
+                break;
+            }
+        }
+        if got {
+            // gnome-copied-files 首行为 "copy"/"cut"，需跳过
+            return Ok(parse_uri_list(&raw));
+        }
+    }
+    Ok(Vec::new())
+}
+
+/// 读取属性全部数据。MVP：不处理 >256KB 的 INCR 分片（文件清单通常很小）。
+fn read_property<C: Connection>(conn: &C, window: u32, property: u32) -> Result<Vec<u8>> {
+    let mut data = Vec::new();
+    let reply = conn
+        .get_property(false, window, property, x11rb::NONE, 0, 256 * 1024)?
+        .reply()?;
+    data.extend_from_slice(&reply.value);
+    Ok(data)
+}
+
+/// 把一组本地路径写回 CLIPBOARD（接管所有权，应答 SelectionRequest 提供 text/uri-list）。
+fn write_clipboard_files_x11(paths: &[PathBuf]) -> Result<()> {
+    use x11rb::protocol::Event;
+    use x11rb::protocol::xproto::{EventMask, PropMode, SelectionNotifyEvent, WindowClass};
+
+    let uris = paths_to_uri_list(paths);
+    let (conn, screen) = x11rb::connect(None).map_err(|e| anyhow!("{e}"))?;
+    let root = conn.setup().roots[screen].root;
+
+    let owner_win = conn.generate_id()?;
+    conn.create_window(
+        x11rb::COPY_DEPTH_FROM_PARENT as u8,
+        owner_win,
+        root,
+        0,
+        0,
+        1,
+        1,
+        0,
+        WindowClass::INPUT_OUTPUT,
+        0,
+        &Default::default(),
+    )?;
+    let clipboard_atom = intern(&conn, b"CLIPBOARD")?;
+    let uri_atom = intern(&conn, b"text/uri-list")?;
+    let targets_atom = intern(&conn, b"TARGETS")?;
+    let atom_atom = intern(&conn, b"ATOM")?;
+    let prop_atom = intern(&conn, b"CLIPSYNC_FILE_PROP")?;
+
+    conn.set_selection_owner(owner_win, clipboard_atom, x11rb::CURRENT_TIME)?;
+    conn.flush()?;
+
+    let conn = std::sync::Arc::new(conn);
+    let data = Arc::new(uris);
+    thread::spawn(move || {
+        loop {
+            let event = match conn.wait_for_event() {
+                Ok(e) => e,
+                Err(_) => break,
+            };
+            match event {
+                Event::SelectionRequest(req) => {
+                    if req.selection != clipboard_atom {
+                        continue;
+                    }
+                    let is_uri = req.target == uri_atom;
+                    let is_targets = req.target == targets_atom;
+                    if is_targets {
+                        let targets: Vec<u32> = vec![uri_atom];
+                        let bytes: Vec<u8> =
+                            targets.iter().flat_map(|a| a.to_ne_bytes()).collect();
+                        let _ = conn.change_property(
+                            PropMode::REPLACE,
+                            req.requestor,
+                            req.property,
+                            atom_atom,
+                            32,
+                            targets.len() as u32,
+                            &bytes,
+                        );
+                    } else if is_uri {
+                        let _ = conn.change_property(
+                            PropMode::REPLACE,
+                            req.requestor,
+                            req.property,
+                            uri_atom,
+                            8,
+                            data.as_slice().len() as u32,
+                            data.as_slice(),
+                        );
+                    }
+                    let notify = SelectionNotifyEvent {
+                        response_type: x11rb::protocol::xproto::SELECTION_NOTIFY_EVENT,
+                        sequence: 0,
+                        time: req.time,
+                        requestor: req.requestor,
+                        selection: req.selection,
+                        target: req.target,
+                        property: if is_uri || is_targets {
+                            req.property
+                        } else {
+                            x11rb::NONE
+                        },
+                    };
+                    let notify_bytes: [u8; 32] = notify.into();
+                    let _ = conn.send_event(
+                        false,
+                        req.requestor,
+                        EventMask::NO_EVENT,
+                        notify_bytes,
+                    );
+                    let _ = conn.flush();
+                }
+                Event::SelectionClear(_) => break,
+                _ => {}
+            }
+        }
+    });
+    Ok(())
+}
+
+/// 把路径列表编码为 text/uri-list 字节（每行一个 file:// URI）。
+fn paths_to_uri_list(paths: &[PathBuf]) -> Vec<u8> {
+    let mut s = String::new();
+    for p in paths {
+        s.push_str("file://");
+        s.push_str(&p.to_string_lossy());
+        s.push('\n');
+    }
+    s.into_bytes()
+}
+
+/// 解析 text/uri-list / gnome-copied-files 字节为绝对路径列表。
+fn parse_uri_list(raw: &[u8]) -> Vec<PathBuf> {
+    let text = String::from_utf8_lossy(raw);
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // gnome-copied-files 首行为 "copy"/"cut"，不是 URI，跳过看起来不像 URI 的行
+        if let Some(path) = uri_to_path(line) {
+            out.push(path);
+        }
+    }
+    out
+}
+
+fn uri_to_path(uri: &str) -> Option<PathBuf> {
+    let path = uri.strip_prefix("file://")?;
+    Some(PathBuf::from(percent_decode(path)))
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hexval(bytes[i + 1]), hexval(bytes[i + 2])) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hexval(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
     }
 }

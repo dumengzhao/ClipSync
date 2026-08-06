@@ -164,6 +164,21 @@ pub fn unpair(state: State<AppState>, device_id: String) {
     state.hub.unpair(&device_id);
 }
 
+/// 拉取某次文件传输：从对端下载到本机 `sync_dir`，完成后自动写本机剪贴板。
+#[tauri::command]
+pub fn pull_files(state: State<AppState>, transfer_id: String) {
+    let hub = state.hub.clone();
+    tauri::async_runtime::spawn(async move {
+        hub.pull_files(transfer_id).await;
+    });
+}
+
+/// 返回当前接收到的「待拉取」文件清单（前端挂载时主动拉取一次，兜底事件丢失）。
+#[tauri::command]
+pub fn list_pending_offers(state: State<AppState>) -> Vec<serde_json::Value> {
+    state.hub.pending_offers_snapshot()
+}
+
 // 注意：以下两个命令必须复用引擎持有的常驻剪贴板句柄，不能自建临时实例。
 // X11/Wayland 下临时实例一旦 Drop 就会失去 selection 所有权，写入等于白写。
 

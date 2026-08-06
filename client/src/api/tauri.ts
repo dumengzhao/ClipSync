@@ -71,6 +71,33 @@ export async function unpair(deviceId: string): Promise<void> {
   return invoke<void>('unpair', { deviceId });
 }
 
+/** 单个文件条目（文件清单中用） */
+export interface FileItem {
+  file_name: string;
+  file_size: number;
+  is_dir: boolean;
+  relative_path: string;
+}
+
+/** 对端广播的「待拉取」文件传输 */
+export interface PendingOffer {
+  transfer_id: string;
+  device_id: string;
+  device_name: string;
+  files: FileItem[];
+  total_size: number;
+}
+
+/** 拉取某次文件传输：下载到本机 sync_dir，完成后自动写剪贴板 */
+export async function pullFiles(transferId: string): Promise<void> {
+  return invoke<void>('pull_files', { transferId });
+}
+
+/** 查询当前待拉取清单（挂载时回填，兜底事件丢失） */
+export async function listPendingOffers(): Promise<PendingOffer[]> {
+  return invoke<PendingOffer[]>('list_pending_offers');
+}
+
 /** 应用配置（与 Rust 端 `AppConfig` 字段保持一致） */
 export interface AppConfig {
   device_name: string;
@@ -87,6 +114,8 @@ export interface AppConfig {
   sync_primary_selection: boolean;
   cache_ttl_hours: number;
   theme: 'System' | 'Light' | 'Dark';
+  /** 文件同步落盘目录；为空时回退系统下载目录 */
+  sync_dir?: string | null;
 }
 
 export async function getConfig(): Promise<AppConfig> {

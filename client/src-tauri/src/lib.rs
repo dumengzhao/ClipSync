@@ -205,6 +205,8 @@ pub fn run() {
             tauri_cmd::get_pending_pairing,
             tauri_cmd::pair_with,
             tauri_cmd::unpair,
+            tauri_cmd::pull_files,
+            tauri_cmd::list_pending_offers,
             tauri_cmd::open_settings,
             tauri_cmd::quit_app,
         ])
