@@ -56,11 +56,7 @@ impl AppState {
         let identity = DeviceIdentity::load_or_create(&config.device_name)
             .expect("failed to load or create device identity");
         let engine = Arc::new(SyncEngine::new(identity.clone()));
-        let hub = ConnectionHub::new(
-            Arc::new(identity.clone()),
-            engine.clone(),
-            config.pairing_code.clone(),
-        );
+        let hub = ConnectionHub::new(Arc::new(identity.clone()), engine.clone());
 
         let mut manual = ManualAddressBook::new();
         for addr in &config.manual_addresses {
@@ -122,10 +118,6 @@ pub fn run() {
                 let g = state.config.lock();
                 (g.enable_mdns, g.listen_port)
             };
-            // 用持久化配置里的配对码覆盖 hub 默认，使改过的配对码重启后仍生效
-            state
-                .hub
-                .set_pairing_code(state.config.lock().pairing_code.clone());
             let identity = state.identity.clone();
 
             // 启动局域网发现（mDNS 广播本机 + 订阅对端），失败仅记录不阻断启动。
@@ -182,6 +174,10 @@ pub fn run() {
             tauri_cmd::set_config,
             tauri_cmd::list_discovered_peers,
             tauri_cmd::list_connected_peers,
+            tauri_cmd::generate_pairing_code,
+            tauri_cmd::cancel_pairing,
+            tauri_cmd::get_pending_pairing,
+            tauri_cmd::pair_with,
             tauri_cmd::open_settings,
             tauri_cmd::quit_app,
         ])

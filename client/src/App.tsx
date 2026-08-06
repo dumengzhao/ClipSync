@@ -2,9 +2,15 @@ import { useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import {
   getVersion,
+  getPairedDevices,
   listDiscoveredPeers,
   listConnectedPeers,
+  generatePairingCode,
+  cancelPairing,
+  getPendingPairing,
+  pairWith,
   type DiscoveredPeer,
+  type PairedDeviceInfo,
 } from './api/tauri';
 import SettingsPage from './SettingsPage';
 
@@ -17,27 +23,37 @@ import SettingsPage from './SettingsPage';
 export default function App() {
   const [version, setVersion] = useState('');
   const [view, setView] = useState<'main' | 'settings'>('main');
-  const [peers, setPeers] = useState<DiscoveredPeer[]>([]);
+  const [discovered, setDiscovered] = useState<DiscoveredPeer[]>([]);
+  const [paired, setPaired] = useState<PairedDeviceInfo[]>([]);
   const [connected, setConnected] = useState<Set<string>>(new Set());
+  // 当前武装中的配对码（生成配对码后展示，配对成功或取消后清除）
+  const [pendingCode, setPendingCode] = useState<string | null>(null);
+  // 正在输入配对码的目标设备（点击「配对」后进入输入态）
+  const [pairingTarget, setPairingTarget] = useState<DiscoveredPeer | null>(null);
+  const [pairInput, setPairInput] = useState('');
+  const [msg, setMsg] = useState('');
+
+  const flash = (m: string) => {
+    setMsg(m);
+    window.setTimeout(() => setMsg(''), 4000);
+  };
 
   useEffect(() => {
     getVersion().then(setVersion).catch(() => setVersion('unknown'));
     // dev 下「托盘 → 设置」通过事件请求内嵌显示设置视图
     const unlistenSettings = listen<null>('open-settings', () => setView('settings'));
 
-    // 拉取初始已发现设备
-    listDiscoveredPeers().then(setPeers).catch(() => {});
-
-    // 主动查询当前已连接对端，兜底 peer-connected 事件可能早于本监听就绪而丢失的竞态
+    // 初始数据：已发现设备 / 已配对设备 / 在线状态 / 武装中的配对码
+    listDiscoveredPeers().then(setDiscovered).catch(() => {});
+    getPairedDevices().then(setPaired).catch(() => {});
     listConnectedPeers()
       .then((ids) => setConnected(new Set(ids)))
       .catch(() => {});
+    getPendingPairing().then(setPendingCode).catch(() => {});
 
-    // 实时订阅局域网发现 / 连接状态
+    // 实时订阅局域网发现 / 配对 / 连接状态
     const unlistenDiscovered = listen<DiscoveredPeer>('peer-discovered', (e) => {
-      setPeers((prev) => {
-        // 按 device_id 覆盖更新（对端改名/换端口后重新广播时刷新），
-        // 不存在才追加，避免重复条目
+      setDiscovered((prev) => {
         if (prev.some((p) => p.device_id === e.payload.device_id)) {
           return prev.map((p) => (p.device_id === e.payload.device_id ? e.payload : p));
         }
@@ -45,7 +61,7 @@ export default function App() {
       });
     });
     const unlistenLost = listen<string>('peer-lost', (e) => {
-      setPeers((prev) => prev.filter((p) => p.device_id !== e.payload));
+      setDiscovered((prev) => prev.filter((p) => p.device_id !== e.payload));
       setConnected((prev) => {
         const n = new Set(prev);
         n.delete(e.payload);
@@ -62,6 +78,22 @@ export default function App() {
         return n;
       });
     });
+    const unlistenPaired = listen<PairedDeviceInfo>('peer-paired', (e) => {
+      setPaired((prev) => {
+        if (prev.some((p) => p.id === e.payload.id)) {
+          return prev.map((p) => (p.id === e.payload.id ? e.payload : p));
+        }
+        return [...prev, e.payload];
+      });
+      // 配对成功，清除武装码展示
+      setPendingCode(null);
+      setPairingTarget(null);
+      flash(`已与「${e.payload.name}」配对`);
+    });
+    const unlistenFailed = listen<{ device_id: string; reason: string }>(
+      'pairing-failed',
+      (e) => flash(`配对失败：${e.payload.reason}`),
+    );
 
     return () => {
       unlistenSettings.then((u) => u());
@@ -69,8 +101,50 @@ export default function App() {
       unlistenLost.then((u) => u());
       unlistenConnected.then((u) => u());
       unlistenDisconnected.then((u) => u());
+      unlistenPaired.then((u) => u());
+      unlistenFailed.then((u) => u());
     };
   }, []);
+
+  const generateCode = async () => {
+    try {
+      const code = await generatePairingCode();
+      setPendingCode(code);
+    } catch (e) {
+      flash('生成配对码失败: ' + String(e));
+    }
+  };
+
+  const cancelCode = async () => {
+    try {
+      await cancelPairing();
+    } catch {
+      /* ignore */
+    }
+    setPendingCode(null);
+  };
+
+  const submitPair = async () => {
+    if (!pairingTarget) return;
+    const code = pairInput.trim();
+    if (code.length === 0) {
+      flash('请输入配对码');
+      return;
+    }
+    const target = pairingTarget;
+    setPairingTarget(null);
+    setPairInput('');
+    try {
+      await pairWith(target.device_id, code);
+      flash(`正在与「${target.device_name}」配对…`);
+    } catch (e) {
+      flash('配对发起失败: ' + String(e));
+    }
+  };
+
+  const pairedIds = new Set(paired.map((p) => p.id));
+  // 已配对设备不重复出现在「发现」列表中
+  const discoveredOnly = discovered.filter((p) => !pairedIds.has(p.device_id));
 
   if (view === 'settings') {
     return <SettingsPage onBack={() => setView('main')} />;
@@ -83,21 +157,31 @@ export default function App() {
         <p className="version">v{version}</p>
       </header>
       <main className="app-main">
+        {pendingCode && (
+          <div className="pairing-banner">
+            <div className="pairing-banner-title">配对码（请告知对方，让其在「配对」时输入）</div>
+            <div className="pairing-code">{pendingCode}</div>
+            <button className="btn btn-ghost btn-sm" onClick={cancelCode}>
+              取消
+            </button>
+          </div>
+        )}
+
         <section className="peers">
-          <h2>发现的设备</h2>
-          {peers.length === 0 ? (
-            <p className="hint">局域网内未发现其它 ClipSync 设备</p>
+          <h2>已配对设备</h2>
+          {paired.length === 0 ? (
+            <p className="hint">还没有已配对设备，请在下方「局域网发现的设备」中发起配对</p>
           ) : (
             <ul className="peer-list">
-              {peers.map((p) => {
-                const isConnected = connected.has(p.device_id);
+              {paired.map((p) => {
+                const isConnected = connected.has(p.id);
                 return (
-                  <li key={p.device_id} className="peer-item">
+                  <li key={p.id} className="peer-item">
                     <span className={`peer-dot ${isConnected ? 'on' : 'off'}`} />
-                    <span className="peer-name">{p.device_name}</span>
+                    <span className="peer-name">{p.name}</span>
                     <span className="peer-addr">
-                      {p.addr}:{p.port}
-                      {isConnected ? ' · 已连接' : ''}
+                      {isConnected ? '已连接' : '离线'}
+                      {p.fingerprint ? ` · ${p.fingerprint.slice(0, 8)}` : ''}
                     </span>
                   </li>
                 );
@@ -105,10 +189,70 @@ export default function App() {
             </ul>
           )}
         </section>
+
+        <section className="peers">
+          <h2>局域网发现的设备</h2>
+          {discoveredOnly.length === 0 ? (
+            <p className="hint">局域网内未发现其它 ClipSync 设备</p>
+          ) : (
+            <ul className="peer-list">
+              {discoveredOnly.map((p) => {
+                const isPairing = pairingTarget?.device_id === p.device_id;
+                return (
+                  <li key={p.device_id} className="peer-item peer-item-action">
+                    <span className="peer-name">{p.device_name}</span>
+                    <span className="peer-addr">
+                      {p.addr}:{p.port}
+                    </span>
+                    {isPairing ? (
+                      <span className="pair-input-row">
+                        <input
+                          className="pair-input"
+                          autoFocus
+                          placeholder="输入对方配对码"
+                          value={pairInput}
+                          onChange={(e) => setPairInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') submitPair();
+                          }}
+                        />
+                        <button className="btn btn-sm" onClick={submitPair}>
+                          确认
+                        </button>
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => {
+                            setPairingTarget(null);
+                            setPairInput('');
+                          }}
+                        >
+                          取消
+                        </button>
+                      </span>
+                    ) : (
+                      <button className="btn btn-sm" onClick={() => setPairingTarget(p)}>
+                        配对
+                      </button>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+          <button className="btn btn-ghost" onClick={generateCode}>
+            生成配对码
+          </button>
+        </section>
+
+        {msg && <div className="msg">{msg}</div>}
+
         <button className="btn" onClick={() => setView('settings')}>
           打开设置
         </button>
-        <p className="hint">局域网剪贴板同步已启用（mDNS 自动发现 + SPAKE2 加密配对）</p>
+        <p className="hint">
+          局域网剪贴板同步（mDNS 自动发现 + 强制交互式 SPAKE2 配对）。一方「生成配对码」，
+          另一方在「局域网发现的设备」中点击「配对」并输入该码即可建立加密通道。
+        </p>
       </main>
     </div>
   );

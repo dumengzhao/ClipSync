@@ -16,6 +16,11 @@ pub enum MessageType {
     Heartbeat = 0x04,
     /// 加密剪贴板同步包：payload = [12 字节 nonce][AES-GCM 密文]，明文为 bincode 序列化的 `SyncEnvelope`
     Sync = 0x05,
+    /// 握手首帧：交换身份（device_id / device_name / 公钥），在 SPAKE2 之前发送，
+    /// 用于应答方在已知对端身份的前提下选择口令（已配对缓存 vs 武装中的配对码）。
+    Hello = 0x06,
+    /// 配对校验帧：携带 HMAC-SHA256(会话密钥, 对端 device_id)，用于确认两端使用同一口令。
+    Verify = 0x07,
 }
 
 impl MessageType {
@@ -25,6 +30,8 @@ impl MessageType {
             0x02 => Some(Self::FileChunkRequest),
             0x03 => Some(Self::FileChunkResponse),
             0x04 => Some(Self::Heartbeat),
+            0x06 => Some(Self::Hello),
+            0x07 => Some(Self::Verify),
             _ => None,
         }
     }
