@@ -26,7 +26,11 @@ export default function App() {
     // 实时订阅局域网发现 / 连接状态
     const unlistenDiscovered = listen<DiscoveredPeer>('peer-discovered', (e) => {
       setPeers((prev) => {
-        if (prev.some((p) => p.device_id === e.payload.device_id)) return prev;
+        // 按 device_id 覆盖更新（对端改名/换端口后重新广播时刷新），
+        // 不存在才追加，避免重复条目
+        if (prev.some((p) => p.device_id === e.payload.device_id)) {
+          return prev.map((p) => (p.device_id === e.payload.device_id ? e.payload : p));
+        }
         return [...prev, e.payload];
       });
     });
