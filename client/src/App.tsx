@@ -89,6 +89,8 @@ export default function App() {
         n.delete(e.payload.transfer_id);
         return n;
       });
+      // 拉取完成（含自动拉取）后从待拉取清单移除，避免列表里残留「拉取中…」
+      setPendingOffers((prev) => prev.filter((o) => o.transfer_id !== e.payload.transfer_id));
       setPullResults((prev) => ({
         ...prev,
         [e.payload.transfer_id]: {
@@ -351,6 +353,9 @@ export default function App() {
 
         <section className="peers">
           <h2>待拉取文件</h2>
+          <p className="hint">
+            小于自动拉取阈值的文件会直接自动拉取到本机，其余点「拉取」手动下载
+          </p>
           {pendingOffers.length === 0 ? (
             <p className="hint">还没有待拉取的文件。当对端拷贝文件/图片后，会出现在这里</p>
           ) : (
@@ -363,13 +368,19 @@ export default function App() {
                     <span className="peer-addr">
                       {o.files.length} 个文件 · {fmtSize(o.total_size)}
                     </span>
-                    {isPulling ? (
-                      <span className="peer-addr">拉取中…</span>
-                    ) : (
-                      <button className="btn btn-sm" onClick={() => doPull(o.transfer_id)}>
-                        拉取
-                      </button>
-                    )}
+                {o.auto_pull ? (
+                  isPulling ? (
+                    <span className="peer-addr">自动拉取中…</span>
+                  ) : (
+                    <span className="peer-addr">将自动拉取</span>
+                  )
+                ) : isPulling ? (
+                  <span className="peer-addr">拉取中…</span>
+                ) : (
+                  <button className="btn btn-sm" onClick={() => doPull(o.transfer_id)}>
+                    拉取
+                  </button>
+                )}
                   </li>
                 );
               })}

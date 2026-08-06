@@ -12,6 +12,7 @@ import { getConfig, setConfig, quitApp, type AppConfig } from './api/tauri';
 export default function SettingsPage({ onBack }: { onBack: () => void }) {
   const [cfg, setCfg] = useState<AppConfig | null>(null);
   const [msg, setMsg] = useState('');
+  const [thresholdWarn, setThresholdWarn] = useState('');
 
   useEffect(() => {
     getConfig()
@@ -127,6 +128,32 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
           onChange={(e) => update('sync_dir', e.target.value)}
         />
       </div>
+      <div className="row">
+        <label>自动拉取阈值 (MB，默认 1；超过 10 将提醒)</label>
+        <input
+          type="number"
+          min={0}
+          value={cfg.auto_pull_threshold_mb ?? 1}
+          onChange={(e) => {
+            const raw = e.target.value.trim();
+            const v = Math.round(Number(raw));
+            if (!Number.isFinite(v) || v < 0) return;
+            update('auto_pull_threshold_mb', v as number);
+            if (v > 10) {
+              setThresholdWarn(
+                '阈值超过 10MB：小文件将自动拉取到本机，可能占用较多带宽与磁盘空间（仍可保存）。',
+              );
+            } else {
+              setThresholdWarn('');
+            }
+          }}
+        />
+      </div>
+      {thresholdWarn && (
+        <p className="hint" style={{ color: '#d97706' }}>
+          {thresholdWarn}
+        </p>
+      )}
 
       <div className="section">缓存</div>
       <div className="row">

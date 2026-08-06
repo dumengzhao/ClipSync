@@ -116,6 +116,8 @@ export interface AppConfig {
   theme: 'System' | 'Light' | 'Dark';
   /** 文件同步落盘目录；为空时回退系统下载目录 */
   sync_dir?: string | null;
+  /** 自动拉取阈值（MB）：对端传来的文件总大小小于此值时本端自动拉取，无需手动点击。默认 1 */
+  auto_pull_threshold_mb?: number;
 }
 
 export async function getConfig(): Promise<AppConfig> {
