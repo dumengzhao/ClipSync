@@ -5,7 +5,10 @@
 use hkdf::Hkdf;
 use sha2::Sha256;
 
-pub fn derive_session_keys(shared_secret: &[u8], info: &[u8]) -> crate::error::CryptoResult<[u8; 64]> {
+pub fn derive_session_keys(
+    shared_secret: &[u8],
+    info: &[u8],
+) -> crate::error::CryptoResult<[u8; 64]> {
     let hk = Hkdf::<Sha256>::new(None, shared_secret);
     let mut okm = [0u8; 64];
     hk.expand(info, &mut okm)

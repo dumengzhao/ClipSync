@@ -507,14 +507,16 @@ Linux 的剪贴板机制天生就是延迟设计的：你只需要声明「我�
 
 ### 6.2.1 mDNS 自动发现（局域网）
 
-基于 mDNS（Bonjour）协议，同网段设备自动广播与发现，无需手动输入 IP。使用 `mdns` crate 实现，服务类型 `_clipsync._tcp.local`。
+基于 mDNS（Bonjour / DNS-SD）协议，同网段设备自动广播与发现，无需手动输入 IP。使用 `mdns-sd` crate 实现，服务类型 `_clipsync._tcp.local`。
+
+**端口不写死：** 发现机制本身**不依赖任何固定端口**。每台设备通过 mDNS 广告自己的「真实监听端口」（取自配置，默认 24681，可改），发现方从对端广告的 SRV 记录里**动态读取端口**。因此改端口无需改动发现逻辑，也不会出现「扫描固定端口」这类写死行为。
 
 发现流程：
 
-1. 启动时注册 mDNS 服务，广播本机设备信息（设备名、端口、公钥指纹）
-2. 监听 `_clipsync._tcp.local` 服务，发现同网段其他设备
-3. 在 UI 显示已发现设备列表，用户点击配对
-4. 配对完成后，自动建立 WebSocket 连接
+1. 启动时注册 mDNS 服务，广播本机设备信息（设备名、来自配置的监听端口、device_id），TXT 记录携带 `device_id` / `device_name`
+2. 监听 `_clipsync._tcp.local` 服务，发现同网段其他设备；对端地址与端口均从广告中读取
+3. 在 UI 显示已发现设备列表（`peer-discovered` / `peer-lost` 事件驱动），用户点击配对
+4. 配对完成后，自动建立 WebSocket 连接（连接目标地址与端口来自第 2 步的发现结果）
 
 ### 6.2.2 手动地址连接（跨网或 mDNS 不可用）
 
@@ -545,7 +547,7 @@ UI 提供地址簿功能，保存常用对端地址与备注名。
 - **剪贴板场景流量小**：文本/图片/按需文件分片（默认 2MB/片），WebSocket 帧开销可忽略
 - **多文件并发**：通过 `sync_id + file_index + offset` 在同一连接上多路复用
 
-**端口设计：** 默认端口 24681（可在配置中修改）。跨网穿透只需映射此单端口。所有通信均为 TCP（无 UDP 依赖，对内网穿透工具友好）。
+**端口设计：** 默认端口 24681，作为**可配置默认值**（见 `AppConfig.listen_port`，范围 1..=65535，配置可持久化、运行时可通过 `set_config` 修改并即时重新广播 mDNS）。跨网穿透只需映射此单端口。所有通信均为 TCP（无 UDP 依赖，对内网穿透工具友好）。**局域网发现不写死此端口**——对端端口始终从 mDNS 广告动态获取。
 
 **消息复用：** WebSocket 二进制帧首字节区分消息类型，信令 JSON 与文件 Bincode 共用同一连接：
 
@@ -716,6 +718,15 @@ fn derive_session_keys(
 | Linux | Secret Service / libsecret | `dbus-secret-service` |
 
 密钥链条目命名：`com.clipsync.device.<device_id>.identity`。
+
+**代码结构**：与 `clipboard/` 模块同构，按平台拆分独立文件，通过 `#[cfg(target_os)]` 条件编译选择编译：
+
+- `crypto/keystore/mod.rs`：声明三平台子模块，`pub use platform::{store, load}` 统一导出
+- `crypto/keystore/macos.rs`：macOS Keychain 实现（`security-framework`）
+- `crypto/keystore/windows.rs`：Windows DPAPI / Credential Manager 实现（`windows` crate）
+- `crypto/keystore/linux.rs`：Linux Secret Service 实现（`dbus-secret-service`）
+
+> **设计说明**：keystore 仅提供无状态的 `store` / `load` 两个函数，不引入 trait（区别于 `clipboard/` 的 `ClipboardProvider` trait）。文件结构同构即可，接口保持函数式，避免过度设计。
 
 ## 7.4 端到端加密
 
@@ -984,7 +995,11 @@ clipboard-sync/
 │   │   │   ├── aead.rs           # AES-256-GCM
 │   │   │   ├── kdf.rs            # HKDF 密钥派生
 │   │   │   ├── pake.rs           # SPAKE2 配对
-│   │   │   └── keystore.rs       # 平台密钥链封装
+│   │   │   └── keystore/         # 平台密钥链封装（与 clipboard/ 同构）
+│   │   │       ├── mod.rs        # 统一入口：pub use + 类型别名
+│   │   │       ├── windows.rs    # Windows: DPAPI / Credential Manager
+│   │   │       ├── macos.rs      # macOS: Keychain
+│   │   │       └── linux.rs      # Linux: Secret Service (libsecret)
 │   │   ├── cache/                # 缓存模块
 │   │   │   ├── mod.rs
 │   │   │   └── file_cache.rs     # 文件缓存管理（LRU）
@@ -2360,5 +2375,84 @@ CI 自动检查以上清单项，未勾选或检查失败将阻塞 PR 合并。
 - X25519 + Ed25519 密钥管理
 - AES-256-GCM 加密消息封装
 - 设备指纹与信任模型
+
+# 十五、实现进度快照
+
+> 本章记录代码仓库的**真实实现状态**，与前文的设计目标区分开。更新日期：2026-08-06。
+> 代码位于 `client/src-tauri/src`，共约 2200 行 Rust。
+
+## 15.1 已实现模块
+
+| 模块 | 文件 | 状态 | 说明 |
+|---|---|---|---|
+| 剪贴板抽象 | `clipboard/mod.rs`、`types.rs` | ✅ 完成 | `ClipboardProvider` trait、`ClipboardContent`/`FileMeta`/`SyncMark`/`DeviceId`/`SyncId` |
+| 剪贴板 Windows 实现 | `clipboard/windows.rs` | ✅ 完成 | Win32 `OpenClipboard` 重试、`CF_UNICODETEXT` 读写、`CF_DIB` 读取、`GetClipboardSequenceNumber` 轮询监听 |
+| 密钥存储 Windows | `crypto/keystore/windows.rs` | ✅ 完成 | Credential Manager（`CredWriteW`/`CredReadW`/`CredDeleteW`） |
+| 密钥存储 macOS | `crypto/keystore/macos.rs` | ✅ 完成 | Keychain（`security-framework`），未在 macOS 机器上实测 |
+| 密钥存储 Linux | `crypto/keystore/linux.rs` | ✅ 完成 | Secret Service（`dbus-secret-service`），未在 Linux 机器上实测 |
+| 设备身份 | `device/identity.rs` | ✅ 完成 | X25519 长期密钥对生成、密钥链持久化、SHA-256 指纹 |
+| 设备注册表 | `device/registry.rs` | ✅ 完成 | `PairedDevice` + `TrustLevel`，增删查列 |
+| PAKE 配对原语 | `crypto/pake.rs` | ✅ 完成 | SPAKE2（Ed25519Group）发起方/应答方，6 位配对码生成，3 项单测 |
+| 对称加密 | `crypto/aead.rs`、`kdf.rs` | ✅ 完成 | AES-256-GCM 封装 + HKDF 会话密钥派生 |
+| 防回环 | `sync/anti_loop.rs` | ✅ 完成 | 自定义标记 + BLAKE3 内容哈希 + Lamport 计数，短/长窗口去重 |
+| 冲突时钟 | `sync/conflict.rs` | ✅ 完成 | `LamportClock::tick/observe`（引擎尚未接入，多设备阶段启用） |
+| 同步引擎 | `sync/engine.rs` | ✅ 单机链路完成 | 启动剪贴板监听 → 内容哈希去重 → `mark_outgoing` → broadcast → `app.emit("clipboard-changed")` |
+| 手动地址簿 | `discovery/manual.rs` | ✅ 完成 | `ManualAddressBook` 增删查，启动时从配置载入 |
+| mDNS 局域网发现 | `discovery/mdns.rs` | ✅ 完成（单端可验证） | DNS-SD 广播+浏览（`mdns-sd`），本机广告真实 `listen_port`（配置默认 24681，可改），发现方从 SRV/TXT 动态读端口与 `device_id`/`device_name`，**不写死任何端口**；发出 `peer-discovered`/`peer-lost` 事件；`mdns` feature 关闭时退化为无操作占位。双设备同网段实测仍待阶段一 |
+| WebSocket 帧协议 | `transfer/websocket.rs` | ✅ 编解码完成 | `[1 byte msg_type][payload]` 编解码 + 类型枚举，5 项单测；连接/监听待阶段一 |
+| 文件缓存 | `cache/file_cache.rs` | ✅ 完成 | LRU + TTL 淘汰，`cache_key_for(sync_id, file_index)` |
+| 配置 | `config/settings.rs`、`mod.rs`、`migration.rs` | ✅ 完成 | `AppConfig`（含可改 `listen_port`）+ `load_config`/`save_config` 持久化到 `<app_config_dir>/config.json` + schema 版本号与迁移骨架（当前 v1），4 项单测 |
+| 日志 | `obs/logging.rs` | ✅ 完成 | `tracing-appender` 按天滚动，三平台日志目录按第 11.5.1 节约定 |
+| 错误类型 | `error.rs` | ✅ 完成 | `thiserror` 集中定义 |
+| Tauri 命令层 | `tauri_cmd.rs`、`lib.rs` | ✅ 完成 | 13 个命令：版本/设备信息/配置读写/剪贴板读写/配对设备列表/手动地址增删查/缓存统计/已发现对端列表；`AppState` 统一持有 engine、registry、地址簿、缓存、discovery、discovered；启动时加载持久化配置并拉起同步引擎与 mDNS 发现 |
+
+## 15.2 未实现（按阶段排期的占位）
+
+以下文件当前仅为文档注释占位，**不构成编译错误**，按第十二章路线分阶段补齐：
+
+| 模块 | 文件 | 计划阶段 | 阻塞原因 |
+|---|---|---|---|
+| 剪贴板 macOS 实现 | `clipboard/macos.rs` | 阶段一 / 四 | 需 macOS 机器与 `objc2` 绑定验证 |
+| 剪贴板 Linux 实现 | `clipboard/linux.rs` | 阶段一 / 五 | 需 X11/Wayland 环境验证 |
+| 配对流程编排 | `device/pairing.rs` | 阶段一 | 依赖双端网络通道；PAKE 原语已就绪 |
+| 文件流式传输 | `transfer/file_stream.rs` | 阶段三 | 依赖 WebSocket 连接层 |
+| 性能指标 | `obs/metrics.rs` | 阶段六 | — |
+| 崩溃上报 | `obs/crash.rs` | 阶段六 | — |
+| 自动更新 | `update/mod.rs` | 阶段六 | 依赖 updater 签名密钥与 release 流程 |
+
+**当前可运行的端到端链路（单机）：** 用户复制 → Windows 剪贴板监听触发 → 引擎读取内容 → 哈希去重 → 生成 `SyncMark`（Lamport 递增） → 广播事件 → 前端收到 `clipboard-changed`。应用启动时同时拉起 mDNS 发现（广播本机 `listen_port` 并订阅同网段对端，发出 `peer-discovered`/`peer-lost` 事件），`list_discovered_peers` 可查询。`listen_port` 为可配置默认（24681），经 `set_config` 修改后会持久化并即时重新广播。跨设备实际同步仍需补齐 `transfer` 连接层与 `pairing` 编排。
+
+## 15.3 已通过的验证
+
+在 `client/src-tauri` 下执行，全部通过：
+
+| 检查项 | 命令 | 结果 |
+|---|---|---|
+| 编译 | `cargo build` | ✅ 通过 |
+| Lint | `cargo clippy --all-targets --all-features -- -D warnings` | ✅ 零警告 |
+| 单元测试 | `cargo test` | ✅ 17 passed / 0 failed |
+| 格式 | `cargo fmt --all -- --check` | ✅ 无 diff |
+| Feature 隔离 | `cargo build --no-default-features` | ✅ 通过 |
+| 应用启动 | `npm run tauri dev` | ✅ Vite `:1420` + `clipsync.exe` 正常启动 |
+
+> `.rustfmt.toml` 中的 `imports_granularity` / `group_imports` 为 nightly 专属选项，stable 工具链下仅产生提示性警告，不影响 `--check` 结果。
+
+## 15.4 已修复的关键问题
+
+- **`windows` crate 0.58 API 定位**：`HGLOBAL` 在 `Win32::Foundation`（不在 `Win32::System::Memory`）；`GlobalLock`/`GlobalSize` 返回裸值而非 `Result`，不可加 `?`，且解引用需显式 `unsafe` 块；`CF_UNICODETEXT`/`CF_DIB` 是 `CLIPBOARD_FORMAT(u16)`，需 `.0 as u32`。
+- **防回环逻辑缺陷**：`AntiLoop::mark_outgoing` 此前未记录自身生成的 `sync_id`，导致 `is_loopback` 永远不匹配、回环检测形同虚设。已修复为写入 `last_outgoing_sync_id`，并按「后一次标记覆盖前一次」的语义重写单测。
+
+## 15.5 下一步建议
+
+1. **阶段一收尾**：实现 `transfer/websocket.rs` 的 connect/listen（`tokio-tungstenite`）与 `device/pairing.rs` 配对编排，打通双设备文本同步（mDNS 已能发现对端，缺的是连接层与配对握手）。
+2. **接入冲突时钟**：`sync/conflict.rs` 的 `LamportClock` 在多设备消息进入后接入引擎。
+3. **平台补齐**：在 macOS / Linux 机器上实现并实测对应 `clipboard` 实现与 keystore。
+4. **CI 实跑验证**：`.github/workflows/` 下 `ci.yml` / `nightly.yml` / `release.yml` / `security.yml` 四个工作流已就位（已适配 `client/` 子目录与 `--manifest-path src-tauri/Cargo.toml`），但三平台矩阵尚未实际跑过。首次推送时预计 macOS / Linux job 会在 `cargo clippy` 阶段暴露平台实现缺口（见 15.2），需同步补齐或临时放宽。
+
+## 15.6 本次改动要点（2026-08-06）
+
+- **设备发现改为 mDNS（不再写死端口）**：`discovery/mdns.rs` 从占位 doc 注释落地为真实 DNS-SD 实现。每台设备广告自己的真实 `listen_port`（来自配置，默认 24681，可改），发现方从对端 SRV/TXT 记录**动态读取端口与设备标识**，发现逻辑本身不含任何固定端口常量。
+- **端口可配置、可持久化、热更新**：`AppConfig.listen_port` 已存在（默认 24681），新增 `config/mod.rs` 的 `load_config`/`save_config`（持久化到 `<app_config_dir>/config.json`）；新增 Tauri 命令 `set_config`（校验端口、落盘、改端口时即时重新广播 mDNS）与 `list_discovered_peers`；`AppState.config` 改为 `Mutex<AppConfig>` 以支持运行时修改。
+- 验证：`cargo build` / `cargo clippy --all-targets --all-features -- -D warnings` / `cargo test`（17 passed）/ `cargo fmt --check` / `cargo build --no-default-features` 全绿。`mdns` feature 关闭时 mDNS 退化为无操作占位，构建不受影响。
 
 > （注：部分内容可能由 AI 生成）
