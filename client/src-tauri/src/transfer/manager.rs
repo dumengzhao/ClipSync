@@ -46,6 +46,26 @@ const PAIRING_ARM_TIMEOUT: Duration = Duration::from_secs(120);
 /// 手动配对（发起方）的最大尝试次数，每次间隔 5 秒；与武装有效期接近，避免无限重试。
 const MAX_PAIRING_ATTEMPTS: u32 = 24;
 
+/// 口令确认标签的域分隔串，避免该 HMAC 与其它用途的 MAC 混淆。
+const VERIFY_CONTEXT: &[u8] = b"clipsync-verify-v1";
+
+/// 握手阶段可区分的失败原因，供上层决定是否重试。
+#[derive(Debug)]
+enum HandshakeError {
+    /// 两端配对码不一致。相同的码重试多少次都不会成功，必须立即终止。
+    CodeMismatch,
+}
+
+impl std::fmt::Display for HandshakeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CodeMismatch => write!(f, "配对码不一致"),
+        }
+    }
+}
+
+impl std::error::Error for HandshakeError {}
+
 /// 跨连接传输的剪贴板信封（加密前 / 解密后）
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SyncEnvelope {
@@ -261,7 +281,29 @@ impl ConnectionHub {
             {
                 // Ok 表示已成功配对并进入加密通道（直到对端断开才返回），直接结束
                 Ok(()) => break,
-                Err(e) => tracing::warn!("pair attempt {} to {} failed: {e}", attempt + 1, peer.device_name),
+                Err(e) => {
+                    // 口令不一致是确定性失败：同一个码再试多少次都不会成功，
+                    // 继续重试只会每 5 秒重复弹一次错误。立即终止并给出明确提示。
+                    if e.downcast_ref::<HandshakeError>().is_some() {
+                        tracing::warn!("pairing with {} rejected: {e}", peer.device_name);
+                        self.connecting.lock().unwrap().remove(&key);
+                        if let Some(app) = self.app.lock().unwrap().clone() {
+                            let _ = app.emit(
+                                "pairing-failed",
+                                serde_json::json!({
+                                    "device_id": peer.device_id,
+                                    "reason": "配对码不一致，请核对对方界面上显示的 6 位码",
+                                }),
+                            );
+                        }
+                        return;
+                    }
+                    tracing::warn!(
+                        "pair attempt {} to {} failed: {e}",
+                        attempt + 1,
+                        peer.device_name
+                    );
+                }
             }
             if attempt + 1 < MAX_PAIRING_ATTEMPTS {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -338,8 +380,9 @@ impl ConnectionHub {
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
         // 1) Hello 交换：先发自己的身份，再读对方身份
+        let my_id = self.identity.id.0.clone();
         let my_hello = HelloPayload {
-            device_id: self.identity.id.0.clone(),
+            device_id: my_id.clone(),
             device_name: self.identity.name.clone(),
             public_key: base64::engine::general_purpose::STANDARD
                 .encode(self.identity.public_key_bytes()),
@@ -350,6 +393,11 @@ impl ConnectionHub {
             .map_err(|e| anyhow::anyhow!("bad hello payload: {e}"))?;
         let peer_id = peer_hello.device_id.clone();
         let peer_name = peer_hello.device_name.clone();
+
+        // 防御：拒绝与自身建立连接（自连时双方 id 相同，会让口令确认失去意义）
+        if peer_id == my_id {
+            anyhow::bail!("拒绝与自身建立连接");
+        }
 
         // 2) 选择口令
         let pw = match role {
@@ -396,18 +444,31 @@ impl ConnectionHub {
             }
         };
 
-        // 4) HMAC 校验：确认两端使用同一口令（错误口令会派生不同密钥 → 校验失败）
-        let my_tag = hmac_sha256(&key, peer_id.as_bytes());
+        // 4) HMAC 校验：确认两端使用同一口令（错误口令会派生不同密钥 → 校验失败）。
+        //
+        // 关键：标签必须**各自绑定发送者身份**，而不是绑定接收者。每端发送
+        // `HMAC(key, ctx || 自己的 id)`，并用 `HMAC(key, ctx || 对端 id)` 去核对收到的值。
+        // 若两端都用「对端 id」做输入再直接比较，即使密钥完全一致，因 id 不同，
+        // 两个标签也永远不等 —— 那样配对会 100% 失败。
+        let my_tag = verify_tag(&key, &my_id);
+        let expected_peer_tag = verify_tag(&key, &peer_id);
         send_frame(&mut ws, MessageType::Verify, &my_tag).await?;
         let (_vt, peer_tag) = recv_frame(&mut ws).await?;
-        if peer_tag.len() != 32 || peer_tag != my_tag {
-            if let Some(app) = self.app.lock().unwrap().clone() {
-                let _ = app.emit(
-                    "pairing-failed",
-                    serde_json::json!({ "device_id": peer_id, "reason": "配对码不一致" }),
-                );
+        if !ct_eq(&peer_tag, &expected_peer_tag) {
+            // 发起方的提示统一由 `pair_with` 发出（它知道用户点了哪台设备，且能
+            // 立即终止重试），这里只替应答方提示，避免同一次失败弹两遍。
+            if matches!(role, Role::Responder) {
+                if let Some(app) = self.app.lock().unwrap().clone() {
+                    let _ = app.emit(
+                        "pairing-failed",
+                        serde_json::json!({
+                            "device_id": peer_id,
+                            "reason": format!("与「{peer_name}」的配对码不一致"),
+                        }),
+                    );
+                }
             }
-            anyhow::bail!("配对校验失败（配对码不一致）");
+            return Err(HandshakeError::CodeMismatch.into());
         }
 
         tracing::info!("paired with {} ({})", peer_name, peer_addr);
@@ -572,11 +633,27 @@ fn derive_session_key(shared: &[u8; 32]) -> anyhow::Result<[u8; 32]> {
 
 type HmacSha256 = Hmac<Sha256>;
 
-fn hmac_sha256(key: &[u8; 32], data: &[u8]) -> Vec<u8> {
-    let mut mac =
-        HmacSha256::new_from_slice(key).expect("hmac accepts 32-byte key");
-    mac.update(data);
+/// 生成口令确认标签：`HMAC(session_key, VERIFY_CONTEXT || device_id)`。
+///
+/// 每端用**自己的 id** 生成待发送标签，用**对端 id** 生成期望值来核对，
+/// 保证两端计算出的两个标签一一对应；口令不同则会话密钥不同，标签必然对不上。
+fn verify_tag(key: &[u8; 32], device_id: &str) -> Vec<u8> {
+    let mut mac = HmacSha256::new_from_slice(key).expect("hmac accepts 32-byte key");
+    mac.update(VERIFY_CONTEXT);
+    mac.update(device_id.as_bytes());
     mac.finalize().into_bytes().to_vec()
+}
+
+/// 定长常量时间比较，避免通过比较耗时泄漏标签前缀信息。
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 fn sha256_hex(data: &[u8]) -> String {
@@ -589,4 +666,51 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回归测试：同一配对码下，两端**交叉核对**的口令确认标签必须相等。
+    ///
+    /// 早期实现两端都用「对端 id」生成标签后直接相互比较，即使会话密钥一致，
+    /// 由于 id 不同，标签也永远不等，导致配对 100% 报「配对码不一致」。
+    #[test]
+    fn verify_tags_cross_match_with_same_code() {
+        let pw = "123456";
+        let init = start_initiator(pw);
+        let resp = start_responder(pw);
+        let init_msg = init.message.clone();
+        let k_a = derive_session_key(&init.finish(&resp.message).unwrap()).unwrap();
+        let k_b = derive_session_key(&resp.finish(&init_msg).unwrap()).unwrap();
+        assert_eq!(k_a, k_b, "相同配对码应派生出相同会话密钥");
+
+        let (id_a, id_b) = ("device-a", "device-b");
+        // A 用自己的 id 发标签，B 用「A 的 id」算期望值核对
+        assert!(ct_eq(&verify_tag(&k_a, id_a), &verify_tag(&k_b, id_a)));
+        // 反方向同理
+        assert!(ct_eq(&verify_tag(&k_b, id_b), &verify_tag(&k_a, id_b)));
+    }
+
+    /// 配对码不同 → 会话密钥不同 → 交叉核对必须失败。
+    #[test]
+    fn verify_tags_mismatch_with_wrong_code() {
+        let init = start_initiator("123456");
+        let resp = start_responder("654321");
+        let init_msg = init.message.clone();
+        let k_a = derive_session_key(&init.finish(&resp.message).unwrap()).unwrap();
+        let k_b = derive_session_key(&resp.finish(&init_msg).unwrap()).unwrap();
+        assert!(!ct_eq(
+            &verify_tag(&k_a, "device-a"),
+            &verify_tag(&k_b, "device-a")
+        ));
+    }
+
+    #[test]
+    fn ct_eq_rejects_length_and_content_diff() {
+        assert!(ct_eq(b"abc", b"abc"));
+        assert!(!ct_eq(b"abc", b"abd"));
+        assert!(!ct_eq(b"abc", b"ab"));
+    }
 }
