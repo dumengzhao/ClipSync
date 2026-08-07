@@ -159,7 +159,11 @@ impl SyncEngine {
                 if let Ok(paths) = clipboard.read_file_paths().await {
                     if !paths.is_empty() {
                         if file_offer_suppressed.load(Ordering::SeqCst) {
-                            // 本次是「拉取完成后自动写剪贴板」触发的，抑制回环
+                            // 本次是「拉取完成后自动写剪贴板」触发的，抑制回环。
+                            // 必须同步更新 last_file_hash，否则下一轮轮询会因 hash
+                            // 不匹配而再次广播 Offer，形成"本机也拉取一次"的死循环。
+                            let h = file_paths_hash(&paths);
+                            *last_file_hash.lock().unwrap() = Some(h);
                             file_offer_suppressed.store(false, Ordering::SeqCst);
                         } else {
                             let h = file_paths_hash(&paths);
