@@ -157,44 +157,82 @@ impl MdnsDiscovery {
                             .lock()
                             .find_by_addr(&addr_key)
                             .cloned();
+                        // 兜底：对端重建身份后 device_id 变了、且历史记录没有 last_addr
+                        // （无法按地址匹配），但设备名不变。按名字匹配以识别同一台设备。
+                        let existing_by_name = match (&existing_by_id, &existing_by_addr) {
+                            (None, None) => st
+                                .registry
+                                .lock()
+                                .find_by_name(&peer.device_name)
+                                .cloned(),
+                            _ => None,
+                        };
 
                         // 若发生身份迁移（同地址、换了 device_id），记录旧 id 以便从注册表删除
                         let mut migrated_old_id: Option<String> = None;
-                        let (is_paired, mut device) = match (existing_by_id, existing_by_addr) {
-                            (Some(d), _) => (true, d),
-                            (None, Some(d)) => {
-                                // 同地址但 device_id 变了：自动迁移配对记录与 link secret。
-                                // link secret 是双方共享口令，与 device_id 无关，迁移后可静默重连。
-                                let old_id = d.device_id.0.clone();
-                                let new_id = peer.device_id.clone();
-                                let migrated = st.hub.migrate_pairing(&app2, &old_id, &new_id);
-                                // 无论 link secret 迁移是否成功，都要删除旧记录并通知前端，
-                                // 否则注册表里会残留一条永远离线的僵尸设备（重复来源）。
-                                migrated_old_id = Some(old_id.clone());
-                                let _ = app2.emit("peer-unpaired", &old_id);
-                                if !migrated {
-                                    tracing::warn!(
-                                        "对端身份变更 {old_id} -> {new_id}，但 link secret 迁移失败\
-                                         （内存缓存缺失），可能需要重新配对"
-                                    );
+                        let (is_paired, mut device) =
+                            match (existing_by_id, existing_by_addr, existing_by_name) {
+                                (Some(d), _, _) => (true, d),
+                                (None, Some(d), _) => {
+                                    // 按 last_addr 匹配到同地址对端，但 device_id 变了：迁移身份
+                                    let old_id = d.device_id.0.clone();
+                                    let new_id = peer.device_id.clone();
+                                    if old_id != new_id {
+                                        let migrated =
+                                            st.hub.migrate_pairing(&app2, &old_id, &new_id);
+                                        migrated_old_id = Some(old_id.clone());
+                                        let _ = app2.emit("peer-unpaired", &old_id);
+                                        if !migrated {
+                                            tracing::warn!(
+                                                "对端身份变更 {old_id} -> {new_id}（按地址识别），\
+                                                 但 link secret 迁移失败，可能需要重新配对"
+                                            );
+                                        }
+                                    }
+                                    (
+                                        true,
+                                        crate::device::registry::PairedDevice {
+                                            device_id: crate::clipboard::types::DeviceId(new_id),
+                                            ..d
+                                        },
+                                    )
                                 }
-                                (
-                                    true,
+                                (None, None, Some(d)) => {
+                                    // 按设备名兜底识别为同一台已配对设备（身份变更）
+                                    let old_id = d.device_id.0.clone();
+                                    let new_id = peer.device_id.clone();
+                                    let migrated =
+                                        st.hub.migrate_pairing(&app2, &old_id, &new_id);
+                                    migrated_old_id = Some(old_id.clone());
+                                    let _ = app2.emit("peer-unpaired", &old_id);
+                                    if !migrated {
+                                        tracing::warn!(
+                                            "对端身份变更 {old_id} -> {new_id}（按名称识别），\
+                                             但 link secret 迁移失败，可能需要重新配对"
+                                        );
+                                    }
+                                    (
+                                        true,
+                                        crate::device::registry::PairedDevice {
+                                            device_id: crate::clipboard::types::DeviceId(new_id),
+                                            ..d
+                                        },
+                                    )
+                                }
+                                (None, None, None) => (
+                                    false,
                                     crate::device::registry::PairedDevice {
-                                        device_id: crate::clipboard::types::DeviceId(new_id),
-                                        ..d
+                                        device_id: crate::clipboard::types::DeviceId(
+                                            peer.device_id.clone(),
+                                        ),
+                                        device_name: peer.device_name.clone(),
+                                        fingerprint: String::new(),
+                                        trust: crate::device::registry::TrustLevel::Unverified,
+                                        last_seen: 0,
+                                        last_addr: None,
                                     },
-                                )
-                            }
-                            (None, None) => (false, crate::device::registry::PairedDevice {
-                                device_id: crate::clipboard::types::DeviceId(peer.device_id.clone()),
-                                device_name: peer.device_name.clone(),
-                                fingerprint: String::new(),
-                                trust: crate::device::registry::TrustLevel::Unverified,
-                                last_seen: 0,
-                                last_addr: None,
-                            }),
-                        };
+                                ),
+                            };
 
                         // 用最新发现信息刷新名称 / 地址 / 在线时间
                         device.device_name = peer.device_name.clone();
