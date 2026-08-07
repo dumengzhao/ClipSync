@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { getConfig, setConfig, type AppConfig } from './api/tauri';
+import { open } from '@tauri-apps/plugin-dialog';
 
 /**
  * 设置窗口页面。
@@ -35,6 +36,13 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
       setMsg('已保存（端口等部分设置即时或重启后生效）');
     } catch (e) {
       setMsg('保存失败: ' + String(e));
+    }
+  };
+
+  const pickSyncDir = async () => {
+    const selected = await open({ directory: true, multiple: false });
+    if (typeof selected === 'string') {
+      update('sync_dir', selected);
     }
   };
 
@@ -161,12 +169,19 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
       <div className="section">文件同步</div>
       <div className="row">
         <label>文件同步目录（留空则用系统下载目录）</label>
-        <input
-          type="text"
-          placeholder="例如 D:/ClipSync 或 /home/user/ClipSync"
-          value={cfg.sync_dir ?? ''}
-          onChange={(e) => update('sync_dir', e.target.value)}
-        />
+        <div style={{ display: 'flex', gap: '0.5rem', flex: '0 0 auto' }}>
+          <input
+            type="text"
+            style={{ width: '180px' }}
+            placeholder="例如 D:/ClipSync"
+            value={cfg.sync_dir ?? ''}
+            onChange={(e) => update('sync_dir', e.target.value)}
+          />
+          <button className="btn btn-sm btn-ghost" onClick={pickSyncDir}>
+            浏览
+          </button>
+        </div>
+      </div>
       </div>
       <div className="row">
         <label>自动拉取阈值 (MB，默认 1；超过 10 将提醒)</label>
