@@ -41,9 +41,9 @@ body {
 
 .app {
   max-width: 1000px;
-  margin: 0 auto;
+  margin: 0;
   padding: 2rem;
-  text-align: center;
+  text-align: left;
 }
 
 .app-header h1 {
