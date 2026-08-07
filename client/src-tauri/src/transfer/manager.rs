@@ -151,6 +151,10 @@ struct HelloPayload {
     device_name: String,
     /// 身份公钥（base64），用于生成指纹供用户核对
     public_key: String,
+    /// 本端 WebSocket 监听端口。对端据此拼出可拨号地址（对端 IP + 此端口），
+    /// 使应答方在 mDNS 失效时也能记录 last_addr 兜底重连——应答方从 TCP 连接里
+    /// 只能拿到对端的临时源端口，无法直接回拨。
+    listen_port: u16,
 }
 
 /// 连接中枢：持有监听端口、已配对口令缓存、武装中的配对码，并协调本地/远端剪贴板流转。
@@ -177,6 +181,8 @@ pub struct ConnectionHub {
     active_pulls: Mutex<HashMap<String, PullState>>,
     /// 文件分片大小（字节）
     chunk_size: usize,
+    /// 本端 WebSocket 监听端口，通过 Hello 告知对端，使应答方也能拼出对端可拨号地址。
+    listen_port: std::sync::atomic::AtomicU16,
     /// 应用句柄（用于广播连接状态事件 / 写注册表 / 解析下载目录）
     app: Mutex<Option<AppHandle>>,
 }
@@ -195,6 +201,7 @@ impl ConnectionHub {
             pending_offers: Mutex::new(HashMap::new()),
             active_pulls: Mutex::new(HashMap::new()),
             chunk_size: 256 * 1024, // 256 KiB/片
+            listen_port: std::sync::atomic::AtomicU16::new(0),
             app: Mutex::new(None),
         })
     }
@@ -235,6 +242,35 @@ impl ConnectionHub {
 
     pub fn is_paired(&self, device_id: &str) -> bool {
         self.paired_codes.lock().unwrap().contains_key(device_id)
+    }
+
+    /// 对端身份迁移：对端从同一 `ip:port` 出现但换了 device_id（重建身份）时，
+    /// 把 link secret 从旧 id 挪到新 id。link secret 是双方共享口令，与 device_id
+    /// 无关，迁移后用新 id 即可静默重连，无需重新配对。同时把密钥链里的持久化口令
+    /// 改存到新 id，保证重启后仍能恢复。返回是否确实发生了迁移。
+    pub fn migrate_pairing(&self, app: &AppHandle, old_id: &str, new_id: &str) -> bool {
+        if old_id == new_id {
+            return false;
+        }
+        let secret = {
+            let mut g = self.paired_codes.lock().unwrap();
+            match g.remove(old_id) {
+                Some(s) => {
+                    g.insert(new_id.to_string(), s.clone());
+                    Some(s)
+                }
+                None => None,
+            }
+        };
+        if let Some(secret) = secret {
+            // 持久化层：新 id 下写入口令，再删旧 id，保证重启后恢复得到
+            let _ = crate::device::store::store_secret(app, new_id, &secret);
+            crate::device::store::delete_secret(app, old_id);
+            tracing::info!("对端身份已迁移：{old_id} -> {new_id}");
+            true
+        } else {
+            false
+        }
     }
 
     /// 启动时把磁盘上恢复出来的 link secret 装回内存，使已配对设备无需再次交互即可重连。
@@ -721,6 +757,8 @@ impl ConnectionHub {
     /// 启动监听器、本地剪贴板广播器，并订阅 mDNS 发现事件（仅对已配对对端自动重连）。
     pub async fn start(self: Arc<Self>, app: AppHandle, listen_port: u16) {
         *self.app.lock().unwrap() = Some(app.clone());
+        self.listen_port
+            .store(listen_port, std::sync::atomic::Ordering::Relaxed);
 
         // 1) 本地剪贴板变化广播器：订阅引擎事件，加密转发给所有对端
         {
@@ -1045,6 +1083,9 @@ impl ConnectionHub {
             device_name: self.identity.name.clone(),
             public_key: base64::engine::general_purpose::STANDARD
                 .encode(self.identity.public_key_bytes()),
+            listen_port: self
+                .listen_port
+                .load(std::sync::atomic::Ordering::Relaxed),
         };
         send_frame(&mut ws, MessageType::Hello, &serde_json::to_vec(&my_hello)?).await?;
         let (_ht, hpayload) = recv_frame(&mut ws).await?;
@@ -1150,17 +1191,24 @@ impl ConnectionHub {
             }
 
             let state = app.state::<AppState>();
-            // 仅发起方（本端拨号出去的一方）才知道对端的可拨号地址 host:port；
-            // 应答方只拿到对端的临时源端口，无法用于重连，故只在发起方记录 last_addr。
-            // 重连地址用于 mDNS 失效时兜底直连，避免已配对设备因发现不到而永远离线。
+            // 双方都要记录可拨号地址，供 mDNS 失效时兜底重连：
+            // - 发起方：peer_addr 本就是拨号目标（对端 IP:监听端口），直接用。
+            // - 应答方：TCP 连接里的 peer_addr 是对端的临时源端口，不可回拨；
+            //   但 Hello 里带了对端声明的 listen_port，用对端 IP + 该端口拼出地址。
+            //   若对端是旧版本未带 listen_port（=0），则保留已有的 last_addr。
             let last_addr = if matches!(role, Role::Initiator) {
                 Some(peer_addr.clone())
             } else {
-                state
-                    .registry
-                    .lock()
-                    .get(&DeviceId(peer_id.clone()))
-                    .and_then(|d| d.last_addr.clone())
+                let host = peer_addr.rsplit_once(':').map(|(h, _)| h).unwrap_or("");
+                if !host.is_empty() && peer_hello.listen_port != 0 {
+                    Some(format!("{host}:{}", peer_hello.listen_port))
+                } else {
+                    state
+                        .registry
+                        .lock()
+                        .get(&DeviceId(peer_id.clone()))
+                        .and_then(|d| d.last_addr.clone())
+                }
             };
             state.registry.lock().add(PairedDevice {
                 device_id: DeviceId(peer_id.clone()),

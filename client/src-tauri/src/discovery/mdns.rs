@@ -140,13 +140,95 @@ impl MdnsDiscovery {
                             port: info.get_port(),
                         };
 
-                        // 写入共享存储，供 list_discovered_peers 查询
+                        // 写入共享存储（重连监控按此表发现已配对对端），仍要保留
                         let st = app2.state::<crate::AppState>();
-                        st.discovered
+                        let addr_key = format!("{}:{}", peer.addr, peer.port);
+
+                        // 去重以 `ip:port` 为准，而非 device_id：对端可能在重建身份后
+                        // 换了 device_id，但仍从同一地址出现，应仍识别为同一台已配对设备。
+                        // 1) 先按新 device_id 查；2) 再按 last_addr 查（身份已变更的情况）。
+                        let existing_by_id = st
+                            .registry
                             .lock()
-                            .insert(peer.device_id.clone(), peer.clone());
-                        // 通知前端实时刷新
-                        let _ = app2.emit("peer-discovered", &peer);
+                            .get(&crate::clipboard::types::DeviceId(peer.device_id.clone()))
+                            .cloned();
+                        let existing_by_addr = st
+                            .registry
+                            .lock()
+                            .find_by_addr(&addr_key)
+                            .cloned();
+
+                        // 若发生身份迁移（同地址、换了 device_id），记录旧 id 以便从注册表删除
+                        let mut migrated_old_id: Option<String> = None;
+                        let (is_paired, mut device) = match (existing_by_id, existing_by_addr) {
+                            (Some(d), _) => (true, d),
+                            (None, Some(d)) => {
+                                // 同地址但 device_id 变了：自动迁移配对记录与 link secret。
+                                // link secret 是双方共享口令，与 device_id 无关，迁移后可静默重连。
+                                let old_id = d.device_id.0.clone();
+                                let new_id = peer.device_id.clone();
+                                let migrated = st.hub.migrate_pairing(&app2, &old_id, &new_id);
+                                if migrated {
+                                    migrated_old_id = Some(old_id.clone());
+                                    // 通知前端移除旧 ID 的条目（将由下面的 peer-paired
+                                    // 以新 ID 重新加入），避免列表里残留离线的旧身份
+                                    let _ = app2.emit("peer-unpaired", &old_id);
+                                }
+                                (
+                                    true,
+                                    crate::device::registry::PairedDevice {
+                                        device_id: crate::clipboard::types::DeviceId(new_id),
+                                        ..d
+                                    },
+                                )
+                            }
+                            (None, None) => (false, crate::device::registry::PairedDevice {
+                                device_id: crate::clipboard::types::DeviceId(peer.device_id.clone()),
+                                device_name: peer.device_name.clone(),
+                                fingerprint: String::new(),
+                                trust: crate::device::registry::TrustLevel::Unverified,
+                                last_seen: 0,
+                                last_addr: None,
+                            }),
+                        };
+
+                        // 用最新发现信息刷新名称 / 地址 / 在线时间
+                        device.device_name = peer.device_name.clone();
+                        device.last_addr = Some(addr_key.clone());
+                        device.last_seen = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+
+                        if is_paired {
+                            let mut reg = st.registry.lock();
+                            // 身份迁移时旧 ID 的记录要删掉，避免残留一条永远离线的僵尸设备
+                            if let Some(old) = migrated_old_id.as_ref() {
+                                reg.remove(&crate::clipboard::types::DeviceId(old.clone()));
+                            }
+                            reg.add(device.clone());
+                            let devices = reg.list();
+                            drop(reg);
+                            crate::device::store::save_devices(&app2, &devices);
+                            // 已配对设备不向前端发 peer-discovered，它只归「已配对设备」区；
+                            // 但通知前端名称/地址可能已更新（身份迁移或改名）
+                            let _ = app2.emit(
+                                "peer-paired",
+                                serde_json::json!({
+                                    "id": device.device_id.0,
+                                    "name": device.device_name,
+                                    "fingerprint": device.fingerprint,
+                                    "trusted": matches!(device.trust, crate::device::registry::TrustLevel::Verified),
+                                    "last_seen": device.last_seen,
+                                }),
+                            );
+                        } else {
+                            // 未配对设备才进前端的「局域网发现」列表
+                            st.discovered
+                                .lock()
+                                .insert(peer.device_id.clone(), peer.clone());
+                            let _ = app2.emit("peer-discovered", &peer);
+                        }
                     }
                     ServiceEvent::ServiceRemoved(full, _) => {
                         // full = "clipsync-<device_id>._clipsync._tcp.local."
@@ -157,7 +239,11 @@ impl MdnsDiscovery {
                             .to_string();
                         let st = app2.state::<crate::AppState>();
                         st.discovered.lock().remove(&did);
-                        let _ = app2.emit("peer-lost", &did);
+                        // 已配对设备的在线状态以实际 WebSocket 连接为准（peer-connected/
+                        // peer-disconnected），mDNS 的 TTL 抖动不应把它标成离线
+                        if !st.hub.is_paired(&did) {
+                            let _ = app2.emit("peer-lost", &did);
+                        }
                     }
                     _ => {}
                 }
