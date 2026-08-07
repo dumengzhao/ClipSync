@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import {
   getVersion,
+  getConfig,
   getPairedDevices,
   listDiscoveredPeers,
   listConnectedPeers,
@@ -17,6 +18,7 @@ import {
   type PendingOffer,
 } from './api/tauri';
 import SettingsPage from './SettingsPage';
+import { applyTheme } from './theme';
 
 /**
  * 主窗口。设置视图在主窗口内嵌显示（dev 模式下 Tauri 额外窗口加载前端不可靠，
@@ -192,6 +194,13 @@ export default function App() {
       unlistenPullStart.then((u) => u());
       unlistenPullComplete.then((u) => u());
     };
+  }, []);
+
+  // 启动时应用已保存的主题（用户选择的明暗，而非仅跟随系统）
+  useEffect(() => {
+    getConfig()
+      .then((c) => applyTheme(c.theme))
+      .catch(() => {});
   }, []);
 
   const generateCode = async () => {
