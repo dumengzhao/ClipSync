@@ -237,6 +237,8 @@ pub struct DeviceInfo {
     pub fingerprint: String,
     pub trusted: bool,
     pub last_seen: u64,
+    /// 对端最后一次出现的可拨号地址（host:port），供前端展示和兜底重连参考
+    pub last_addr: Option<String>,
 }
 
 impl From<PairedDevice> for DeviceInfo {
@@ -247,6 +249,7 @@ impl From<PairedDevice> for DeviceInfo {
             fingerprint: p.fingerprint,
             trusted: matches!(p.trust, TrustLevel::Verified),
             last_seen: p.last_seen,
+            last_addr: p.last_addr,
         }
     }
 }

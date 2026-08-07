@@ -264,7 +264,7 @@ impl ConnectionHub {
         };
         if let Some(secret) = secret {
             // 持久化层：新 id 下写入口令，再删旧 id，保证重启后恢复得到
-            let _ = crate::device::store::store_secret(app, new_id, &secret);
+            crate::device::store::store_secret(app, new_id, &secret);
             crate::device::store::delete_secret(app, old_id);
             tracing::info!("对端身份已迁移：{old_id} -> {new_id}");
             true
@@ -1216,7 +1216,7 @@ impl ConnectionHub {
                 fingerprint: fingerprint.clone(),
                 trust: TrustLevel::Verified,
                 last_seen: now_secs(),
-                last_addr,
+                last_addr: last_addr.clone(),
             });
             let devices = state.registry.lock().list();
             crate::device::store::save_devices(&app, &devices);
@@ -1228,16 +1228,6 @@ impl ConnectionHub {
             }
 
             let _ = app.emit(
-                "peer-paired",
-                serde_json::json!({
-                    "id": peer_id,
-                    "name": peer_name,
-                    "fingerprint": fingerprint,
-                    "trusted": true,
-                    "last_seen": now_secs(),
-                }),
-            );
-            let _ = app.emit(
                 "peer-connected",
                 serde_json::json!({
                     "device_id": peer_id,
@@ -1245,6 +1235,35 @@ impl ConnectionHub {
                     "addr": peer_addr,
                 }),
             );
+            // 首次配对才通知前端「已配对」——重连时设备已在已配对列表中，
+            // 不应重复弹"已与 X 配对"提示；重连只需 peer-connected 即可。
+            if is_fresh_pairing {
+                let _ = app.emit(
+                    "peer-paired",
+                    serde_json::json!({
+                        "id": peer_id,
+                        "name": peer_name,
+                        "fingerprint": fingerprint,
+                        "trusted": true,
+                        "last_seen": now_secs(),
+                        "last_addr": last_addr,
+                    }),
+                );
+            } else {
+                // 重连时设备信息可能已更新（改名 / 换地址），用 peer-info-updated
+                // 通知前端刷新展示，但不触发"已配对"提示
+                let _ = app.emit(
+                    "peer-info-updated",
+                    serde_json::json!({
+                        "id": peer_id,
+                        "name": peer_name,
+                        "fingerprint": fingerprint,
+                        "trusted": true,
+                        "last_seen": now_secs(),
+                        "last_addr": last_addr,
+                    }),
+                );
+            }
             // 应答方配对成功后解除武装，使该配对码仅用一次
             if let Role::Responder = role {
                 self.cancel_pairing();
