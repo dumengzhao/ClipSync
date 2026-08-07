@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { getConfig, setConfig, quitApp, type AppConfig } from './api/tauri';
+import { getConfig, setConfig, type AppConfig } from './api/tauri';
 
 /**
  * 设置窗口页面。
@@ -38,10 +38,6 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
     }
   };
 
-  const quit = () => {
-    quitApp();
-  };
-
   const addManual = () => {
     const addr = maAddr.trim();
     const port = Number(maPort);
@@ -74,9 +70,14 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
     <div className="settings">
       <div className="settings-header">
         <div className="settings-header-inner">
-          <h1>设置</h1>
-          <button className="btn btn-ghost btn-sm" onClick={onBack}>
-            返回
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+            <button className="btn btn-ghost btn-sm" onClick={onBack}>
+              ← 返回
+            </button>
+            <h1>设置</h1>
+          </div>
+          <button className="btn btn-sm" onClick={save}>
+            保存
           </button>
         </div>
       </div>
@@ -249,17 +250,6 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         </select>
       </div>
 
-      <div className="actions">
-        <button className="btn" onClick={save}>
-          保存
-        </button>
-        <button className="btn btn-ghost" onClick={onBack}>
-          完成
-        </button>
-        <button className="btn btn-danger" onClick={quit}>
-          退出 ClipSync
-        </button>
-      </div>
       {msg && <div className="msg">{msg}</div>}
       </div>
     </div>
