@@ -287,12 +287,11 @@ export default function App() {
         <section className="peers">
           <h2>已配对设备</h2>
           {paired.length === 0 ? (
-            <p className="hint">还没有已配对设备，请在下方「局域网发现的设备」中发起配对</p>
+            <p className="hint">还没有已配对设备，请在下方发起配对</p>
           ) : (
             <ul className="peer-list">
               {paired.map((p) => {
                 const isConnected = connected.has(p.id);
-                // 已被发现却还没连上，说明后台正在重连——如实告知，避免误以为卡死
                 const status = isConnected
                   ? '已连接'
                   : discoveredIds.has(p.id)
@@ -319,10 +318,6 @@ export default function App() {
               })}
             </ul>
           )}
-          <p className="hint">
-            若设备长时间「离线」：多为局域网发现（mDNS）被防火墙拦截。配对成功后本端会记住对方地址并自动重连；
-            仍连不上时，可在「设置 → 手动连接地址」填对方的 IP:端口 兜底直连。
-          </p>
         </section>
 
         <section className="peers">
@@ -381,11 +376,8 @@ export default function App() {
 
         <section className="peers">
           <h2>待拉取文件</h2>
-          <p className="hint">
-            小于自动拉取阈值的文件会直接自动拉取到本机，其余点「拉取」手动下载
-          </p>
           {pendingOffers.length === 0 ? (
-            <p className="hint">还没有待拉取的文件。当对端拷贝文件/图片后，会出现在这里</p>
+            <p className="hint">对端拷贝文件后会出现在这里</p>
           ) : (
             <ul className="peer-list">
               {pendingOffers.map((o) => {
@@ -429,7 +421,7 @@ export default function App() {
                 </li>
               ))}
             </ul>
-            <p className="hint">完成后文件已自动写入本机剪贴板，直接 Ctrl+V 即可粘贴到目标位置</p>
+            <p className="hint">路径已写入剪贴板，Ctrl+V 即可粘贴</p>
           </section>
         )}
 
@@ -438,11 +430,6 @@ export default function App() {
         <button className="btn" onClick={() => setView('settings')}>
           打开设置
         </button>
-        <p className="hint">
-          局域网剪贴板同步（mDNS 自动发现 + 强制交互式 SPAKE2 配对）。一方「生成配对码」，
-          另一方在「局域网发现的设备」中点击「配对」并输入该码即可建立加密通道。
-          配对只需一次——之后重启会自动重连。
-        </p>
       </main>
     </div>
   );
