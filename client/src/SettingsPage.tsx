@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { getConfig, setConfig, type AppConfig } from './api/tauri';
 import { open } from '@tauri-apps/plugin-dialog';
+import { applyTheme } from './theme';
 
 /**
  * 设置窗口页面。
@@ -21,7 +22,10 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
 
   useEffect(() => {
     getConfig()
-      .then(setCfg)
+      .then((c) => {
+        setCfg(c);
+        applyTheme(c.theme);
+      })
       .catch((e) => setMsg('加载配置失败: ' + String(e)));
   }, []);
 
@@ -33,6 +37,7 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
     if (!cfg) return;
     try {
       await setConfig(cfg);
+      applyTheme(cfg.theme);
       setMsg('已保存（端口等部分设置即时或重启后生效）');
     } catch (e) {
       setMsg('保存失败: ' + String(e));
@@ -257,7 +262,14 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
       <div className="section">外观</div>
       <div className="row">
         <label>主题</label>
-        <select value={cfg.theme} onChange={(e) => update('theme', e.target.value as AppConfig['theme'])}>
+        <select
+          value={cfg.theme}
+          onChange={(e) => {
+            const v = e.target.value as AppConfig['theme'];
+            update('theme', v);
+            applyTheme(v);
+          }}
+        >
           <option value="System">跟随系统</option>
           <option value="Light">浅色</option>
           <option value="Dark">深色</option>

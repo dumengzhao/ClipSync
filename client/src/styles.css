@@ -5,8 +5,25 @@
   color: #1a1a1a;
 }
 
+/* 用户显式选择浅色 */
+:root[data-theme='light'] {
+  color-scheme: light;
+  background-color: #f5f5f5;
+  color: #1a1a1a;
+}
+
+/* 用户显式选择深色 */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  background-color: #1a1a1a;
+  color: #f5f5f5;
+}
+
+/* 系统模式（或无 data-theme 时）跟随系统偏好 */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root[data-theme='system'],
+  :root:not([data-theme]) {
+    color-scheme: dark;
     background-color: #1a1a1a;
     color: #f5f5f5;
   }
@@ -241,8 +258,13 @@ body {
   padding: 1rem 1.5rem 0.5rem;
 }
 
+:root[data-theme='dark'] .settings-header {
+  background: rgba(26, 26, 26, 0.85);
+}
+
 @media (prefers-color-scheme: dark) {
-  .settings-header {
+  :root[data-theme='system'] .settings-header,
+  :root:not([data-theme]) .settings-header {
     background: rgba(26, 26, 26, 0.85);
   }
 }
