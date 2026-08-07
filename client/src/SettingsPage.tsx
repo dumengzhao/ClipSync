@@ -211,12 +211,12 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
           ))}
         </ul>
       )}
-      <div className="row">
-        <label>新增手动地址</label>
-        <input placeholder="标签（可选）" value={maLabel} onChange={(e) => setMaLabel(e.target.value)} />
-        <input placeholder="地址 / IP" value={maAddr} onChange={(e) => setMaAddr(e.target.value)} />
+      <div className="row" style={{ gap: '0.5rem' }}>
+        <input type="text" style={{ flex: '0 0 120px' }} placeholder="标签（可选）" value={maLabel} onChange={(e) => setMaLabel(e.target.value)} />
+        <input type="text" style={{ flex: '1 1 auto' }} placeholder="地址 / IP" value={maAddr} onChange={(e) => setMaAddr(e.target.value)} />
         <input
           type="number"
+          style={{ flex: '0 0 70px' }}
           placeholder="端口"
           value={maPort}
           onChange={(e) => setMaPort(e.target.value)}
