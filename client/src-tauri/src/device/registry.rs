@@ -65,6 +65,19 @@ impl DeviceRegistry {
         self.devices.values().find(|d| d.last_addr.as_deref() == Some(addr))
     }
 
+    /// 按设备名查找已配对设备。
+    ///
+    /// 用于身份迁移的兜底：对端重建身份后 device_id 变了、且历史记录里没有
+    /// `last_addr`（无法按地址匹配），但设备名通常不变。在「发现的设备名与
+    /// 某条已配对记录同名、且该记录没有 last_addr」时，据此识别为同一台设备。
+    /// 调用方应保证只有一个未配对对端使用该名字时才采用此匹配，避免误配。
+    pub fn find_by_name(&self, name: &str) -> Option<&PairedDevice> {
+        if name.is_empty() {
+            return None;
+        }
+        self.devices.values().find(|d| d.device_name == name)
+    }
+
     pub fn len(&self) -> usize {
         self.devices.len()
     }
