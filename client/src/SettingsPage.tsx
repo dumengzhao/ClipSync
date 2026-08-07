@@ -182,7 +182,6 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
           </button>
         </div>
       </div>
-      </div>
       <div className="row">
         <label>自动拉取阈值 (MB，默认 1；超过 10 将提醒)</label>
         <input
