@@ -412,7 +412,7 @@ export default function App() {
           <section className="peers">
             <h2>已拉取的文件</h2>
             <ul className="peer-list">
-              {Object.entries(pullResults).map(([tid, r]) => (
+              {Object.entries(pullResults).slice(-3).reverse().map(([tid, r]) => (
                 <li key={tid} className="peer-item">
                   <span className="peer-name">{r.device_name}</span>
                   <span className="peer-addr">
