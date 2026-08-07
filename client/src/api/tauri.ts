@@ -19,6 +19,8 @@ export interface PairedDeviceInfo {
   fingerprint: string;
   trusted: boolean;
   last_seen: number;
+  /** 对端最后一次出现的可拨号地址（host:port） */
+  last_addr?: string | null;
 }
 
 /** 通过 mDNS 发现的局域网对端（与 Rust 端 `DiscoveredPeer` 一致） */

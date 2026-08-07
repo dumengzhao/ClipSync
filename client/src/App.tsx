@@ -157,6 +157,16 @@ export default function App() {
         return n;
       });
     });
+    // 已配对设备的信息更新（mDNS 重新发现 / 重连后名称或地址变更）。
+    // 只刷新展示，不触发"已配对"提示（那是 peer-paired 的职责）。
+    const unlistenInfoUpdated = listen<PairedDeviceInfo>('peer-info-updated', (e) => {
+      setPaired((prev) => {
+        if (prev.some((p) => p.id === e.payload.id)) {
+          return prev.map((p) => (p.id === e.payload.id ? e.payload : p));
+        }
+        return [...prev, e.payload];
+      });
+    });
 
     return () => {
       unlistenSettings.then((u) => u());
@@ -167,6 +177,7 @@ export default function App() {
       unlistenPaired.then((u) => u());
       unlistenFailed.then((u) => u());
       unlistenUnpaired.then((u) => u());
+      unlistenInfoUpdated.then((u) => u());
       unlistenFileOffer.then((u) => u());
       unlistenPullStart.then((u) => u());
       unlistenPullComplete.then((u) => u());
@@ -295,6 +306,11 @@ export default function App() {
                       {status}
                       {p.fingerprint ? ` · ${p.fingerprint.slice(0, 8)}` : ''}
                     </span>
+                    {p.last_addr && (
+                      <span className="peer-addr" style={{ opacity: 0.6 }}>
+                        {p.last_addr}
+                      </span>
+                    )}
                     <button className="btn btn-ghost btn-sm" onClick={() => removePairing(p)}>
                       取消配对
                     </button>

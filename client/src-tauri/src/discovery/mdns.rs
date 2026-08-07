@@ -168,11 +168,15 @@ impl MdnsDiscovery {
                                 let old_id = d.device_id.0.clone();
                                 let new_id = peer.device_id.clone();
                                 let migrated = st.hub.migrate_pairing(&app2, &old_id, &new_id);
-                                if migrated {
-                                    migrated_old_id = Some(old_id.clone());
-                                    // 通知前端移除旧 ID 的条目（将由下面的 peer-paired
-                                    // 以新 ID 重新加入），避免列表里残留离线的旧身份
-                                    let _ = app2.emit("peer-unpaired", &old_id);
+                                // 无论 link secret 迁移是否成功，都要删除旧记录并通知前端，
+                                // 否则注册表里会残留一条永远离线的僵尸设备（重复来源）。
+                                migrated_old_id = Some(old_id.clone());
+                                let _ = app2.emit("peer-unpaired", &old_id);
+                                if !migrated {
+                                    tracing::warn!(
+                                        "对端身份变更 {old_id} -> {new_id}，但 link secret 迁移失败\
+                                         （内存缓存缺失），可能需要重新配对"
+                                    );
                                 }
                                 (
                                     true,
@@ -210,16 +214,17 @@ impl MdnsDiscovery {
                             let devices = reg.list();
                             drop(reg);
                             crate::device::store::save_devices(&app2, &devices);
-                            // 已配对设备不向前端发 peer-discovered，它只归「已配对设备」区；
-                            // 但通知前端名称/地址可能已更新（身份迁移或改名）
+                            // 已配对设备不向前端发 peer-discovered（它只归「已配对设备」区）；
+                            // 用 peer-info-updated 通知前端刷新名称/地址（不触发"已配对"提示）。
                             let _ = app2.emit(
-                                "peer-paired",
+                                "peer-info-updated",
                                 serde_json::json!({
                                     "id": device.device_id.0,
                                     "name": device.device_name,
                                     "fingerprint": device.fingerprint,
                                     "trusted": matches!(device.trust, crate::device::registry::TrustLevel::Verified),
                                     "last_seen": device.last_seen,
+                                    "last_addr": device.last_addr,
                                 }),
                             );
                         } else {
