@@ -72,7 +72,7 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         <div className="settings-header-inner">
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
             <button className="btn btn-ghost btn-sm" onClick={onBack}>
-              ← 返回
+              返回
             </button>
             <h1>设置</h1>
           </div>
