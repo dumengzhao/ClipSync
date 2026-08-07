@@ -5,6 +5,8 @@
 //! - NSPasteboardDidChangeNotification / changeCount 轮询
 //! - NSPasteboardItemDataProvider 延迟渲染
 
+use std::path::PathBuf;
+
 use anyhow::Result;
 use async_trait::async_trait;
 
@@ -27,6 +29,14 @@ impl ClipboardProvider for MacosClipboard {
 
     async fn write(&self, _content: ClipboardContent) -> Result<()> {
         anyhow::bail!("not yet implemented (phase 1)")
+    }
+
+    async fn read_file_paths(&self) -> Result<Vec<PathBuf>> {
+        anyhow::bail!("not yet implemented (phase 2)")
+    }
+
+    async fn write_file_paths(&self, _paths: &[PathBuf]) -> Result<()> {
+        anyhow::bail!("not yet implemented (phase 2)")
     }
 
     async fn write_delayed_files<F>(
