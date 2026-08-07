@@ -13,6 +13,7 @@ import {
   unpair,
   listPendingOffers,
   pullFiles,
+  getClipboardText,
   type DiscoveredPeer,
   type PairedDeviceInfo,
   type PendingOffer,
@@ -52,6 +53,8 @@ export default function App() {
       pulled_at: number;
     }>
   >({});
+  // 本机剪贴板当前文字内容（右侧展示，定时轮询刷新）
+  const [clipboardText, setClipboardText] = useState<string | null>(null);
 
   const flash = (m: string) => {
     setMsg(m);
@@ -203,6 +206,14 @@ export default function App() {
       .catch(() => {});
   }, []);
 
+  // 定时轮询本机剪贴板文字内容，供右侧展示
+  useEffect(() => {
+    const tick = () => getClipboardText().then(setClipboardText).catch(() => {});
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
   const generateCode = async () => {
     try {
       const code = await generatePairingCode();
@@ -309,110 +320,125 @@ export default function App() {
           </div>
         )}
 
-        <section className="peers">
-          <h2>已配对设备</h2>
-          {paired.length === 0 ? (
-            <p className="hint">还没有已配对设备，请在下方发起配对</p>
-          ) : (
-            <ul className="peer-list">
-              {paired.map((p) => {
-                const isConnected = connected.has(p.id);
-                const status = isConnected
-                  ? '已连接'
-                  : discoveredIds.has(p.id)
-                    ? '连接中…'
-                    : '离线';
-                return (
-                  <li key={p.id} className="peer-item peer-item-action">
-                    <span className={`peer-dot ${isConnected ? 'on' : 'off'}`} />
-                    <span className="peer-name">{p.name}</span>
-                    <span className="peer-addr">
-                      {status}
-                      {p.fingerprint ? ` · ${p.fingerprint.slice(0, 8)}` : ''}
-                    </span>
-                    {p.last_addr && (
-                      <span className="peer-addr" style={{ opacity: 0.6 }}>
-                        {p.last_addr}
-                      </span>
-                    )}
-                    <button className="btn btn-ghost btn-sm" onClick={() => removePairing(p)}>
-                      取消配对
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </section>
-
-        <section className="peers">
-          <h2>局域网发现的设备</h2>
-          {discoveredOnly.length === 0 ? (
-            <p className="hint">局域网内未发现其它 ClipSync 设备</p>
-          ) : (
-            <ul className="peer-list">
-              {discoveredOnly.map((p) => {
-                const isPairing = pairingTarget?.device_id === p.device_id;
-                return (
-                  <li key={p.device_id} className="peer-item peer-item-action">
-                    <span className="peer-name">{p.device_name}</span>
-                    <span className="peer-addr">
-                      {p.addr}:{p.port}
-                    </span>
-                    {isPairing ? (
-                      <span className="pair-input-row">
-                        <input
-                          className="pair-input"
-                          autoFocus
-                          placeholder="输入对方配对码"
-                          value={pairInput}
-                          onChange={(e) => setPairInput(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') submitPair();
-                          }}
-                        />
-                        <button className="btn btn-sm" onClick={submitPair}>
-                          确认
+        <div className="app-layout">
+          <div className="app-left">
+            <section className="peers">
+              <h2>已配对设备</h2>
+              {paired.length === 0 ? (
+                <p className="hint">还没有已配对设备，请在下方发起配对</p>
+              ) : (
+                <ul className="peer-list">
+                  {paired.map((p) => {
+                    const isConnected = connected.has(p.id);
+                    const status = isConnected
+                      ? '已连接'
+                      : discoveredIds.has(p.id)
+                        ? '连接中…'
+                        : '离线';
+                    return (
+                      <li key={p.id} className="peer-item peer-item-action">
+                        <span className={`peer-dot ${isConnected ? 'on' : 'off'}`} />
+                        <span className="peer-name">{p.name}</span>
+                        <span className="peer-addr">
+                          {status}
+                          {p.fingerprint ? ` · ${p.fingerprint.slice(0, 8)}` : ''}
+                        </span>
+                        {p.last_addr && (
+                          <span className="peer-addr" style={{ opacity: 0.6 }}>
+                            {p.last_addr}
+                          </span>
+                        )}
+                        <button className="btn btn-ghost btn-sm" onClick={() => removePairing(p)}>
+                          取消配对
                         </button>
-                        <button
-                          className="btn btn-ghost btn-sm"
-                          onClick={() => {
-                            setPairingTarget(null);
-                            setPairInput('');
-                          }}
-                        >
-                          取消
-                        </button>
-                      </span>
-                    ) : (
-                      <button className="btn btn-sm" onClick={() => setPairingTarget(p)}>
-                        配对
-                      </button>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-          <button className="btn btn-ghost" onClick={generateCode}>
-            生成配对码
-          </button>
-        </section>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </section>
 
-        <section className="peers">
-          <h2>待拉取文件</h2>
-          {pendingOffers.length === 0 ? (
-            <p className="hint">对端拷贝文件后会出现在这里</p>
-          ) : (
-            <ul className="peer-list">
-              {pendingOffers.map((o) => {
-                const isPulling = pulling.has(o.transfer_id);
-                return (
-                  <li key={o.transfer_id} className="peer-item peer-item-action">
-                    <span className="peer-name">{o.device_name || o.device_id}</span>
-                    <span className="peer-addr">
-                      {o.files.length} 个文件 · {fmtSize(o.total_size)}
-                    </span>
+            <section className="peers">
+              <h2>局域网发现的设备</h2>
+              {discoveredOnly.length === 0 ? (
+                <p className="hint">局域网内未发现其它 ClipSync 设备</p>
+              ) : (
+                <ul className="peer-list">
+                  {discoveredOnly.map((p) => {
+                    const isPairing = pairingTarget?.device_id === p.device_id;
+                    return (
+                      <li key={p.device_id} className="peer-item peer-item-action">
+                        <span className="peer-name">{p.device_name}</span>
+                        <span className="peer-addr">
+                          {p.addr}:{p.port}
+                        </span>
+                        {isPairing ? (
+                          <span className="pair-input-row">
+                            <input
+                              className="pair-input"
+                              autoFocus
+                              placeholder="输入对方配对码"
+                              value={pairInput}
+                              onChange={(e) => setPairInput(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') submitPair();
+                              }}
+                            />
+                            <button className="btn btn-sm" onClick={submitPair}>
+                              确认
+                            </button>
+                            <button
+                              className="btn btn-ghost btn-sm"
+                              onClick={() => {
+                                setPairingTarget(null);
+                                setPairInput('');
+                              }}
+                            >
+                              取消
+                            </button>
+                          </span>
+                        ) : (
+                          <button className="btn btn-sm" onClick={() => setPairingTarget(p)}>
+                            配对
+                          </button>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+              <button className="btn btn-ghost" onClick={generateCode}>
+                生成配对码
+              </button>
+            </section>
+          </div>
+
+          <div className="app-right">
+            <section className="peers">
+              <h2>粘贴板文字内容</h2>
+              <div className="clipboard-box">
+                {clipboardText ? (
+                  clipboardText
+                ) : (
+                  <span className="clipboard-empty">（剪贴板没有文字内容）</span>
+                )}
+              </div>
+            </section>
+
+            <section className="peers">
+              <h2>待拉取文件</h2>
+              {pendingOffers.length === 0 ? (
+                <p className="hint">对端拷贝文件后会出现在这里</p>
+              ) : (
+                <ul className="peer-list">
+                  {pendingOffers.map((o) => {
+                    const isPulling = pulling.has(o.transfer_id);
+                    return (
+                      <li key={o.transfer_id} className="peer-item peer-item-action">
+                        <span className="peer-name">{o.device_name || o.device_id}</span>
+                        <span className="peer-addr">
+                          {o.files.length} 个文件 · {fmtSize(o.total_size)}
+                        </span>
                 {o.auto_pull ? (
                   isPulling ? (
                     <span className="peer-addr">自动拉取中…</span>
@@ -426,60 +452,64 @@ export default function App() {
                     拉取
                   </button>
                 )}
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </section>
-
-        {Object.keys(pullResults).length > 0 && (
-          <section className="peers">
-            <h2 style={{ display: 'flex', alignItems: 'baseline', gap: '0.6rem' }}>
-              已拉取的文件
-              {(() => {
-                const latest = Object.values(pullResults).slice(-1)[0];
-                return latest && (
-                  <span className="peer-addr" style={{ fontSize: '0.8rem' }}>
-                    {latest.target_dir}
-                  </span>
-                );
-              })()}
-            </h2>
-            <ul className="peer-list">
-              {Object.entries(pullResults).slice(-3).reverse().map(([tid, r]) => (
-                <li key={tid} className="peer-item" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-                    <span className="peer-name">{r.device_name}</span>
-                    <span className="peer-addr">{r.target_dir}</span>
-                  </div>
-                  <ul style={{ listStyle: 'none', marginTop: '0.4rem', fontSize: '0.8rem', color: '#888' }}>
-                    {r.files.map((f, i) => (
-                      <li key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.15rem 0' }}>
-                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginRight: '0.5rem' }}>
-                          {f.is_dir ? '📁 ' : '📄 '}{f.name}
-                        </span>
-                        <span style={{ display: 'flex', gap: '1rem', flex: '0 0 auto' }}>
-                          <span>{fmtTime(r.pulled_at)}</span>
-                          <span style={{ minWidth: '4rem', textAlign: 'right' }}>
-                            {f.is_dir ? '-' : fmtSize(f.size)}
-                          </span>
-                        </span>
                       </li>
-                    ))}
-                  </ul>
-                </li>
-              ))}
-            </ul>
-            <p className="hint">路径已写入剪贴板，Ctrl+V 即可粘贴</p>
-          </section>
-        )}
+                    );
+                  })}
+                </ul>
+              )}
+            </section>
 
-        {msg && <div className="msg">{msg}</div>}
+            {Object.keys(pullResults).length > 0 && (
+              <section className="peers">
+                <h2 style={{ display: 'flex', alignItems: 'baseline', gap: '0.6rem' }}>
+                  已拉取的文件
+                  {(() => {
+                    const latest = Object.values(pullResults).slice(-1)[0];
+                    return latest && (
+                      <span className="peer-addr" style={{ fontSize: '0.8rem' }}>
+                        {latest.target_dir}
+                      </span>
+                    );
+                  })()}
+                </h2>
+                <ul className="peer-list">
+                  {Object.entries(pullResults).slice(-3).reverse().map(([tid, r]) => (
+                    <li key={tid} className="peer-item" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                        <span className="peer-name">{r.device_name}</span>
+                        <span className="peer-addr">{r.target_dir}</span>
+                      </div>
+                      <ul style={{ listStyle: 'none', marginTop: '0.4rem', fontSize: '0.8rem', color: '#888' }}>
+                        {r.files.map((f, i) => (
+                          <li key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.15rem 0' }}>
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginRight: '0.5rem' }}>
+                              {f.is_dir ? '📁 ' : '📄 '}{f.name}
+                            </span>
+                            <span style={{ display: 'flex', gap: '1rem', flex: '0 0 auto' }}>
+                              <span>{fmtTime(r.pulled_at)}</span>
+                              <span style={{ minWidth: '4rem', textAlign: 'right' }}>
+                                {f.is_dir ? '-' : fmtSize(f.size)}
+                              </span>
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </li>
+                  ))}
+                </ul>
+                <p className="hint">路径已写入剪贴板，Ctrl+V 即可粘贴</p>
+              </section>
+            )}
 
-        <button className="btn" onClick={() => setView('settings')}>
-          打开设置
-        </button>
+            {msg && <div className="msg">{msg}</div>}
+
+            <div className="app-right-footer">
+              <button className="btn" onClick={() => setView('settings')}>
+                打开设置
+              </button>
+            </div>
+          </div>
+        </div>
       </main>
     </div>
   );

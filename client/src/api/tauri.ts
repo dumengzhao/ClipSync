@@ -100,6 +100,15 @@ export async function listPendingOffers(): Promise<PendingOffer[]> {
   return invoke<PendingOffer[]>('list_pending_offers');
 }
 
+/** 读取本机剪贴板当前文字内容；剪贴板无文字或读取失败时返回 null */
+export async function getClipboardText(): Promise<string | null> {
+  try {
+    return await invoke<string>('get_clipboard');
+  } catch {
+    return null;
+  }
+}
+
 /** 应用配置（与 Rust 端 `AppConfig` 字段保持一致） */
 export interface AppConfig {
   device_name: string;
