@@ -40,7 +40,7 @@ body {
 }
 
 .app {
-  max-width: 640px;
+  max-width: 1000px;
   margin: 0 auto;
   padding: 2rem;
   text-align: center;
@@ -59,6 +59,55 @@ body {
 .app-main {
   margin-top: 2rem;
   line-height: 1.6;
+  text-align: left;
+}
+
+/* 主页面左右两栏：左 40%（设备），右 60%（剪贴板 + 文件） */
+.app-layout {
+  display: flex;
+  gap: 1.5rem;
+  align-items: stretch;
+  text-align: left;
+}
+
+.app-left {
+  flex: 2 1 0;
+  min-width: 0;
+}
+
+.app-right {
+  flex: 3 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 右侧底部「打开设置」按钮靠右并沉到底 */
+.app-right-footer {
+  margin-top: auto;
+  padding-top: 1rem;
+  text-align: right;
+}
+
+/* 剪贴板文字展示框 */
+.clipboard-box {
+  margin-top: 0.5rem;
+  padding: 0.8rem 1rem;
+  min-height: 5rem;
+  max-height: 14rem;
+  overflow: auto;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 8px;
+  background: rgba(148, 163, 184, 0.08);
+  white-space: pre-wrap;
+  word-break: break-all;
+  line-height: 1.5;
+  text-align: left;
+  font-size: 0.9rem;
+}
+
+.clipboard-empty {
+  color: #888;
 }
 
 .peers {
