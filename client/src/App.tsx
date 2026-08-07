@@ -40,9 +40,15 @@ export default function App() {
   const [pendingOffers, setPendingOffers] = useState<PendingOffer[]>([]);
   // 正在拉取中的传输 ID 集合（拉取中禁用按钮、显示「拉取中…」）
   const [pulling, setPulling] = useState<Set<string>>(new Set());
-  // 已完成的拉取结果：transfer_id -> 落盘目录与文件数，供用户在主页查看下载位置
+  // 已完成的拉取结果：transfer_id -> 落盘目录与文件详情，供用户在主页查看下载位置
   const [pullResults, setPullResults] = useState<
-    Record<string, { device_name: string; target_dir: string; file_count: number }>
+    Record<string, {
+      device_name: string;
+      target_dir: string;
+      file_count: number;
+      files: { name: string; size: number; is_dir: boolean }[];
+      pulled_at: number;
+    }>
   >({});
 
   const flash = (m: string) => {
@@ -83,6 +89,8 @@ export default function App() {
       device_name: string;
       target_dir: string;
       file_count: number;
+      files: { name: string; size: number; is_dir: boolean }[];
+      pulled_at: number;
     }>('file-pull-complete', (e) => {
       setPulling((prev) => {
         const n = new Set(prev);
@@ -97,6 +105,8 @@ export default function App() {
           device_name: e.payload.device_name,
           target_dir: e.payload.target_dir,
           file_count: e.payload.file_count,
+          files: e.payload.files,
+          pulled_at: e.payload.pulled_at,
         },
       }));
       flash(`已从「${e.payload.device_name}」拉取 ${e.payload.file_count} 个文件`);
@@ -235,6 +245,12 @@ export default function App() {
     if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
     if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
     return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  };
+
+  /// 把 unix 时间戳格式化为 HH:MM
+  const fmtTime = (ts: number): string => {
+    const d = new Date(ts * 1000);
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   };
 
   /// 点击「拉取」：向对端请求文件，本端下载到 sync_dir，完成后自动写本机剪贴板。
@@ -410,14 +426,39 @@ export default function App() {
 
         {Object.keys(pullResults).length > 0 && (
           <section className="peers">
-            <h2>已拉取的文件</h2>
+            <h2 style={{ display: 'flex', alignItems: 'baseline', gap: '0.6rem' }}>
+              已拉取的文件
+              {(() => {
+                const latest = Object.values(pullResults).slice(-1)[0];
+                return latest && (
+                  <span className="peer-addr" style={{ fontSize: '0.8rem' }}>
+                    {latest.target_dir}
+                  </span>
+                );
+              })()}
+            </h2>
             <ul className="peer-list">
               {Object.entries(pullResults).slice(-3).reverse().map(([tid, r]) => (
-                <li key={tid} className="peer-item">
-                  <span className="peer-name">{r.device_name}</span>
-                  <span className="peer-addr">
-                    已保存 {r.file_count} 个文件到：{r.target_dir}
-                  </span>
+                <li key={tid} className="peer-item" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                    <span className="peer-name">{r.device_name}</span>
+                    <span className="peer-addr">{r.target_dir}</span>
+                  </div>
+                  <ul style={{ listStyle: 'none', marginTop: '0.4rem', fontSize: '0.8rem', color: '#888' }}>
+                    {r.files.map((f, i) => (
+                      <li key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.15rem 0' }}>
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginRight: '0.5rem' }}>
+                          {f.is_dir ? '📁 ' : '📄 '}{f.name}
+                        </span>
+                        <span style={{ display: 'flex', gap: '1rem', flex: '0 0 auto' }}>
+                          <span>{fmtTime(r.pulled_at)}</span>
+                          <span style={{ minWidth: '4rem', textAlign: 'right' }}>
+                            {f.is_dir ? '-' : fmtSize(f.size)}
+                          </span>
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
                 </li>
               ))}
             </ul>

@@ -638,6 +638,16 @@ impl ConnectionHub {
         let engine = self.engine.clone();
         let tid = transfer_id.clone();
         let device_name = offer.device_name.clone();
+        // 捕获文件清单供完成事件携带（offer 即将被 move）
+        let file_details: Vec<serde_json::Value> = offer
+            .files
+            .iter()
+            .map(|f| serde_json::json!({
+                "name": f.file_name,
+                "size": f.file_size,
+                "is_dir": f.is_dir,
+            }))
+            .collect();
         let targets: Vec<PathBuf> = offer
             .files
             .iter()
@@ -683,6 +693,8 @@ impl ConnectionHub {
                         "device_name": device_name,
                         "target_dir": root.to_string_lossy(),
                         "file_count": received.len(),
+                        "files": file_details,
+                        "pulled_at": now_secs(),
                     }),
                 );
             }
