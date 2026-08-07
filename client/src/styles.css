@@ -218,8 +218,8 @@ body {
 }
 
 .settings {
-  max-width: 720px;
-  margin: 0 auto;
+  max-width: 100%;
+  margin: 0;
   padding: 0;
 }
 
@@ -227,13 +227,18 @@ body {
   position: sticky;
   top: 0;
   z-index: 10;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 1.5rem 1.5rem 0.75rem;
   background: rgba(255, 255, 255, 0.85);
   backdrop-filter: blur(8px);
   border-bottom: 1px solid rgba(148, 163, 184, 0.25);
+}
+
+.settings-header-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 1rem 1.5rem 0.5rem;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -247,6 +252,8 @@ body {
 }
 
 .settings-body {
+  max-width: 720px;
+  margin: 0 auto;
   padding: 1rem 1.5rem 1.5rem;
 }
 
