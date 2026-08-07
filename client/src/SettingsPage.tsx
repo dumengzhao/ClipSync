@@ -73,10 +73,12 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
   return (
     <div className="settings">
       <div className="settings-header">
-        <h1>设置</h1>
-        <button className="btn btn-ghost btn-sm" onClick={onBack}>
-          返回
-        </button>
+        <div className="settings-header-inner">
+          <h1>设置</h1>
+          <button className="btn btn-ghost btn-sm" onClick={onBack}>
+            返回
+          </button>
+        </div>
       </div>
 
       <div className="settings-body">
