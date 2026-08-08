@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import {
-  getVersion,
   getConfig,
   getPairedDevices,
   listDiscoveredPeers,
@@ -28,7 +27,6 @@ import { applyTheme } from './theme';
  * 供正式 build 版本使用。
  */
 export default function App() {
-  const [version, setVersion] = useState('');
   const [view, setView] = useState<'main' | 'settings'>('main');
   const [discovered, setDiscovered] = useState<DiscoveredPeer[]>([]);
   const [paired, setPaired] = useState<PairedDeviceInfo[]>([]);
@@ -62,7 +60,6 @@ export default function App() {
   };
 
   useEffect(() => {
-    getVersion().then(setVersion).catch(() => setVersion('unknown'));
     // dev 下「托盘 → 设置」通过事件请求内嵌显示设置视图
     const unlistenSettings = listen<null>('open-settings', () => setView('settings'));
 
@@ -305,10 +302,6 @@ export default function App() {
 
   return (
     <div className="app">
-      <header className="app-header">
-        <h1>ClipSync</h1>
-        <p className="version">v{version}</p>
-      </header>
       <main className="app-main">
         {pendingCode && (
           <div className="pairing-banner">
