@@ -70,13 +70,20 @@ body {
   min-width: 0;
   display: flex;
   flex-direction: column;
+  padding-bottom: 3.5rem;
 }
 
-/* 右侧底部「打开设置」按钮靠右并沉到底 */
+/* 「打开设置」按钮固定在视窗右下角，距边框 10px */
 .app-right-footer {
-  margin-top: auto;
-  padding-top: 1rem;
+  position: fixed;
+  right: 10px;
+  bottom: 10px;
+  z-index: 20;
   text-align: right;
+}
+
+.app-right-footer .btn {
+  margin: 0;
 }
 
 /* 剪贴板文字展示框 */
