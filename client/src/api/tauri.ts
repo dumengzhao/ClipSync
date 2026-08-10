@@ -88,6 +88,8 @@ export interface PendingOffer {
   device_name: string;
   files: FileItem[];
   total_size: number;
+  /** 是否满足自动拉取阈值（由对端在 Offer 时一并广播） */
+  auto_pull?: boolean;
 }
 
 /** 拉取某次文件传输：下载到本机 sync_dir，完成后自动写剪贴板 */

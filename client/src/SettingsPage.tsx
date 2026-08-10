@@ -33,6 +33,9 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
     setCfg((c) => (c ? { ...c, [key]: value } : c));
   };
 
+  // 配置未加载完成时先渲染占位，避免下方函数内 cfg 被判为可能为 null
+  if (!cfg) return <div className="settings"><p>加载中…</p></div>;
+
   const save = async () => {
     if (!cfg) return;
     try {
@@ -52,6 +55,7 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
   };
 
   const addManual = () => {
+    if (!cfg) return;
     const addr = maAddr.trim();
     const port = Number(maPort);
     if (!addr || !Number.isFinite(port) || port <= 0 || port > 65535) {
@@ -73,11 +77,10 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
   };
 
   const removeManual = (i: number) => {
+    if (!cfg) return;
     const list = (cfg.manual_addresses ?? []).filter((_, idx) => idx !== i);
     update('manual_addresses', list);
   };
-
-  if (!cfg) return <div className="settings"><p>加载中…</p></div>;
 
   return (
     <div className="settings">
