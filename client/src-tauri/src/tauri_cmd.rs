@@ -3,7 +3,7 @@
 //! 前端通过 `invoke()` 调用这些命令
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 
 use crate::clipboard::types::ClipboardContent;
 use crate::clipboard::ClipboardProvider;
