@@ -11,8 +11,8 @@ use crate::sync::anti_loop::{content_hash, AntiLoop};
 use anyhow::Result;
 use serde::Serialize;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 /// 引擎对外广播的剪贴板变化事件
@@ -27,6 +27,12 @@ pub enum SyncEvent {
     /// 由传输层广播「可拉取」清单给对端，而非把路径塞进远端剪贴板。
     LocalFilesCopied {
         paths: Vec<PathBuf>,
+    },
+    /// 对端传来的剪贴板更新已写入本机剪贴板。用于驱动前端刷新（与本地变化走同一条
+    /// 显示链路），但**不应再转发回对端**（回环由 `last_emitted` 哈希去重负责）。
+    RemoteClipboardApplied {
+        mark: SyncMark,
+        content: ClipboardContent,
     },
 }
 
@@ -80,9 +86,15 @@ pub struct SyncEngine {
     last_emitted: Arc<Mutex<Option<String>>>,
     /// 最近一次本地文件拷贝的路径哈希，避免轮询式监听（Linux）重复广播同一份 Offer。
     last_file_hash: Arc<Mutex<Option<String>>>,
-    /// 程序化写剪贴板（拉取完成后自动粘贴）期间置位，抑制由此引发的「文件拷贝」误判，
-    /// 否则会触发新一轮 Offer 广播，形成回环。用 `Arc` 包裹以便克隆进常驻监听任务。
-    file_offer_suppressed: Arc<AtomicBool>,
+    /// 程序化写剪贴板（拉取完成后自动粘贴）时记录所写路径的「规范化哈希」与写入时刻，
+    /// 使本地监听在检测到该变化时能将其识别为「自己的回声」而丢弃，避免触发新一轮
+    /// Offer 回环广播。元组 `(规范化路径哈希, 写入时刻)`：
+    /// - 用 `规范化路径哈希` 比对（统一分隔符/大小写）——跨平台剪贴板读回的路径常与落盘
+    ///   路径在大小写或分隔符上不一致，精确哈希会失配，规范化后可对齐；
+    /// - 写入时刻用于 1.5s 时间窗口兜底：万一规范化仍失配，时间窗口仍能拦截绝大多数回环；
+    ///   take 只消费一次，不会吞掉后续真实拷贝。`last_file_hash` 提供第三重保险。
+    /// 用 `Arc<Mutex<>>` 包裹以便克隆进常驻监听任务。
+    file_offer_expected: Arc<Mutex<Option<(String, Instant)>>>,
 }
 
 impl SyncEngine {
@@ -97,7 +109,7 @@ impl SyncEngine {
             event_tx,
             last_emitted: Arc::new(Mutex::new(None)),
             last_file_hash: Arc::new(Mutex::new(None)),
-            file_offer_suppressed: Arc::new(AtomicBool::new(false)),
+            file_offer_expected: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -113,10 +125,13 @@ impl SyncEngine {
         self.clipboard.clone()
     }
 
-    /// 拉取完成后自动写剪贴板前调用：置位抑制标志，避免「自动写」被本地监听误判为
-    /// 一次新的文件拷贝，进而触发 Offer 回环广播。
-    pub fn set_file_offer_suppressed(&self, v: bool) {
-        self.file_offer_suppressed.store(v, Ordering::SeqCst);
+    /// 拉取完成后自动写剪贴板前调用：记录本次写出路径的「规范化哈希」与写入时刻，
+    /// 作为「回声」判定依据。处理任务在检测到文件变化时，若读到的路径规范化哈希与之
+    /// 一致、或写入发生在 1.5s 内，即视为本机刚写入的回声而丢弃，不广播 Offer；否则
+    /// 照常广播（take 仅消费一次，后续真实拷贝不受影响）。
+    pub fn suppress_next_file_offer(&self, paths: &[PathBuf]) {
+        let norm = normalized_file_paths_hash(paths);
+        *self.file_offer_expected.lock().unwrap() = Some((norm, Instant::now()));
     }
 
     /// 启动引擎：开始监听剪贴板并将变化广播为 Tauri 事件
@@ -139,7 +154,7 @@ impl SyncEngine {
         let event_tx = self.event_tx.clone();
         let last_emitted = self.last_emitted.clone();
         let last_file_hash = self.last_file_hash.clone();
-        let file_offer_suppressed = self.file_offer_suppressed.clone();
+        let file_offer_expected = self.file_offer_expected.clone();
         let clipboard = self.clipboard.clone();
         tauri::async_runtime::spawn(async move {
             loop {
@@ -158,27 +173,40 @@ impl SyncEngine {
                 //    绝不把路径塞进远端剪贴板（对端无此路径无意义）。
                 if let Ok(paths) = clipboard.read_file_paths().await {
                     if !paths.is_empty() {
-                        if file_offer_suppressed.load(Ordering::SeqCst) {
-                            // 本次是「拉取完成后自动写剪贴板」触发的，抑制回环。
-                            // 必须同步更新 last_file_hash，否则下一轮轮询会因 hash
-                            // 不匹配而再次广播 Offer，形成"本机也拉取一次"的死循环。
-                            let h = file_paths_hash(&paths);
-                            *last_file_hash.lock().unwrap() = Some(h);
-                            file_offer_suppressed.store(false, Ordering::SeqCst);
-                        } else {
-                            let h = file_paths_hash(&paths);
-                            let should_emit = {
-                                let mut g = last_file_hash.lock().unwrap();
-                                if g.as_ref() == Some(&h) {
-                                    false
-                                } else {
-                                    *g = Some(h);
-                                    true
+                        let h = file_paths_hash(&paths);
+                        let norm = normalized_file_paths_hash(&paths);
+                        let now = Instant::now();
+                        // 回声抑制：本次文件变化若是「拉取完成后自动写本机剪贴板」触发，
+                        // 丢弃，不广播 Offer。判定：(a) 规范化路径哈希与记录值一致；或
+                        // (b) 写入动作发生在 1.5s 内（兜底：跨平台剪贴板对路径做规范化时
+                        // 精确哈希可能失配，时间窗口仍能拦截绝大多数回环；take 只消费一次，
+                        // 不会吞掉后续真实拷贝）。`last_file_hash` 提供第三重保险——
+                        // 即使抑制被消费，同文件的后续变化因哈希相同也不会重复广播 Offer。
+                        let is_echo = {
+                            let mut g = file_offer_expected.lock().unwrap();
+                            match g.take() {
+                                Some((exp_path, exp_at)) => {
+                                    exp_path == norm
+                                        || now.duration_since(exp_at) < Duration::from_millis(1500)
                                 }
-                            };
-                            if should_emit {
-                                let _ = event_tx.send(SyncEvent::LocalFilesCopied { paths });
+                                None => false,
                             }
+                        };
+                        if is_echo {
+                            *last_file_hash.lock().unwrap() = Some(h);
+                            continue;
+                        }
+                        let should_emit = {
+                            let mut g = last_file_hash.lock().unwrap();
+                            if g.as_ref() == Some(&h) {
+                                false
+                            } else {
+                                *g = Some(h);
+                                true
+                            }
+                        };
+                        if should_emit {
+                            let _ = event_tx.send(SyncEvent::LocalFilesCopied { paths });
                         }
                         continue;
                     } else {
@@ -231,7 +259,9 @@ impl SyncEngine {
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 };
-                if let SyncEvent::LocalClipboardChanged { mark, content } = ev {
+                if let SyncEvent::LocalClipboardChanged { mark, content }
+                | SyncEvent::RemoteClipboardApplied { mark, content } = ev
+                {
                     let payload =
                         ClipboardChangedPayload::from_content(&mark.sync_id, &mark.device_id, &content);
                     let _ = app_handle.emit("clipboard-changed", payload);
@@ -260,10 +290,17 @@ impl SyncEngine {
         let kind = content_kind(&content);
         // 用常驻实例写入：X11/Wayland 下临时实例被 Drop 会立即失去 selection 所有权，
         // 对端粘贴将拿到空内容。
+        // 写前先克隆一份用于向前端广播「剪贴板已变化」（与本地变化走同一条显示链路），
+        // 避免改为事件驱动后，远端同步过来的内容在首页不刷新。
+        let to_emit = content.clone();
         match self.clipboard.write(content).await {
             Ok(()) => tracing::debug!("已应用来自 {} 的剪贴板内容 kind={kind}", mark.device_id.0),
             Err(e) => tracing::error!("写入远端剪贴板内容失败 kind={kind}: {e}"),
         }
+        let _ = self.event_tx.send(SyncEvent::RemoteClipboardApplied {
+            mark,
+            content: to_emit,
+        });
     }
 }
 
@@ -281,6 +318,22 @@ fn content_kind(content: &ClipboardContent) -> &'static str {
 fn file_paths_hash(paths: &[PathBuf]) -> String {
     use std::hash::{Hash, Hasher};
     let mut sorted: Vec<String> = paths.iter().map(|p| p.to_string_lossy().to_string()).collect();
+    sorted.sort();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    sorted.hash(&mut hasher);
+    format!("{:x}", hasher.finish())
+}
+
+/// 与 `file_paths_hash` 类似，但对路径做跨平台规范化（统一分隔符为 `/`、转小写），
+/// 用于「程序化写剪贴板」的回声识别。不同平台 / 剪贴板 API 读回的路径常带不同的大小写
+/// 或分隔符（如 `C:\Users\...` vs `c:/users/...`），精确哈希会失配，规范化后可对齐，
+/// 使发送方的回声抑制在 Windows 等平台上也能稳定命中。
+fn normalized_file_paths_hash(paths: &[PathBuf]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut sorted: Vec<String> = paths
+        .iter()
+        .map(|p| p.to_string_lossy().to_string().replace('\\', "/").to_lowercase())
+        .collect();
     sorted.sort();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     sorted.hash(&mut hasher);
