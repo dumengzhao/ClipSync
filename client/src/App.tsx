@@ -203,12 +203,27 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  // 定时轮询本机剪贴板文字内容，供右侧展示
+  // 事件驱动：监听同步引擎 emit 的「剪贴板变化」事件（本地复制 / 远端同步写入都会触发），
+  // 仅在变化时刷新首页，取代原先每秒跨进程轮询读取的写法。
   useEffect(() => {
-    const tick = () => getClipboardText().then(setClipboardText).catch(() => {});
-    tick();
-    const id = window.setInterval(tick, 1000);
-    return () => window.clearInterval(id);
+    // 首屏挂载时先读取一次，避免空白。
+    getClipboardText().then(setClipboardText).catch(() => {});
+    const unlisten = listen<{ text: string | null; kind: string }>(
+      'clipboard-changed',
+      (event) => {
+        const p = event.payload;
+        if (p && p.text != null) {
+          setClipboardText(p.text);
+        } else if (p && p.kind === 'image') {
+          setClipboardText('[图片]');
+        } else if (p && p.kind === 'files') {
+          setClipboardText('[文件]');
+        }
+      },
+    );
+    return () => {
+      unlisten.then((u) => u());
+    };
   }, []);
 
   const generateCode = async () => {
