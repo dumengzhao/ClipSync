@@ -439,6 +439,24 @@ impl ConnectionHub {
                 if device_id == self.identity.id.0 {
                     return; // 忽略自己（拷贝端不会收到自己的 Offer，这里双保险）
                 }
+                // 防御回环：若本 Offer 的文件集合指纹与本机正在 offer 的某份相同，
+                // 说明这是「本机刚复制出去、被对端（可能运行旧版、未抑制自身回声）又
+                // 广播回来」的回声。直接丢弃——不进待拉取清单、也不 emit 给前端，
+                // 避免「本机复制的文件又出现在本机待拉取列表」的表现。
+                // 用「文件名 + 大小」指纹（忽略 relative_path）：对端把本机文件落盘后再
+                // offer 时根目录不同，relative_path 必然不一致，而 file_name + file_size
+                // 足以在绝大多数场景下稳定标识「同一份复制的文件」。
+                let incoming_fp = Self::offer_fingerprint(&files);
+                let is_local_echo = self
+                    .active_offers
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .any(|o| Self::offer_fingerprint(&o.files) == incoming_fp);
+                if is_local_echo {
+                    tracing::debug!("忽略本机文件回环 Offer {transfer_id}（指纹命中 active_offers）");
+                    return;
+                }
                 let total: u64 = files.iter().map(|f| f.file_size).sum();
                 // 自动拉取阈值：小于阈值则本端收到后直接拉取，免手动点击。
                 // 拷贝端自身已被上面的 device_id 守卫排除，所以这里一定是「其它端」。
@@ -679,11 +697,15 @@ impl ConnectionHub {
                     }
                 }
             }
-            // 落盘完成：自动写本机剪贴板（带抑制标志，避免触发新一轮 Offer 广播）
+            // 落盘完成：自动写本机剪贴板（带内容哈希回声抑制，避免触发新一轮 Offer 广播）
             if !received.is_empty() {
-                engine.set_file_offer_suppressed(true);
+                // 抑制「拉取完成后自动写本机剪贴板」被本地监听误判为新的文件拷贝而回环广播：
+                // 记录本次写出路径的哈希，处理任务在检测到变化、且读到的路径哈希与之一致时，
+                // 即视为本机刚写入的回声而丢弃，不广播 Offer。与文本/图片经 `last_emitted`
+                // 内容哈希去重的思路完全一致——基于内容哈希、不依赖监听线程的触发时机，
+                // 彻底消除「Mac 复制 → Windows 拉取 → Mac 又看到同一文件」的回环。
+                engine.suppress_next_file_offer(&received);
                 let _ = engine.clipboard().write_file_paths(&received).await;
-                engine.set_file_offer_suppressed(false);
             }
             if let Some(a) = &app {
                 let _ = a.emit(
@@ -753,6 +775,22 @@ impl ConnectionHub {
     })
 }
 
+/// 计算一份文件清单的「回环指纹」：以「文件名 + 大小」集合（排序后哈希）标识，
+/// 忽略 `relative_path`——因为对端把本机文件落盘后再 offer 时根目录不同，
+/// `relative_path` 必然不一致，而 `file_name + file_size` 足以在绝大多数场景下
+/// 稳定标识「同一份复制的文件」。用于接收方识别「本机刚复制出去、被对端回环广播回来」的回声。
+fn offer_fingerprint(files: &[FileMeta]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut v: Vec<(String, u64)> = files
+        .iter()
+        .map(|f| (f.file_name.clone(), f.file_size))
+        .collect();
+    v.sort();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    v.hash(&mut h);
+    format!("{:x}", h.finish())
+}
+
     /// 把设备名等非安全字符净化为目录名
     fn sanitize_name(name: &str) -> String {
     name.chars()
@@ -809,6 +847,11 @@ impl ConnectionHub {
                             // 本地拷贝了文件/目录：广播「可拉取」清单给所有对端。
                             // 注意不把绝对路径外传——对端只拿到元数据，文件内容走拉取。
                             hub.offer_local_files(paths);
+                        }
+                        SyncEvent::RemoteClipboardApplied { .. } => {
+                            // 来自对端的剪贴板更新已在本机落盘/写剪贴板，无需再转发回去
+                            // （回环由引擎的 last_emitted 哈希去重负责，且 manager 不参与
+                            // 本地→对端的转发，仅 LocalClipboardChanged 走此路径）。
                         }
                     }
                 }
@@ -1599,5 +1642,122 @@ mod tests {
         assert!(ct_eq(b"abc", b"abc"));
         assert!(!ct_eq(b"abc", b"abd"));
         assert!(!ct_eq(b"abc", b"ab"));
+    }
+
+    // ---- 文件回环（回声）防御测试 ----
+    use crate::clipboard::types::FileMeta as TestFileMeta;
+    use crate::device::identity::DeviceIdentity as TestDeviceIdentity;
+    use crate::sync::engine::SyncEngine as TestSyncEngine;
+    use std::sync::Arc as TestArc;
+    use tokio::sync::mpsc as test_mpsc;
+
+    /// 回归测试：本机复制文件后，对端把同一份文件作为 Offer 广播回来（回环），
+    /// 接收方必须丢弃该 Offer，不进入本机待拉取列表、也不 emit 给前端。
+    /// 否则表现为「本机复制的文件又出现在本机待拉取列表（本机也拉取了）」。
+    #[tokio::test]
+    async fn local_file_echo_from_peer_is_dropped() {
+        let identity = TestDeviceIdentity::load_or_create("echo-test-node").unwrap();
+        let engine = TestSyncEngine::new(identity.clone());
+        let hub = ConnectionHub::new(TestArc::new(identity), TestArc::new(engine));
+
+        // 1) 模拟本机复制一个真实存在的文件 → 进入 active_offers（不进本机待拉取）
+        let tmp = std::env::temp_dir().join("clipsync_echo_test.txt");
+        std::fs::write(&tmp, b"hello clipsync").unwrap();
+        hub.offer_local_files(vec![tmp.clone()]);
+        assert!(
+            !hub.active_offers.lock().unwrap().is_empty(),
+            "本机复制后 active_offers 应非空"
+        );
+        assert!(hub.pending_offers.lock().unwrap().is_empty());
+
+        // 2) 构造「对端回环 Offer」：device_id 是别的设备、文件指纹与本机一致
+        let size = std::fs::metadata(&tmp).unwrap().len();
+        let echo_files = vec![TestFileMeta {
+            file_name: tmp.file_name().unwrap().to_string_lossy().to_string(),
+            file_size: size,
+            is_dir: false,
+            relative_path: "clipsync_echo_test.txt".to_string(),
+            modified_at: 0,
+            mime_type: String::new(),
+            hash: None,
+        }];
+        let echo_offer = FileFrame::Offer {
+            transfer_id: "echo-transfer-1".to_string(),
+            device_id: "fake-peer-not-self".to_string(),
+            device_name: "WindowsPC".to_string(),
+            files: echo_files,
+        };
+        let (tx, _rx) = test_mpsc::unbounded_channel::<Outgoing>();
+
+        // 3) 处理该回环 Offer
+        let h = TestArc::clone(&hub);
+        h.handle_file_frame(echo_offer, &tx, "fake-peer-not-self").await;
+
+        // 4) 断言：本机待拉取列表仍为空（回声被丢弃）
+        assert!(
+            hub.pending_offers.lock().unwrap().is_empty(),
+            "回环 Offer 不应进入本机待拉取列表"
+        );
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// 反向保证：真实的、文件指纹不在本机 active_offers 的对端 Offer 必须正常进入待拉取列表。
+    #[tokio::test]
+    async fn genuine_remote_offer_is_accepted() {
+        let identity = TestDeviceIdentity::load_or_create("echo-test-node-2").unwrap();
+        let engine = TestSyncEngine::new(identity.clone());
+        let hub = ConnectionHub::new(TestArc::new(identity), TestArc::new(engine));
+
+        let remote_files = vec![TestFileMeta {
+            file_name: "photo.png".to_string(),
+            file_size: 9999,
+            is_dir: false,
+            relative_path: "photo.png".to_string(),
+            modified_at: 0,
+            mime_type: String::new(),
+            hash: None,
+        }];
+        let offer = FileFrame::Offer {
+            transfer_id: "remote-transfer-1".to_string(),
+            device_id: "genuine-peer".to_string(),
+            device_name: "WindowsPC".to_string(),
+            files: remote_files,
+        };
+        let (tx, _rx) = test_mpsc::unbounded_channel::<Outgoing>();
+        let h = TestArc::clone(&hub);
+        h.handle_file_frame(offer, &tx, "genuine-peer").await;
+
+        assert_eq!(
+            hub.pending_offers.lock().unwrap().len(),
+            1,
+            "真实对端 Offer 应进入待拉取列表"
+        );
+    }
+
+    #[test]
+    fn offer_fingerprint_ignores_relative_path_and_size() {
+        let a = TestFileMeta {
+            file_name: "doc.txt".into(),
+            file_size: 1234,
+            is_dir: false,
+            relative_path: "doc.txt".into(),
+            modified_at: 0,
+            mime_type: String::new(),
+            hash: None,
+        };
+        let mut b = a.clone();
+        b.relative_path = "nested/sub/doc.txt".into(); // 不同 relative_path
+        assert_eq!(
+            ConnectionHub::offer_fingerprint(&[a.clone()]),
+            ConnectionHub::offer_fingerprint(&[b])
+        );
+
+        let mut c = a.clone();
+        c.file_size = 9999; // 不同大小
+        assert_ne!(
+            ConnectionHub::offer_fingerprint(&[a]),
+            ConnectionHub::offer_fingerprint(&[c])
+        );
     }
 }
