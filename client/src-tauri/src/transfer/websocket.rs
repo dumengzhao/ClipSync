@@ -58,6 +58,12 @@ pub enum FileFrame {
         device_id: String,
         device_name: String,
         files: Vec<FileMeta>,
+        /// 顶层条目名（文件夹名或文件名），供对端前端折叠显示，不参与传输。
+        #[serde(default)]
+        top_names: Vec<String>,
+        /// 顶层条目是否含目录（文件夹传输），供前端决定是否折叠/隐藏大小。
+        #[serde(default)]
+        has_folder: bool,
     },
     /// 接收方请求拉取（file_indices 为 `Offer.files` 的下标，目前恒为全部）。
     PullRequest {

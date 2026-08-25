@@ -129,6 +129,10 @@ struct PendingOffer {
     device_id: String,
     device_name: String,
     files: Vec<FileMeta>,
+    /// 顶层条目名（文件夹名或文件名），用于前端折叠显示
+    top_names: Vec<String>,
+    /// 顶层是否含目录（文件夹传输），用于前端折叠/隐藏大小
+    has_folder: bool,
 }
 
 /// 本端正在拉取的传输：写入任务通过 `chunk_tx` 接收分片，最终自动写本机剪贴板。
@@ -292,6 +296,8 @@ impl ConnectionHub {
                     "transfer_id": o.transfer_id,
                     "device_id": o.device_id,
                     "device_name": o.device_name,
+                    "top_names": o.top_names,
+                    "has_folder": o.has_folder,
                     "files": o.files.iter().map(|f| serde_json::json!({
                         "file_name": f.file_name,
                         "file_size": f.file_size,
@@ -342,6 +348,11 @@ impl ConnectionHub {
             return;
         }
         let root = Self::common_root(&existing);
+        let has_folder = existing.iter().any(|p| p.is_dir());
+        let top_names: Vec<String> = existing
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .collect();
         let mut files: Vec<FileMeta> = Vec::new();
         let mut local_paths: Vec<PathBuf> = Vec::new();
         for p in &existing {
@@ -389,6 +400,8 @@ impl ConnectionHub {
             device_id: my_id,
             device_name: my_name,
             files,
+            top_names: top_names.clone(),
+            has_folder,
         };
         for (id, p) in &peers {
             if p.tx.send(Outgoing::File(frame.clone())).is_err() {
@@ -411,6 +424,8 @@ impl ConnectionHub {
                 device_id,
                 device_name,
                 files,
+                top_names,
+                has_folder,
             } => {
                 if device_id == self.identity.id.0 {
                     return; // 忽略自己（拷贝端不会收到自己的 Offer，这里双保险）
@@ -444,6 +459,8 @@ impl ConnectionHub {
                         device_id: device_id.clone(),
                         device_name: device_name.clone(),
                         files: files.clone(),
+                        top_names: top_names.clone(),
+                        has_folder,
                     },
                 );
                 if let Some(app) = self.app.lock().unwrap().clone() {
@@ -453,6 +470,8 @@ impl ConnectionHub {
                             "transfer_id": transfer_id,
                             "device_id": device_id,
                             "device_name": device_name,
+                            "top_names": top_names,
+                            "has_folder": has_folder,
                             "files": files.iter().map(|f| serde_json::json!({
                                 "file_name": f.file_name,
                                 "file_size": f.file_size,
@@ -1673,6 +1692,8 @@ mod tests {
             device_id: "fake-peer-not-self".to_string(),
             device_name: "WindowsPC".to_string(),
             files: echo_files,
+            top_names: vec![],
+            has_folder: false,
         };
         let (tx, _rx) = test_mpsc::unbounded_channel::<Outgoing>();
 
@@ -1710,6 +1731,8 @@ mod tests {
             device_id: "genuine-peer".to_string(),
             device_name: "WindowsPC".to_string(),
             files: remote_files,
+            top_names: vec![],
+            has_folder: false,
         };
         let (tx, _rx) = test_mpsc::unbounded_channel::<Outgoing>();
         let h = TestArc::clone(&hub);
