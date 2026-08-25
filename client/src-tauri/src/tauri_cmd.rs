@@ -5,6 +5,11 @@
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
+// `open_settings` 在 dev 构建里用 `app.emit`（需 Emitter trait）；release 构建该分支被
+// `#[cfg(debug_assertions)]` 剔除，故 Emitter 仅 debug 下需要，避免 release 报 unused。
+#[cfg(debug_assertions)]
+use tauri::Emitter;
+
 use crate::clipboard::types::ClipboardContent;
 use crate::clipboard::ClipboardProvider;
 use crate::config::settings::ManualAddress;
