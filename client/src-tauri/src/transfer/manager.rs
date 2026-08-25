@@ -1174,11 +1174,16 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
                         tracing::warn!("pairing with {} rejected: {e}", peer.device_name);
                         self.connecting.lock().unwrap().remove(&key);
                         if let Some(app) = self.app.lock().unwrap().clone() {
+                            let reason = if self.is_paired(&peer.device_id) {
+                                "重连失败：与对方配对状态不一致（本机已保存其配对信息但密钥不匹配），请双方先「取消配对」再重新配对".to_string()
+                            } else {
+                                "配对码不一致，请核对对方界面显示的配对码".to_string()
+                            };
                             let _ = app.emit(
                                 "pairing-failed",
                                 serde_json::json!({
                                     "device_id": peer.device_id,
-                                    "reason": "配对码不一致，请核对对方界面显示的配对码",
+                                    "reason": reason,
                                 }),
                             );
                         }
@@ -1346,16 +1351,27 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
         send_frame(&mut ws, MessageType::Verify, &my_tag).await?;
         let (_vt, peer_tag) = recv_frame(&mut ws).await?;
         if !ct_eq(&peer_tag, &expected_peer_tag) {
-            // 发起方的提示统一由 `pair_with` 发出（它知道用户点了哪台设备，且能
-            // 立即终止重试），这里只替应答方提示，避免同一次失败弹两遍。
+            // HMAC 校验失败：两端使用的口令不一致。需区分两种情形给出不同提示，
+            // 否则会自动重连（link secret）与首次配对（输入的配对码）的失败被混为一谈，
+            // 在「一端已配对、另一端配对状态已丢失」的非对称情况下误导用户。
             if matches!(role, Role::Responder) {
-                if let Some(app) = self.app.lock().unwrap().clone() {
-                    let _ = app.emit(
-                        "pairing-failed",
-                        serde_json::json!({
-                            "device_id": peer_id,
-                            "reason": format!("与「{peer_name}」的配对码不一致"),
-                        }),
+                if is_fresh_pairing {
+                    // 首次配对：用户确实输入了对方配对码，但两边不一致 → 如实提示。
+                    if let Some(app) = self.app.lock().unwrap().clone() {
+                        let _ = app.emit(
+                            "pairing-failed",
+                            serde_json::json!({
+                                "device_id": peer_id,
+                                "reason": format!("与「{peer_name}」的配对码不一致"),
+                            }),
+                        );
+                    }
+                } else {
+                    // 自动重连（link secret）失败：多半是两端配对状态不一致
+                    // （一端配置被重置/清除）。这属于后台静默重连，不该弹「配对码不一致」
+                    // 误导用户；只记日志，由用户侧「取消配对后重新配对」来修复。
+                    tracing::warn!(
+                        "与 {peer_name} 的重连握手失败：本机与其配对状态不一致（link secret 不匹配），建议双方先取消配对再重新配对"
                     );
                 }
             }
