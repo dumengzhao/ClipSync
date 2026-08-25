@@ -130,6 +130,8 @@ export interface AppConfig {
   sync_dir?: string | null;
   /** 自动拉取阈值（MB）：对端传来的文件总大小小于此值时本端自动拉取，无需手动点击。默认 1 */
   auto_pull_threshold_mb?: number;
+  /** 复制文件夹时递归文件数上限：超过此值则拦截推送、仅本地提示请压缩。0 表示不限制。默认 100 */
+  max_folder_files?: number;
 }
 
 export async function getConfig(): Promise<AppConfig> {

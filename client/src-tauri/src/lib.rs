@@ -137,6 +137,8 @@ pub fn run() {
             {
                 let code = app.state::<AppState>().config.lock().pairing_code.clone();
                 app.state::<AppState>().hub.set_pairing_code(code);
+                let max_folder_files = app.state::<AppState>().config.lock().max_folder_files;
+                app.state::<AppState>().hub.set_max_folder_files(max_folder_files);
             }
             let state = app.state::<AppState>();
             let (enable_mdns, listen_port) = {
