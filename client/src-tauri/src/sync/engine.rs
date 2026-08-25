@@ -93,6 +93,7 @@ pub struct SyncEngine {
     ///   路径在大小写或分隔符上不一致，精确哈希会失配，规范化后可对齐；
     /// - 写入时刻用于 1.5s 时间窗口兜底：万一规范化仍失配，时间窗口仍能拦截绝大多数回环；
     ///   take 只消费一次，不会吞掉后续真实拷贝。`last_file_hash` 提供第三重保险。
+    ///
     /// 用 `Arc<Mutex<>>` 包裹以便克隆进常驻监听任务。
     file_offer_expected: Arc<Mutex<Option<(String, Instant)>>>,
 }

@@ -85,6 +85,10 @@ impl std::error::Error for HandshakeError {}
 pub struct SyncEnvelope {
     pub mark: SyncMark,
     pub content: ClipboardContent,
+    /// 网格中继消息 id：本机每次剪贴板变化生成一次，跨连接转发时保持不变，用于去重防回环。
+    pub msg_id: String,
+    /// 剩余跳数：每中继一次 -1，减到 0 停止转发。
+    pub ttl: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -159,6 +163,40 @@ struct HelloPayload {
     listen_port: u16,
 }
 
+/// 网格中继最大跳数：一条剪贴板变化最多经多少台中间设备中转。
+/// 仅兜底切断异常网络下的无限转发，正常网格（数十节点内）远不会触及。
+const RELAY_MAX_TTL: u8 = 32;
+
+/// 网格中继去重表：记录最近处理过的剪贴板消息 id，防止连通图中消息无限回环。
+/// 有界：环形缓冲 + 集合，最多保留 `CAP` 条，超出后最旧者被挤出（旧 id 无害，仅占位）。
+struct RelaySeen {
+    ring: std::collections::VecDeque<String>,
+    set: std::collections::HashSet<String>,
+}
+impl RelaySeen {
+    fn new() -> Self {
+        Self {
+            ring: std::collections::VecDeque::with_capacity(256),
+            set: std::collections::HashSet::new(),
+        }
+    }
+    /// 返回 true 表示 `id` 已处理过（应丢弃）；false 表示首次见到并已记录。
+    fn note(&mut self, id: &str) -> bool {
+        const CAP: usize = 8192;
+        if self.set.contains(id) {
+            return true;
+        }
+        if self.ring.len() >= CAP {
+            if let Some(old) = self.ring.pop_front() {
+                self.set.remove(&old);
+            }
+        }
+        self.ring.push_back(id.to_string());
+        self.set.insert(id.to_string());
+        false
+    }
+}
+
 /// 连接中枢：持有监听端口、已配对口令缓存、本机配对码，并协调本地/远端剪贴板流转。
 pub struct ConnectionHub {
     identity: Arc<DeviceIdentity>,
@@ -192,6 +230,8 @@ pub struct ConnectionHub {
     listen_port: std::sync::atomic::AtomicU16,
     /// 应用句柄（用于广播连接状态事件 / 写注册表 / 解析下载目录）
     app: Mutex<Option<AppHandle>>,
+    /// 网格中继去重表（key = 剪贴板消息 id），防止连通图中消息无限回环。
+    seen: Mutex<RelaySeen>,
 }
 
 impl ConnectionHub {
@@ -211,6 +251,7 @@ impl ConnectionHub {
             chunk_size: 256 * 1024, // 256 KiB/片
             listen_port: std::sync::atomic::AtomicU16::new(0),
             app: Mutex::new(None),
+            seen: Mutex::new(RelaySeen::new()),
         })
     }
 
@@ -227,6 +268,11 @@ impl ConnectionHub {
     /// 读取当前静态配对口令（供首配对握手使用）。
     pub fn pairing_code(&self) -> String {
         self.pairing_code.lock().unwrap().clone()
+    }
+
+    /// 网格中继去重：标记/查询某剪贴板消息是否已处理过。true = 已见过（应丢弃）。
+    fn note_seen(&self, id: &str) -> bool {
+        self.seen.lock().unwrap().note(id)
     }
 
     pub fn is_paired(&self, device_id: &str) -> bool {
@@ -900,13 +946,24 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
                     };
                     match ev {
                         SyncEvent::LocalClipboardChanged { mark, content } => {
-                            let env = SyncEnvelope { mark, content };
+                            let msg_id = Uuid::new_v4().to_string();
+                            let env = SyncEnvelope {
+                                mark,
+                                content,
+                                msg_id: msg_id.clone(),
+                                ttl: RELAY_MAX_TTL,
+                            };
+                            // 记录本机生成的消息 id，避免经其他路径回传时被重复应用/转发。
+                            hub.note_seen(&msg_id);
                             let peers = hub.peers.lock().unwrap().clone();
                             if peers.is_empty() {
                                 tracing::warn!("本地剪贴板已变化，但当前没有已连接对端，内容未发出");
                                 continue;
                             }
-                            tracing::debug!("向 {} 个对端转发本地剪贴板变化", peers.len());
+                            tracing::debug!(
+                                "向 {} 个对端转发本地剪贴板变化 (relay ttl={RELAY_MAX_TTL})",
+                                peers.len()
+                            );
                             for (id, p) in peers {
                                 if p.tx.send(Outgoing::Sync(env.clone())).is_err() {
                                     tracing::warn!("对端 {id} 的发送通道已关闭，本次内容未送达");
@@ -1478,7 +1535,41 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
                                                 if let Ok(env) =
                                                     bincode::deserialize::<SyncEnvelope>(&pt)
                                                 {
-                                                    self.engine.apply_remote(env.mark, env.content).await;
+                                                    // 网格中继：去重 → 本地应用 → 转发给其他直连对端
+                                                    if self.note_seen(&env.msg_id) {
+                                                        tracing::debug!(
+                                                            "剪贴板消息 {} 已处理过，跳过（防网格回环）",
+                                                            env.msg_id
+                                                        );
+                                                        continue;
+                                                    }
+                                                    let SyncEnvelope { mark, content, msg_id, ttl } = env;
+                                                    self.engine.apply_remote(mark.clone(), content.clone()).await;
+                                                    if ttl > 1 {
+                                                        let relay = SyncEnvelope {
+                                                            mark,
+                                                            content,
+                                                            msg_id: msg_id.clone(),
+                                                            ttl: ttl - 1,
+                                                        };
+                                                        let peers =
+                                                            self.peers.lock().unwrap().clone();
+                                                        let other_count = peers.len().saturating_sub(1);
+                                                        for (id, p) in peers {
+                                                            if id == peer_id {
+                                                                continue;
+                                                            }
+                                                            if p.tx.send(Outgoing::Sync(relay.clone())).is_err() {
+                                                                tracing::warn!(
+                                                                    "中继转发对端 {id} 通道已关闭"
+                                                                );
+                                                            }
+                                                        }
+                                                        tracing::debug!(
+                                                            "中继剪贴板消息 {msg_id} 至其他 {other_count} 个对端 (ttl={})",
+                                                            ttl - 1
+                                                        );
+                                                    }
                                                 }
                                             }
                                             Err(e) => tracing::warn!("decrypt failed: {e}"),
