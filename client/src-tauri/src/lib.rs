@@ -111,11 +111,21 @@ pub fn run() {
             // 加载持久化配置（覆盖默认），使改过的端口等设置重启后仍生效
             let handle = app.handle().clone();
             {
-                let persisted = crate::config::load_config(&handle);
+                let mut persisted = crate::config::load_config(&handle);
+                // 配对码默认随机生成：若为空或仍是出厂默认值 "000000"，则生成一个新的
+                // 随机码并持久化，保证每台设备安装后都有独立配对码（无需用户手动设置）。
+                if persisted.pairing_code.trim().is_empty()
+                    || persisted.pairing_code.trim() == "000000"
+                {
+                    let new_code = crate::crypto::pake::generate_pairing_code();
+                    persisted.pairing_code = new_code;
+                    let _ = crate::config::save_config(&handle, &persisted);
+                }
                 *app.state::<AppState>().config.lock() = persisted;
             }
 
-            // 同步「预留配对码」到连接中枢（首配对与重连的 SPAKE2 口令，两端必须相同）
+            // 同步「配对码」到连接中枢：作为 SPAKE2 应答方的常驻口令，
+            // 对端首配对时输入本机显示的这个码即可（两端无需预先设成相同）。
             {
                 let code = app.state::<AppState>().config.lock().pairing_code.clone();
                 app.state::<AppState>().hub.set_pairing_code(code);
@@ -209,6 +219,7 @@ pub fn run() {
             tauri_cmd::list_connected_peers,
             tauri_cmd::pair_with,
             tauri_cmd::pair_manual,
+            tauri_cmd::regenerate_pairing_code,
             tauri_cmd::unpair,
             tauri_cmd::pull_files,
             tauri_cmd::list_pending_offers,

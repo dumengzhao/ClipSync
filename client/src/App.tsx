@@ -29,6 +29,9 @@ export default function App() {
   const [paired, setPaired] = useState<PairedDeviceInfo[]>([]);
   const [connected, setConnected] = useState<Set<string>>(new Set());
   const [msg, setMsg] = useState('');
+  // 局域网发现设备配对时输入的对方配对码
+  const [pairingTarget, setPairingTarget] = useState<DiscoveredPeer | null>(null);
+  const [pairInput, setPairInput] = useState('');
   // 「待拉取」文件清单（对端拷贝后广播过来，本端显示，用户点「拉取」才下载）
   const [pendingOffers, setPendingOffers] = useState<PendingOffer[]>([]);
   // 正在拉取中的传输 ID 集合（拉取中禁用按钮、显示「拉取中…」）
@@ -223,10 +226,15 @@ export default function App() {
     }
   };
 
-  const startPair = async (p: DiscoveredPeer) => {
+  const startPair = async (p: DiscoveredPeer, code: string) => {
+    const c = code.trim();
+    if (!c) {
+      flash('请输入对方显示的配对码');
+      return;
+    }
     try {
-      await pairWith(p.device_id);
-      flash(`正在与「${p.device_name}」配对…`);
+      await pairWith(p.device_id, c);
+      flash(`正在与「${p.device_name}」配对…（请输入对方界面显示的配对码）`);
     } catch (e) {
       flash('配对发起失败: ' + String(e));
     }
@@ -323,17 +331,59 @@ export default function App() {
                 <p className="hint">局域网内未发现其它 ClipSync 设备</p>
               ) : (
                 <ul className="peer-list">
-                  {discoveredOnly.map((p) => (
-                    <li key={p.device_id} className="peer-item peer-item-action">
-                      <span className="peer-name">{p.device_name}</span>
-                      <span className="peer-addr">
-                        {p.addr}:{p.port}
-                      </span>
-                      <button className="btn btn-sm" onClick={() => startPair(p)}>
-                        配对
-                      </button>
-                    </li>
-                  ))}
+                  {discoveredOnly.map((p) => {
+                    const isPairing = pairingTarget?.device_id === p.device_id;
+                    return (
+                      <li
+                        key={p.device_id}
+                        className="peer-item peer-item-action"
+                        style={{
+                          flexDirection: isPairing ? 'column' : 'row',
+                          alignItems: isPairing ? 'stretch' : 'center',
+                        }}
+                      >
+                        <span className="peer-name">{p.device_name}</span>
+                        <span className="peer-addr">{p.addr}:{p.port}</span>
+                        {isPairing ? (
+                          <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.4rem' }}>
+                            <input
+                              className="pair-input"
+                              autoFocus
+                              placeholder="输入对方显示的配对码"
+                              value={pairInput}
+                              onChange={(e) => setPairInput(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') startPair(p, pairInput);
+                              }}
+                              style={{ flex: 1 }}
+                            />
+                            <button className="btn btn-sm" onClick={() => startPair(p, pairInput)}>
+                              确认
+                            </button>
+                            <button
+                              className="btn btn-sm btn-ghost"
+                              onClick={() => {
+                                setPairingTarget(null);
+                                setPairInput('');
+                              }}
+                            >
+                              取消
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            className="btn btn-sm"
+                            onClick={() => {
+                              setPairingTarget(p);
+                              setPairInput('');
+                            }}
+                          >
+                            配对
+                          </button>
+                        )}
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </section>

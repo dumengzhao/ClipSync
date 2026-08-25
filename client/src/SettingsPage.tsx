@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { getConfig, setConfig, pairManual, type AppConfig } from './api/tauri';
+import { getConfig, setConfig, pairManual, regeneratePairingCode, type AppConfig } from './api/tauri';
 import { open } from '@tauri-apps/plugin-dialog';
 import { applyTheme } from './theme';
 
@@ -19,6 +19,9 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
   const [maLabel, setMaLabel] = useState('');
   const [maAddr, setMaAddr] = useState('');
   const [maPort, setMaPort] = useState('');
+  // 手动地址配对时输入的对方配对码（按当前正在配对的那条地址记录）
+  const [manualPairing, setManualPairing] = useState<{ addr: string; port: number } | null>(null);
+  const [manualPairCode, setManualPairCode] = useState('');
 
   useEffect(() => {
     getConfig()
@@ -82,14 +85,32 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
     update('manual_addresses', list);
   };
 
-  // 通过手动地址（跨网络 / mDNS 被拦截）发起首配对：用设置中的「预留配对码」当 SPAKE2 口令。
-  // 两端须设成相同码，否则握手被拒。
+  // 通过手动地址配对时，输入「对方界面显示的配对码」作为 SPAKE2 口令发起首配对。
+  // 两端配对码各自独立、无需预先相同。
   const startManualPair = async (addr: string, port: number) => {
+    const code = manualPairCode.trim();
+    if (!code) {
+      setMsg('请先输入对方界面显示的配对码');
+      return;
+    }
     try {
-      await pairManual(addr, port);
-      setMsg(`正在与「${addr}:${port}」配对…（请确保两端预留配对码相同）`);
+      await pairManual(addr, port, code);
+      setMsg(`正在与「${addr}:${port}」配对…（请输入对方界面显示的配对码）`);
+      setManualPairing(null);
+      setManualPairCode('');
     } catch (e) {
       setMsg('配对发起失败: ' + String(e));
+    }
+  };
+
+  // 重新生成「配对码」：新码即刻生效，已配对设备不受影响（它们走 link secret 重连）。
+  const refreshPairingCode = async () => {
+    try {
+      const code = await regeneratePairingCode();
+      update('pairing_code', code);
+      setMsg('已刷新配对码（已配对设备不受影响）');
+    } catch (e) {
+      setMsg('刷新失败: ' + String(e));
     }
   };
 
@@ -139,12 +160,18 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         />
       </div>
       <div className="row">
-        <label>预留配对码（两端须相同；跨网络首配对与重连的 SPAKE2 口令）</label>
-        <input
-          type="text"
-          value={cfg.pairing_code}
-          onChange={(e) => update('pairing_code', e.target.value)}
-        />
+        <label>配对码</label>
+        <div style={{ display: 'flex', gap: '0.5rem', flex: '0 0 auto' }}>
+          <input
+            type="text"
+            style={{ width: '160px' }}
+            value={cfg.pairing_code}
+            onChange={(e) => update('pairing_code', e.target.value)}
+          />
+          <button className="btn btn-sm btn-ghost" onClick={refreshPairingCode}>
+            刷新
+          </button>
+        </div>
       </div>
 
       <div className="section">同步内容</div>
@@ -232,17 +259,56 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
       {cfg.manual_addresses && cfg.manual_addresses.length > 0 && (
         <ul className="peer-list">
           {cfg.manual_addresses.map((m, i) => (
-            <li key={m.label} className="peer-item">
-              <span className="peer-name">{m.label}</span>
-              <span className="peer-addr">
-                {m.addr}:{m.port}
-              </span>
-              <button className="btn btn-sm" onClick={() => startManualPair(m.addr, m.port)}>
-                配对
-              </button>
-              <button className="btn btn-sm btn-ghost" onClick={() => removeManual(i)}>
-                删除
-              </button>
+            <li
+              key={m.label}
+              className="peer-item"
+              style={{ flexDirection: 'column', alignItems: 'stretch' }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <span className="peer-name">{m.label}</span>
+                <span className="peer-addr">
+                  {m.addr}:{m.port}
+                </span>
+                <button
+                  className="btn btn-sm"
+                  onClick={() => {
+                    setManualPairing({ addr: m.addr, port: m.port });
+                    setManualPairCode('');
+                  }}
+                >
+                  配对
+                </button>
+                <button className="btn btn-sm btn-ghost" onClick={() => removeManual(i)}>
+                  删除
+                </button>
+              </div>
+              {manualPairing && manualPairing.addr === m.addr && manualPairing.port === m.port && (
+                <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.4rem' }}>
+                  <input
+                    type="text"
+                    style={{ flex: 1 }}
+                    autoFocus
+                    placeholder="输入对方显示的配对码"
+                    value={manualPairCode}
+                    onChange={(e) => setManualPairCode(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') startManualPair(m.addr, m.port);
+                    }}
+                  />
+                  <button className="btn btn-sm" onClick={() => startManualPair(m.addr, m.port)}>
+                    确认
+                  </button>
+                  <button
+                    className="btn btn-sm btn-ghost"
+                    onClick={() => {
+                      setManualPairing(null);
+                      setManualPairCode('');
+                    }}
+                  >
+                    取消
+                  </button>
+                </div>
+              )}
             </li>
           ))}
         </ul>
