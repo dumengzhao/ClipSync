@@ -411,10 +411,14 @@ export default function App() {
                     const isPulling = pulling.has(o.transfer_id);
                     return (
                       <li key={o.transfer_id} className="peer-item peer-item-action">
-                        <span className="peer-name">{o.device_name || o.device_id}</span>
-                        <span className="peer-addr">
-                          {o.files.length} 个文件 · {fmtSize(o.total_size)}
-                        </span>
+                        <div className="offer-info">
+                          <span className="peer-name" title={o.files.map((f) => f.file_name).join('、')}>
+                            {o.files.length === 1
+                              ? (o.files[0]?.file_name ?? '未知文件')
+                              : `${o.files.slice(0, 2).map((f) => f.file_name).join('、')} 等 ${o.files.length} 个`}
+                          </span>
+                          <span className="peer-addr">来自 {o.device_name || o.device_id} · {fmtSize(o.total_size)}</span>
+                        </div>
                 {o.auto_pull ? (
                   isPulling ? (
                     <span className="peer-addr">自动拉取中…</span>
