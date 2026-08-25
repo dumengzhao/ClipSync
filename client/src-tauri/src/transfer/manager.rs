@@ -379,6 +379,29 @@ impl ConnectionHub {
         if files.is_empty() {
             return;
         }
+        // 文件夹文件数超过上限：不向对端广播，仅在本地弹出提示，请用户压缩后再复制。
+        const MAX_FOLDER_FILES: usize = 100;
+        if has_folder && files.len() > MAX_FOLDER_FILES {
+            let folder_name = if top_names.is_empty() {
+                "该".to_string()
+            } else {
+                top_names.join("、")
+            };
+            tracing::warn!(
+                "文件夹 {folder_name} 文件数量 {} 超过 {MAX_FOLDER_FILES}，已取消广播，请压缩后复制",
+                files.len()
+            );
+            if let Some(app) = self.app.lock().unwrap().clone() {
+                let _ = app.emit(
+                    "file-count-exceeded",
+                    serde_json::json!({
+                        "folder_name": folder_name,
+                        "count": files.len(),
+                    }),
+                );
+            }
+            return;
+        }
         let transfer_id = Uuid::new_v4().to_string();
         let my_id = self.identity.id.0.clone();
         let my_name = self.identity.name.clone();

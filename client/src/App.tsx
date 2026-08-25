@@ -48,6 +48,8 @@ export default function App() {
   >({});
   // 本机剪贴板当前文字内容（右侧展示，定时轮询刷新）
   const [clipboardText, setClipboardText] = useState<string | null>(null);
+  // 本机复制文件夹文件数超上限时的左下角提示
+  const [folderWarn, setFolderWarn] = useState<string | null>(null);
 
   const flash = (m: string) => {
     setMsg(m);
@@ -170,6 +172,15 @@ export default function App() {
         return [...prev, e.payload];
       });
     });
+    // 本机复制文件夹，文件数超过 100：仅弹左下角提示，不向对端广播。
+    const unlistenCountExceeded = listen<{ folder_name: string; count: number }>(
+      'file-count-exceeded',
+      (e) => {
+        const name = e.payload.folder_name || '该';
+        setFolderWarn(`${name}文件夹文件数量超过100，请压缩后复制`);
+        window.setTimeout(() => setFolderWarn(null), 6000);
+      },
+    );
 
     return () => {
       unlistenSettings.then((u) => u());
@@ -181,6 +192,7 @@ export default function App() {
       unlistenFailed.then((u) => u());
       unlistenUnpaired.then((u) => u());
       unlistenInfoUpdated.then((u) => u());
+      unlistenCountExceeded.then((u) => u());
       unlistenFileOffer.then((u) => u());
       unlistenPullStart.then((u) => u());
       unlistenPullComplete.then((u) => u());
@@ -488,6 +500,8 @@ export default function App() {
             )}
 
             {msg && <div className="msg">{msg}</div>}
+
+            {folderWarn && <div className="folder-warn">{folderWarn}</div>}
 
             <div className="app-right-footer">
               <button className="btn" onClick={() => setView('settings')}>
