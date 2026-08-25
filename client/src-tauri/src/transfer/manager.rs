@@ -353,22 +353,38 @@ impl ConnectionHub {
             .iter()
             .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
             .collect();
+        // 文件夹文件数超过上限：先快速递归计数，超限则直接拦截——
+        // 不展开清单、不向对端广播、不写入 active_offers，仅在本地弹提示请用户压缩。
+        const MAX_FOLDER_FILES: usize = 100;
+        if has_folder {
+            let total: usize = existing.iter().map(|p| Self::count_files_recursive(p)).sum();
+            if total > MAX_FOLDER_FILES {
+                let folder_name = if top_names.is_empty() {
+                    "该".to_string()
+                } else {
+                    top_names.join("、")
+                };
+                tracing::warn!(
+                    "文件夹 {folder_name} 文件数量 {total} 超过 {MAX_FOLDER_FILES}，已取消广播，请压缩后复制"
+                );
+                if let Some(app) = self.app.lock().unwrap().clone() {
+                    let _ = app.emit(
+                        "file-count-exceeded",
+                        serde_json::json!({
+                            "folder_name": folder_name,
+                            "count": total,
+                        }),
+                    );
+                }
+                return;
+            }
+        }
         let mut files: Vec<FileMeta> = Vec::new();
         let mut local_paths: Vec<PathBuf> = Vec::new();
         for p in &existing {
             if p.is_dir() {
-                // 目录：递归展开为其中的文件（保留相对结构）
-                if let Ok(entries) = std::fs::read_dir(p) {
-                    for e in entries.flatten() {
-                        let child = e.path();
-                        if child.is_file() {
-                            if let Some(meta) = Self::build_file_meta(&child, &root) {
-                                local_paths.push(child);
-                                files.push(meta);
-                            }
-                        }
-                    }
-                }
+                // 目录：递归展开为其中的所有文件（保留相对结构，含子文件夹）
+                Self::collect_files_recursive(p, &root, &mut files, &mut local_paths);
             } else if p.is_file() {
                 if let Some(meta) = Self::build_file_meta(p, &root) {
                     local_paths.push(p.clone());
@@ -377,29 +393,6 @@ impl ConnectionHub {
             }
         }
         if files.is_empty() {
-            return;
-        }
-        // 文件夹文件数超过上限：不向对端广播，仅在本地弹出提示，请用户压缩后再复制。
-        const MAX_FOLDER_FILES: usize = 100;
-        if has_folder && files.len() > MAX_FOLDER_FILES {
-            let folder_name = if top_names.is_empty() {
-                "该".to_string()
-            } else {
-                top_names.join("、")
-            };
-            tracing::warn!(
-                "文件夹 {folder_name} 文件数量 {} 超过 {MAX_FOLDER_FILES}，已取消广播，请压缩后复制",
-                files.len()
-            );
-            if let Some(app) = self.app.lock().unwrap().clone() {
-                let _ = app.emit(
-                    "file-count-exceeded",
-                    serde_json::json!({
-                        "folder_name": folder_name,
-                        "count": files.len(),
-                    }),
-                );
-            }
             return;
         }
         let transfer_id = Uuid::new_v4().to_string();
@@ -792,6 +785,47 @@ impl ConnectionHub {
         hash: None,
     })
 }
+
+    /// 递归统计一条路径下的文件数：文件计 1，目录递归累加其子文件。
+    /// 用于「文件夹文件数超限」拦截前的快速计数（不构造完整清单）。
+    fn count_files_recursive(path: &std::path::Path) -> usize {
+        if path.is_file() {
+            return 1;
+        }
+        if path.is_dir() {
+            let mut n = 0;
+            if let Ok(entries) = std::fs::read_dir(path) {
+                for e in entries.flatten() {
+                    n += Self::count_files_recursive(&e.path());
+                }
+            }
+            return n;
+        }
+        0
+    }
+
+    /// 递归展开目录下的所有文件（保留相对结构，含子文件夹），追加到传输清单。
+    fn collect_files_recursive(
+        dir: &std::path::Path,
+        root: &std::path::Path,
+        files: &mut Vec<FileMeta>,
+        local_paths: &mut Vec<PathBuf>,
+    ) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for e in entries.flatten() {
+                let child = e.path();
+                if child.is_dir() {
+                    Self::collect_files_recursive(&child, root, files, local_paths);
+                } else if child.is_file() {
+                    if let Some(meta) = Self::build_file_meta(&child, root) {
+                        local_paths.push(child);
+                        files.push(meta);
+                    }
+                }
+            }
+        }
+    }
+
 
 /// 计算一份文件清单的「回环指纹」：以「文件名 + 大小」集合（排序后哈希）标识，
 /// 忽略 `relative_path`——因为对端把本机文件落盘后再 offer 时根目录不同，
