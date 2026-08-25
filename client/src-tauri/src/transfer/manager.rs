@@ -1392,19 +1392,33 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
             // - 应答方：TCP 连接里的 peer_addr 是对端的临时源端口，不可回拨；
             //   但 Hello 里带了对端声明的 listen_port，用对端 IP + 该端口拼出地址。
             //   若对端是旧版本未带 listen_port（=0），则保留已有的 last_addr。
-            let last_addr = if matches!(role, Role::Initiator) {
+            // 回环地址（127.0.0.1 / ::1）不可能是对端的真实可拨地址，若写入会毒化自动
+            // 重连（A 反复拨自己），因此回落到已有 last_addr 而不覆盖。
+            let computed = if matches!(role, Role::Initiator) {
                 Some(peer_addr.clone())
             } else {
                 let host = peer_addr.rsplit_once(':').map(|(h, _)| h).unwrap_or("");
                 if !host.is_empty() && peer_hello.listen_port != 0 {
                     Some(format!("{host}:{}", peer_hello.listen_port))
                 } else {
-                    state
-                        .registry
-                        .lock()
-                        .get(&DeviceId(peer_id.clone()))
-                        .and_then(|d| d.last_addr.clone())
+                    None
                 }
+            };
+            let existing_addr = state
+                .registry
+                .lock()
+                .get(&DeviceId(peer_id.clone()))
+                .and_then(|d| d.last_addr.clone());
+            let last_addr = match computed {
+                Some(addr) => {
+                    let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or("");
+                    if host == "127.0.0.1" || host == "::1" {
+                        existing_addr.clone() // 回环地址不覆盖已有记录
+                    } else {
+                        Some(addr)
+                    }
+                }
+                None => existing_addr.clone(), // 无可解析地址（旧版未带 listen_port 等）保留已有
             };
             state.registry.lock().add(PairedDevice {
                 device_id: DeviceId(peer_id.clone()),
