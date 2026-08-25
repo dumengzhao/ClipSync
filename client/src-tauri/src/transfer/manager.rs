@@ -1387,38 +1387,41 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
             }
 
             let state = app.state::<AppState>();
-            // 双方都要记录可拨号地址，供 mDNS 失效时兜底重连：
-            // - 发起方：peer_addr 本就是拨号目标（对端 IP:监听端口），直接用。
-            // - 应答方：TCP 连接里的 peer_addr 是对端的临时源端口，不可回拨；
-            //   但 Hello 里带了对端声明的 listen_port，用对端 IP + 该端口拼出地址。
-            //   若对端是旧版本未带 listen_port（=0），则保留已有的 last_addr。
-            // 回环地址（127.0.0.1 / ::1）不可能是对端的真实可拨地址，若写入会毒化自动
-            // 重连（A 反复拨自己），因此回落到已有 last_addr 而不覆盖。
-            let computed = if matches!(role, Role::Initiator) {
-                Some(peer_addr.clone())
-            } else {
-                let host = peer_addr.rsplit_once(':').map(|(h, _)| h).unwrap_or("");
-                if !host.is_empty() && peer_hello.listen_port != 0 {
-                    Some(format!("{host}:{}", peer_hello.listen_port))
-                } else {
-                    None
-                }
-            };
+            // 双方每次连上（无论发起还是应答）都用「对端声明 listen_port」刷新记录：
+            // A↔B 任意一方主动连上都会走到这里，互相更新对方信息。这样即使旧记录里残留
+            // 坏地址（如 127.0.0.1:旧端口），下次重连后也能自愈——端口被刷成最新 listen_port。
+            // - 端口：一律以 Hello 里的 listen_port 为准（旧版未带 =0 时无法刷新，保留原值）。
+            // - host：优先用本次 TCP 连接的对端真实源 IP；但若该 IP 是回环地址、而旧记录里
+            //   已有一个非回环地址，则保留旧 host、只更新端口（避免把外网可达地址改回 127.0.0.1）。
+            let new_host = peer_addr
+                .rsplit_once(':')
+                .map(|(h, _)| h)
+                .unwrap_or("")
+                .to_string();
+            let new_port = peer_hello.listen_port;
             let existing_addr = state
                 .registry
                 .lock()
                 .get(&DeviceId(peer_id.clone()))
                 .and_then(|d| d.last_addr.clone());
-            let last_addr = match computed {
-                Some(addr) => {
-                    let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or("");
-                    if host == "127.0.0.1" || host == "::1" {
-                        existing_addr.clone() // 回环地址不覆盖已有记录
-                    } else {
-                        Some(addr)
-                    }
-                }
-                None => existing_addr.clone(), // 无可解析地址（旧版未带 listen_port 等）保留已有
+            let last_addr = if new_port == 0 {
+                existing_addr.clone() // 旧版未带 listen_port，无法刷新端口，保留已有
+            } else {
+                let (ex_host, _) = existing_addr
+                    .as_ref()
+                    .and_then(|a| a.rsplit_once(':'))
+                    .map(|(h, p)| (h.to_string(), p.to_string()))
+                    .unwrap_or_default();
+                let is_new_loopback = new_host == "127.0.0.1" || new_host == "::1";
+                let is_ex_loopback = ex_host == "127.0.0.1" || ex_host == "::1";
+                let host = if (is_new_loopback && !is_ex_loopback && !ex_host.is_empty())
+                    || new_host.is_empty()
+                {
+                    ex_host // 新源是回环且旧记录有真实地址，或解析不出 host：保留旧 host，只更新端口
+                } else {
+                    new_host.clone() // 用本次真实源 IP（自愈：即便旧的是坏地址也会被覆盖）
+                };
+                Some(format!("{host}:{new_port}"))
             };
             state.registry.lock().add(PairedDevice {
                 device_id: DeviceId(peer_id.clone()),
