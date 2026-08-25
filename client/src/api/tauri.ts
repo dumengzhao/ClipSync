@@ -85,6 +85,10 @@ export interface PendingOffer {
   total_size: number;
   /** 是否满足自动拉取阈值（由对端在 Offer 时一并广播） */
   auto_pull?: boolean;
+  /** 顶层条目名（文件夹名或文件名），用于折叠显示 */
+  top_names?: string[];
+  /** 顶层是否含文件夹（文件夹传输） */
+  has_folder?: boolean;
 }
 
 /** 拉取某次文件传输：下载到本机 sync_dir，完成后自动写剪贴板 */

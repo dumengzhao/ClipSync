@@ -409,15 +409,21 @@ export default function App() {
                 <ul className="peer-list">
                   {pendingOffers.map((o) => {
                     const isPulling = pulling.has(o.transfer_id);
+                    const isFolder = !!o.has_folder;
+                    const mainLabel = isFolder
+                      ? (o.top_names?.join('、') || o.files[0]?.file_name || '未知文件夹')
+                      : (o.files.length === 1
+                          ? (o.files[0]?.file_name ?? '未知文件')
+                          : `${o.files.slice(0, 2).map((f) => f.file_name).join('、')} 等 ${o.files.length} 个`);
+                    const title = isFolder
+                      ? (o.top_names?.join('、') ?? '')
+                      : o.files.map((f) => f.file_name).join('、');
+                    const subLabel = `来自 ${o.device_name || o.device_id}${isFolder ? '' : ` · ${fmtSize(o.total_size)}`}`;
                     return (
                       <li key={o.transfer_id} className="peer-item peer-item-action">
                         <div className="offer-info">
-                          <span className="peer-name" title={o.files.map((f) => f.file_name).join('、')}>
-                            {o.files.length === 1
-                              ? (o.files[0]?.file_name ?? '未知文件')
-                              : `${o.files.slice(0, 2).map((f) => f.file_name).join('、')} 等 ${o.files.length} 个`}
-                          </span>
-                          <span className="peer-addr">来自 {o.device_name || o.device_id} · {fmtSize(o.total_size)}</span>
+                          <span className="peer-name" title={title}>{mainLabel}</span>
+                          <span className="peer-addr">{subLabel}</span>
                         </div>
                 {o.auto_pull ? (
                   isPulling ? (
