@@ -173,7 +173,7 @@ export default function App() {
       });
     });
     // 本机复制文件夹，文件数超过 100：仅弹左下角提示，不向对端广播。
-    const unlistenCountExceeded = listen<{ folder_name: string; count: number }>(
+    const unlistenCountExceeded = listen<{ folder_name: string }>(
       'file-count-exceeded',
       (e) => {
         const name = e.payload.folder_name || '该';
