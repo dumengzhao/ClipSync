@@ -114,6 +114,12 @@ pub fn run() {
                 let persisted = crate::config::load_config(&handle);
                 *app.state::<AppState>().config.lock() = persisted;
             }
+
+            // 同步「预留配对码」到连接中枢（首配对与重连的 SPAKE2 口令，两端必须相同）
+            {
+                let code = app.state::<AppState>().config.lock().pairing_code.clone();
+                app.state::<AppState>().hub.set_pairing_code(code);
+            }
             let state = app.state::<AppState>();
             let (enable_mdns, listen_port) = {
                 let g = state.config.lock();
@@ -148,7 +154,7 @@ pub fn run() {
             }
 
             // 启动局域网发现（mDNS 广播本机 + 订阅对端），失败仅记录不阻断启动。
-            // 端口来自配置（默认 24681，可改）；发现方从对端广告动态读取端口，不写死。
+            // 端口来自配置（默认 20071，可改）；发现方从对端广告动态读取端口，不写死。
             if enable_mdns {
                 if let Err(e) =
                     app.state::<AppState>()
@@ -201,10 +207,8 @@ pub fn run() {
             tauri_cmd::set_config,
             tauri_cmd::list_discovered_peers,
             tauri_cmd::list_connected_peers,
-            tauri_cmd::generate_pairing_code,
-            tauri_cmd::cancel_pairing,
-            tauri_cmd::get_pending_pairing,
             tauri_cmd::pair_with,
+            tauri_cmd::pair_manual,
             tauri_cmd::unpair,
             tauri_cmd::pull_files,
             tauri_cmd::list_pending_offers,

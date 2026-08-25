@@ -15,8 +15,9 @@ pub struct AppConfig {
     pub max_image_size_mb: u32,
     pub listen_port: u16,
     pub enable_mdns: bool,
-    /// SPAKE2 配对码（6 位数字）。两端设成相同即可自动配对。
-    /// 默认值仅用于开发/测试；正式使用应在各端设置不同码并通过 UI 完成配对。
+    /// SPAKE2 配对口令（即设置中的「预留配对码」）。**两端必须设置成完全相同的值**，
+    /// 才能互相配对；它同时作为首配对与重连的口令，不再每次随机生成。
+    /// 默认值仅用于开发/测试；正式使用请在各端手动设置同一串强口令。
     #[serde(default = "default_pairing_code")]
     pub pairing_code: String,
     pub manual_addresses: Vec<ManualAddress>,
@@ -80,7 +81,7 @@ impl Default for AppConfig {
             sync_file: true,
             max_file_size_mb: 10 * 1024,
             max_image_size_mb: 50,
-            listen_port: 24681,
+            listen_port: 20071,
             enable_mdns: true,
             pairing_code: "000000".to_string(),
             manual_addresses: Vec::new(),

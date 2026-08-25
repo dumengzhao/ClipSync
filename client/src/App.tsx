@@ -5,9 +5,6 @@ import {
   getPairedDevices,
   listDiscoveredPeers,
   listConnectedPeers,
-  generatePairingCode,
-  cancelPairing,
-  getPendingPairing,
   pairWith,
   unpair,
   listPendingOffers,
@@ -31,11 +28,6 @@ export default function App() {
   const [discovered, setDiscovered] = useState<DiscoveredPeer[]>([]);
   const [paired, setPaired] = useState<PairedDeviceInfo[]>([]);
   const [connected, setConnected] = useState<Set<string>>(new Set());
-  // 当前武装中的配对码（生成配对码后展示，配对成功或取消后清除）
-  const [pendingCode, setPendingCode] = useState<string | null>(null);
-  // 正在输入配对码的目标设备（点击「配对」后进入输入态）
-  const [pairingTarget, setPairingTarget] = useState<DiscoveredPeer | null>(null);
-  const [pairInput, setPairInput] = useState('');
   const [msg, setMsg] = useState('');
   // 「待拉取」文件清单（对端拷贝后广播过来，本端显示，用户点「拉取」才下载）
   const [pendingOffers, setPendingOffers] = useState<PendingOffer[]>([]);
@@ -63,13 +55,12 @@ export default function App() {
     // dev 下「托盘 → 设置」通过事件请求内嵌显示设置视图
     const unlistenSettings = listen<null>('open-settings', () => setView('settings'));
 
-    // 初始数据：已发现设备 / 已配对设备 / 在线状态 / 武装中的配对码
+    // 初始数据：已发现设备 / 已配对设备 / 在线状态
     listDiscoveredPeers().then(setDiscovered).catch(() => {});
     getPairedDevices().then(setPaired).catch(() => {});
     listConnectedPeers()
       .then((ids) => setConnected(new Set(ids)))
       .catch(() => {});
-    getPendingPairing().then(setPendingCode).catch(() => {});
     // 待拉取清单：挂载时主动查一次（兜底事件丢失），并实时订阅对端广播
     listPendingOffers().then(setPendingOffers).catch(() => {});
 
@@ -152,9 +143,6 @@ export default function App() {
         }
         return [...prev, e.payload];
       });
-      // 配对成功，清除武装码展示
-      setPendingCode(null);
-      setPairingTarget(null);
       flash(`已与「${e.payload.name}」配对`);
     });
     const unlistenFailed = listen<{ device_id: string; reason: string }>(
@@ -226,48 +214,21 @@ export default function App() {
     };
   }, []);
 
-  const generateCode = async () => {
-    try {
-      const code = await generatePairingCode();
-      setPendingCode(code);
-    } catch (e) {
-      flash('生成配对码失败: ' + String(e));
-    }
-  };
-
-  const cancelCode = async () => {
-    try {
-      await cancelPairing();
-    } catch {
-      /* ignore */
-    }
-    setPendingCode(null);
-  };
-
-  const submitPair = async () => {
-    if (!pairingTarget) return;
-    const code = pairInput.trim();
-    if (code.length === 0) {
-      flash('请输入配对码');
-      return;
-    }
-    const target = pairingTarget;
-    setPairingTarget(null);
-    setPairInput('');
-    try {
-      await pairWith(target.device_id, code);
-      flash(`正在与「${target.device_name}」配对…`);
-    } catch (e) {
-      flash('配对发起失败: ' + String(e));
-    }
-  };
-
   const removePairing = async (p: PairedDeviceInfo) => {
     try {
       await unpair(p.id);
       flash(`已取消与「${p.name}」的配对`);
     } catch (e) {
       flash('取消配对失败: ' + String(e));
+    }
+  };
+
+  const startPair = async (p: DiscoveredPeer) => {
+    try {
+      await pairWith(p.device_id);
+      flash(`正在与「${p.device_name}」配对…`);
+    } catch (e) {
+      flash('配对发起失败: ' + String(e));
     }
   };
 
@@ -318,16 +279,6 @@ export default function App() {
   return (
     <div className="app">
       <main className="app-main">
-        {pendingCode && (
-          <div className="pairing-banner">
-            <div className="pairing-banner-title">配对码（请告知对方，让其在「配对」时输入）</div>
-            <div className="pairing-code">{pendingCode}</div>
-            <button className="btn btn-ghost btn-sm" onClick={cancelCode}>
-              取消
-            </button>
-          </div>
-        )}
-
         <div className="app-layout">
           <div className="app-left">
             <section className="peers">
@@ -372,52 +323,19 @@ export default function App() {
                 <p className="hint">局域网内未发现其它 ClipSync 设备</p>
               ) : (
                 <ul className="peer-list">
-                  {discoveredOnly.map((p) => {
-                    const isPairing = pairingTarget?.device_id === p.device_id;
-                    return (
-                      <li key={p.device_id} className="peer-item peer-item-action">
-                        <span className="peer-name">{p.device_name}</span>
-                        <span className="peer-addr">
-                          {p.addr}:{p.port}
-                        </span>
-                        {isPairing ? (
-                          <span className="pair-input-row">
-                            <input
-                              className="pair-input"
-                              autoFocus
-                              placeholder="输入对方配对码"
-                              value={pairInput}
-                              onChange={(e) => setPairInput(e.target.value)}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter') submitPair();
-                              }}
-                            />
-                            <button className="btn btn-sm" onClick={submitPair}>
-                              确认
-                            </button>
-                            <button
-                              className="btn btn-ghost btn-sm"
-                              onClick={() => {
-                                setPairingTarget(null);
-                                setPairInput('');
-                              }}
-                            >
-                              取消
-                            </button>
-                          </span>
-                        ) : (
-                          <button className="btn btn-sm" onClick={() => setPairingTarget(p)}>
-                            配对
-                          </button>
-                        )}
-                      </li>
-                    );
-                  })}
+                  {discoveredOnly.map((p) => (
+                    <li key={p.device_id} className="peer-item peer-item-action">
+                      <span className="peer-name">{p.device_name}</span>
+                      <span className="peer-addr">
+                        {p.addr}:{p.port}
+                      </span>
+                      <button className="btn btn-sm" onClick={() => startPair(p)}>
+                        配对
+                      </button>
+                    </li>
+                  ))}
                 </ul>
               )}
-              <button className="btn btn-ghost" onClick={generateCode}>
-                生成配对码
-              </button>
             </section>
           </div>
 
