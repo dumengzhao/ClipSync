@@ -239,6 +239,27 @@ body {
   flex: 1 1 auto;
 }
 
+/* 待拉取文件：文件名为主、设备名为附属 */
+.offer-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.offer-info .peer-name {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.offer-info .peer-addr {
+  flex: 0 0 auto;
+  text-align: left;
+}
+
 .peer-item-action .peer-addr {
   flex: 0 0 auto;
   margin-right: 0.5rem;
