@@ -48,14 +48,19 @@ export async function listConnectedPeers(): Promise<string[]> {
   return invoke<string[]>('list_connected_peers');
 }
 
-/** 手动发起配对：作为发起方用设置中的「预留配对码」连接指定对端（局域网发现列表内） */
-export async function pairWith(deviceId: string): Promise<void> {
-  return invoke<void>('pair_with', { deviceId });
+/** 手动发起配对：作为发起方用对方显示的配对码连接指定对端（局域网发现列表内） */
+export async function pairWith(deviceId: string, code: string): Promise<void> {
+  return invoke<void>('pair_with', { deviceId, code });
 }
 
-/** 通过手动地址（跨网络 / mDNS 被拦截）发起首配对，用「预留配对码」作为 SPAKE2 口令 */
-export async function pairManual(addr: string, port: number): Promise<void> {
-  return invoke<void>('pair_manual', { addr, port });
+/** 通过手动地址（跨网络 / mDNS 被拦截）发起首配对，用对方显示的配对码作为 SPAKE2 口令 */
+export async function pairManual(addr: string, port: number, code: string): Promise<void> {
+  return invoke<void>('pair_manual', { addr, port, code });
+}
+
+/** 重新生成本机配对码并立即持久化，返回新码 */
+export async function regeneratePairingCode(): Promise<string> {
+  return invoke<string>('regenerate_pairing_code');
 }
 
 /** 取消与某设备的配对：清除持久化口令与设备记录并断开连接 */

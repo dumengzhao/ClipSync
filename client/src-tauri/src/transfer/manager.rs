@@ -155,15 +155,16 @@ struct HelloPayload {
     listen_port: u16,
 }
 
-/// 连接中枢：持有监听端口、已配对口令缓存、静态配对口令，并协调本地/远端剪贴板流转。
+/// 连接中枢：持有监听端口、已配对口令缓存、本机配对码，并协调本地/远端剪贴板流转。
 pub struct ConnectionHub {
     identity: Arc<DeviceIdentity>,
     engine: Arc<SyncEngine>,
     /// 已配对对端的 **link secret**（key = device_id）：配对成功时由会话密钥派生，
     /// 同时写入密钥链持久化。断线/重启后都用它当 SPAKE2 口令静默重连，无需再次交互。
     paired_codes: Mutex<HashMap<String, String>>,
-    /// 静态配对口令（来自设置中的「预留配对码」）。首配对时发起方与应答方都用它当
-    /// SPAKE2 口令；**两端必须设置成相同值**。配置加载/保存时由 `set_pairing_code` 同步。
+    /// 本机「配对码」（来自设置，应答方常驻口令）。首配对时由应答方用它当 SPAKE2 口令，
+    /// 发起方则使用对方显示的码；两端各自独立、无需预先相同。配置加载/保存时由
+    /// `set_pairing_code` 同步。
     pairing_code: Mutex<String>,
     /// 已建立加密通道的对端（key 为 device_id）
     peers: Mutex<HashMap<String, Peer>>,
@@ -205,7 +206,7 @@ impl ConnectionHub {
         })
     }
 
-    /// 同步设置中的「预留配对码」到内存（配置加载/保存时调用）。
+    /// 同步设置中的「配对码」到内存（配置加载/保存时调用）。
     pub fn set_pairing_code(&self, code: String) {
         *self.pairing_code.lock().unwrap() = code;
     }
@@ -995,10 +996,10 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
         });
     }
 
-    /// 用户在前端手动发起配对：作为发起方，使用用户输入的口令连接对端。
+    /// 用户在前端手动发起配对：作为发起方，使用用户输入的对方配对码连接对端。
     /// 成功后由 `run_connection` 把口令写入 `paired_codes` 缓存，供后续自动重连。
     /// 若多次尝试仍失败（如配对码错误或对方未生成），则主动结束并通知前端，避免无限重试。
-    pub async fn pair_with(self: Arc<Self>, peer: DiscoveredPeer) {
+    pub async fn pair_with(self: Arc<Self>, peer: DiscoveredPeer, code: String) {
         let key = format!("{}:{}", peer.addr, peer.port);
         {
             let mut g = self.connecting.lock().unwrap();
@@ -1010,7 +1011,7 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
         for attempt in 0..MAX_PAIRING_ATTEMPTS {
             match self
                 .clone()
-                .connect_once(peer.clone(), None)
+                .connect_once(peer.clone(), Some(code.clone()))
                 .await
             {
                 // Ok 表示已成功配对并进入加密通道（直到对端断开才返回），直接结束
@@ -1026,7 +1027,7 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
                                 "pairing-failed",
                                 serde_json::json!({
                                     "device_id": peer.device_id,
-                                    "reason": "配对码不一致，请核对两端设置的「预留配对码」是否相同",
+                                    "reason": "配对码不一致，请核对对方界面显示的配对码",
                                 }),
                             );
                         }
@@ -1052,7 +1053,7 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
                     "pairing-failed",
                     serde_json::json!({
                         "device_id": peer.device_id,
-                        "reason": "配对超时，请确认对方已上线、端口可达且两端预留配对码相同",
+                        "reason": "配对超时，请确认对方已上线、端口可达且你输入的是对方界面显示的配对码",
                     }),
                 );
             }
@@ -1060,16 +1061,16 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
     }
 
     /// 通过手动地址（跨网络 / mDNS 被拦截）发起首配对：构造一个对端描述，
-    /// 用设置中的静态「预留配对码」作为 SPAKE2 口令连接对端。device_id 留空，
-    /// 连接后由 Hello 阶段的真实身份覆盖。
-    pub async fn pair_with_manual_address(self: Arc<Self>, addr: String, port: u16) {
+    /// 用调用方传入的对方配对码作为 SPAKE2 口令连接对端。device_id 留空，
+    /// 连接后由 Hello 阶段的真实身份覆盖。两端配对码各自独立、无需预先相同。
+    pub async fn pair_with_manual_address(self: Arc<Self>, addr: String, port: u16, code: String) {
         let peer = DiscoveredPeer {
             device_id: String::new(),
             device_name: addr.clone(),
             addr,
             port,
         };
-        self.pair_with(peer).await;
+        self.pair_with(peer, code).await;
     }
 
     /// 单次连接尝试（作为 SPAKE2 发起方）。成功配对并跑完同步循环返回 Ok，握手失败返回 Err。
@@ -1143,20 +1144,20 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
         }
 
         // 2) 选择口令：已配对 → 用持久化的 link secret 静默重连（含重启后）；
-        //    未配对（首配对）→ 发起方与应答方都用设置中的静态「预留配对码」，
-        //    两端必须一致；发起方优先用显式传入的 outgoing_code（等同静态码），
-        //    缺失时兜底取静态码，使手动地址监控也能完成首配对。
+        //    未配对（首配对）→ 应答方用本机「配对码」（应答方常驻、无需点击生成），
+        //    发起方必须用调用方显式传入的对方配对码（outgoing_code）；两端配对码
+        //    各自独立、无需预先相同，仅本次配对握手持平即可。刷新本机配对码不影响
+        //    已配对设备（它们走 link secret 重连）。
         let cached = self.paired_codes.lock().unwrap().get(&peer_id).cloned();
         let (pw, is_fresh_pairing) = match cached {
             Some(secret) => (secret, false),
             None => {
                 let code = match role {
-                    Role::Initiator => outgoing_code
-                        .clone()
-                        .or_else(|| Some(self.pairing_code())),
-                    Role::Responder => Some(self.pairing_code()),
-                }
-                .ok_or_else(|| anyhow::anyhow!("未配置配对码（请在设置中填写预留配对码）"))?;
+                    Role::Initiator => outgoing_code.clone().ok_or_else(|| {
+                        anyhow::anyhow!("未提供配对码（请在配对时输入对方显示的配对码）")
+                    })?,
+                    Role::Responder => self.pairing_code(),
+                };
                 (code, true)
             }
         };

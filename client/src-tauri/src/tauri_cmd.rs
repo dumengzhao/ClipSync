@@ -51,7 +51,7 @@ pub fn set_config(
     crate::config::save_config(&app, &cfg).map_err(|e| e.to_string())?;
     *state.config.lock() = cfg.clone();
 
-    // 同步「预留配对码」到连接中枢（首配对与重连的 SPAKE2 口令，两端必须相同）
+    // 同步「配对码」到连接中枢（应答方首配对的常驻口令）
     state.hub.set_pairing_code(cfg.pairing_code.clone());
 
     // 同步手动地址簿：配置是持久化真源，每次保存都据此重建内存地址簿，
@@ -151,11 +151,12 @@ pub fn list_connected_peers(state: State<AppState>) -> Vec<String> {
     state.hub.connected_peer_ids()
 }
 
-/// 用户在前端手动发起配对：作为发起方，使用设置中的「预留配对码」连接指定对端。
+/// 用户在前端手动发起配对：作为发起方，使用用户输入的对方配对码连接指定对端。
 ///
-/// 对端必须将「预留配对码」设为相同值，否则握手会被拒绝。device_id 取自局域网发现列表。
+/// 对端只需在其界面显示同一个配对码即可（首配对时本机作为应答方用它当 SPAKE2 口令），
+/// 两端无需预先配置相同值。device_id 取自局域网发现列表。
 #[tauri::command]
-pub fn pair_with(state: State<AppState>, device_id: String) -> Result<(), String> {
+pub fn pair_with(state: State<AppState>, device_id: String, code: String) -> Result<(), String> {
     let peer = {
         let g = state.discovered.lock();
         g.get(&device_id).cloned()
@@ -163,23 +164,44 @@ pub fn pair_with(state: State<AppState>, device_id: String) -> Result<(), String
     let peer = peer.ok_or_else(|| format!("未发现设备 {device_id}（请确认对方已上线且在局域网内）"))?;
     let hub = state.hub.clone();
     tauri::async_runtime::spawn(async move {
-        hub.pair_with(peer).await;
+        hub.pair_with(peer, code).await;
     });
     Ok(())
 }
 
-/// 通过手动地址（跨网络 / mDNS 被拦截）发起首配对：用设置中的「预留配对码」
-/// 作为 SPAKE2 口令连接对端。两端必须设置相同码，否则握手失败。
+/// 通过手动地址（跨网络 / mDNS 被拦截）发起首配对：用用户输入的对方配对码
+/// 作为 SPAKE2 口令连接对端。两端配对码各自独立、无需预先相同。
 #[tauri::command]
-pub fn pair_manual(state: State<AppState>, addr: String, port: u16) -> Result<(), String> {
+pub fn pair_manual(
+    state: State<AppState>,
+    addr: String,
+    port: u16,
+    code: String,
+) -> Result<(), String> {
     if addr.trim().is_empty() {
         return Err("地址不能为空".to_string());
     }
     let hub = state.hub.clone();
     tauri::async_runtime::spawn(async move {
-        hub.pair_with_manual_address(addr, port).await;
+        hub.pair_with_manual_address(addr, port, code).await;
     });
     Ok(())
+}
+
+/// 重新生成本机「配对码」并立即持久化、同步到连接中枢。
+///
+/// 新码即刻生效（应答方首配对用它当 SPAKE2 口令）；已配对设备不受影响（它们走 link secret
+/// 重连，不依赖本机配对码）。返回新生成的配对码供前端展示。
+#[tauri::command]
+pub fn regenerate_pairing_code(state: State<AppState>, app: AppHandle) -> Result<String, String> {
+    let new_code = crate::crypto::pake::generate_pairing_code();
+    {
+        let mut cfg = state.config.lock();
+        cfg.pairing_code = new_code.clone();
+        crate::config::save_config(&app, &cfg).map_err(|e| e.to_string())?;
+    }
+    state.hub.set_pairing_code(new_code.clone());
+    Ok(new_code)
 }
 
 /// 取消与某设备的配对：删除持久化的重连口令与设备记录，并断开当前连接。
