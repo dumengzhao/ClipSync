@@ -2,16 +2,17 @@
 //!
 //! 负责把整条同步链路接通：
 //! - 在 `listen_port` 上监听入站 WebSocket（作为 SPAKE2 应答方）
-//! - 发现对端后，**仅当对端已配对**才自动重连（作为 SPAKE2 发起方）。未配对对端
-//!   不会自动连接，必须用户在前端手动发起「配对」——即「强制交互式」配对。
-//! - 配对流程（强制交互式）：
-//!   * 一方点击「生成配对码」→ 本端生成 6 位随机码并「武装」监听（应答方角色），
-//!     该码通过界面展示给用户，由用户线下告知对方。
-//!   * 另一方在「局域网发现的设备」中点击「配对」并输入该码 → 本端作为发起方用该码连接。
-//!   * 双方先交换 Hello（含身份/公钥），再用该码跑 SPAKE2 握手派生会话密钥，
-//!     并以 HMAC 校验确认两端使用同一口令；校验通过后把对端登记为「已配对」。
+//! - 发现对端后，**仅当对端已配对**才自动重连（作为 SPAKE2 发起方，用缓存的
+//!   link secret 静默握手）。未配对对端不会自动连接，需用户在前端手动发起「配对」。
+//! - 配对口令统一取自设置中的「预留配对码」（两端必须相同，不再每次随机生成）：
+//!   局域网发现设备点「配对」、手动地址点「配对」、以及手动地址监控的兜底直连，
+//!   都以此静态码作为 SPAKE2 口令完成首配对。
+//! - 配对流程：一方在「局域网发现的设备」或「手动连接地址」中点击「配对」，
+//!   本端作为发起方用静态码连接对端；对端作为应答方也以同一静态码回应。双方先
+//!   交换 Hello（含身份/公钥），再跑 SPAKE2 握手派生会话密钥，并以 HMAC 校验确认
+//!   两端使用同一口令；校验通过后把对端登记为「已配对」。
 //! - 配对成功后双方各自派生同一个高熵 **link secret**（由会话密钥派生，不复用
-//!   用户看到的 6 位码），持久化到系统密钥链。此后重连一律用它当 SPAKE2 口令，
+//!   用户设置的配对码），持久化到系统密钥链。此后重连一律用它当 SPAKE2 口令，
 //!   **重启也不需要再配对**。
 //! - 一个后台监控任务周期性巡检：凡是「已配对 + 已被发现 + 未连接」的对端，
 //!   立即发起重连。不依赖 mDNS 事件时序，因此进程重启、对端重启、网络抖动后
@@ -22,7 +23,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use base64::Engine;
@@ -40,7 +41,7 @@ use crate::clipboard::types::{ClipboardContent, DeviceId, FileMeta, SyncMark};
 use crate::clipboard::ClipboardProvider;
 use crate::crypto::aead::{decrypt, encrypt};
 use crate::crypto::kdf::{derive_session_keys, split_keys};
-use crate::crypto::pake::{generate_pairing_code as gen_code, start_initiator, start_responder};
+use crate::crypto::pake::{start_initiator, start_responder};
 use crate::device::identity::DeviceIdentity;
 use crate::device::registry::{PairedDevice, TrustLevel};
 use crate::config::settings::ManualAddress;
@@ -50,10 +51,7 @@ use crate::transfer::websocket::{FileChunkResponsePayload, FileFrame, MessageFra
 use crate::AppState;
 use std::path::PathBuf;
 
-/// 配对码「武装」后的有效时长。过期后未完成的配对自动失效，需重新生成。
-const PAIRING_ARM_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// 手动配对（发起方）的最大尝试次数，每次间隔 5 秒；与武装有效期接近，避免无限重试。
+/// 手动配对（发起方）的最大尝试次数，每次间隔 5 秒。
 const MAX_PAIRING_ATTEMPTS: u32 = 24;
 
 /// 口令确认标签的域分隔串，避免该 HMAC 与其它用途的 MAC 混淆。
@@ -157,15 +155,16 @@ struct HelloPayload {
     listen_port: u16,
 }
 
-/// 连接中枢：持有监听端口、已配对口令缓存、武装中的配对码，并协调本地/远端剪贴板流转。
+/// 连接中枢：持有监听端口、已配对口令缓存、静态配对口令，并协调本地/远端剪贴板流转。
 pub struct ConnectionHub {
     identity: Arc<DeviceIdentity>,
     engine: Arc<SyncEngine>,
     /// 已配对对端的 **link secret**（key = device_id）：配对成功时由会话密钥派生，
     /// 同时写入密钥链持久化。断线/重启后都用它当 SPAKE2 口令静默重连，无需再次交互。
     paired_codes: Mutex<HashMap<String, String>>,
-    /// 当前「武装」的配对码（生成配对码后设置），应答方仅在武装状态下接受新配对。
-    pending_code: Mutex<Option<(String, Instant)>>,
+    /// 静态配对口令（来自设置中的「预留配对码」）。首配对时发起方与应答方都用它当
+    /// SPAKE2 口令；**两端必须设置成相同值**。配置加载/保存时由 `set_pairing_code` 同步。
+    pairing_code: Mutex<String>,
     /// 已建立加密通道的对端（key 为 device_id）
     peers: Mutex<HashMap<String, Peer>>,
     /// 当前已连地址集合（key = remote `host:port`），用于 mDNS 失效时按手动/已知地址
@@ -193,7 +192,7 @@ impl ConnectionHub {
             identity,
             engine,
             paired_codes: Mutex::new(HashMap::new()),
-            pending_code: Mutex::new(None),
+            pairing_code: Mutex::new(String::new()),
             peers: Mutex::new(HashMap::new()),
             connected_addrs: Mutex::new(HashSet::new()),
             connecting: Mutex::new(HashSet::new()),
@@ -206,38 +205,14 @@ impl ConnectionHub {
         })
     }
 
-    /// 生成 6 位随机配对码并「武装」监听（应答方角色）。返回该码供前端展示。
-    pub fn generate_pairing_code(&self) -> String {
-        let code = gen_code();
-        *self.pending_code.lock().unwrap() = Some((code.clone(), Instant::now()));
-        code
+    /// 同步设置中的「预留配对码」到内存（配置加载/保存时调用）。
+    pub fn set_pairing_code(&self, code: String) {
+        *self.pairing_code.lock().unwrap() = code;
     }
 
-    /// 取消当前武装的配对码（前端「取消配对」时调用）。
-    pub fn cancel_pairing(&self) {
-        *self.pending_code.lock().unwrap() = None;
-    }
-
-    /// 返回当前武装中的配对码（若有且未过期），供前端刷新时恢复展示。
-    pub fn pending_pairing_code(&self) -> Option<String> {
-        let g = self.pending_code.lock().unwrap();
-        match &*g {
-            Some((code, t)) if t.elapsed() < PAIRING_ARM_TIMEOUT => Some(code.clone()),
-            _ => None,
-        }
-    }
-
-    /// 若处于武装状态且未过期，返回配对码；过期则自动解除武装并返回 None。
-    fn is_armed(&self) -> Option<String> {
-        let mut g = self.pending_code.lock().unwrap();
-        match &*g {
-            Some((code, t)) if t.elapsed() < PAIRING_ARM_TIMEOUT => Some(code.clone()),
-            Some(_) => {
-                *g = None; // 过期，自动解除武装
-                None
-            }
-            None => None,
-        }
+    /// 读取当前静态配对口令（供首配对握手使用）。
+    pub fn pairing_code(&self) -> String {
+        self.pairing_code.lock().unwrap().clone()
     }
 
     pub fn is_paired(&self, device_id: &str) -> bool {
@@ -1023,7 +998,7 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
     /// 用户在前端手动发起配对：作为发起方，使用用户输入的口令连接对端。
     /// 成功后由 `run_connection` 把口令写入 `paired_codes` 缓存，供后续自动重连。
     /// 若多次尝试仍失败（如配对码错误或对方未生成），则主动结束并通知前端，避免无限重试。
-    pub async fn pair_with(self: Arc<Self>, peer: DiscoveredPeer, code: String) {
+    pub async fn pair_with(self: Arc<Self>, peer: DiscoveredPeer) {
         let key = format!("{}:{}", peer.addr, peer.port);
         {
             let mut g = self.connecting.lock().unwrap();
@@ -1035,7 +1010,7 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
         for attempt in 0..MAX_PAIRING_ATTEMPTS {
             match self
                 .clone()
-                .connect_once(peer.clone(), Some(code.clone()))
+                .connect_once(peer.clone(), None)
                 .await
             {
                 // Ok 表示已成功配对并进入加密通道（直到对端断开才返回），直接结束
@@ -1051,7 +1026,7 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
                                 "pairing-failed",
                                 serde_json::json!({
                                     "device_id": peer.device_id,
-                                    "reason": "配对码不一致，请核对对方界面上显示的 6 位码",
+                                    "reason": "配对码不一致，请核对两端设置的「预留配对码」是否相同",
                                 }),
                             );
                         }
@@ -1077,11 +1052,24 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
                     "pairing-failed",
                     serde_json::json!({
                         "device_id": peer.device_id,
-                        "reason": "配对超时，请确认对方已生成相同配对码且仍在有效期内",
+                        "reason": "配对超时，请确认对方已上线、端口可达且两端预留配对码相同",
                     }),
                 );
             }
         }
+    }
+
+    /// 通过手动地址（跨网络 / mDNS 被拦截）发起首配对：构造一个对端描述，
+    /// 用设置中的静态「预留配对码」作为 SPAKE2 口令连接对端。device_id 留空，
+    /// 连接后由 Hello 阶段的真实身份覆盖。
+    pub async fn pair_with_manual_address(self: Arc<Self>, addr: String, port: u16) {
+        let peer = DiscoveredPeer {
+            device_id: String::new(),
+            device_name: addr.clone(),
+            addr,
+            port,
+        };
+        self.pair_with(peer).await;
     }
 
     /// 单次连接尝试（作为 SPAKE2 发起方）。成功配对并跑完同步循环返回 Ok，握手失败返回 Err。
@@ -1155,7 +1143,9 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
         }
 
         // 2) 选择口令：已配对 → 用持久化的 link secret 静默重连（含重启后）；
-        //    未配对 → 必须是一次真实的交互配对（发起方带用户输入的码，应答方处于武装态）。
+        //    未配对（首配对）→ 发起方与应答方都用设置中的静态「预留配对码」，
+        //    两端必须一致；发起方优先用显式传入的 outgoing_code（等同静态码），
+        //    缺失时兜底取静态码，使手动地址监控也能完成首配对。
         let cached = self.paired_codes.lock().unwrap().get(&peer_id).cloned();
         let (pw, is_fresh_pairing) = match cached {
             Some(secret) => (secret, false),
@@ -1163,11 +1153,10 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
                 let code = match role {
                     Role::Initiator => outgoing_code
                         .clone()
-                        .ok_or_else(|| anyhow::anyhow!("未提供配对码"))?,
-                    Role::Responder => self
-                        .is_armed()
-                        .ok_or_else(|| anyhow::anyhow!("对端未发起配对或本端未生成配对码"))?,
-                };
+                        .or_else(|| Some(self.pairing_code())),
+                    Role::Responder => Some(self.pairing_code()),
+                }
+                .ok_or_else(|| anyhow::anyhow!("未配置配对码（请在设置中填写预留配对码）"))?;
                 (code, true)
             }
         };
@@ -1319,10 +1308,7 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
                     }),
                 );
             }
-            // 应答方配对成功后解除武装，使该配对码仅用一次
-            if let Role::Responder = role {
-                self.cancel_pairing();
-            }
+            // 首配对成功后 link secret 已持久化；静态配对口令长期有效，无需解除武装。
         }
 
         // 6) 注册对端，进入加密同步循环

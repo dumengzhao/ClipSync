@@ -51,6 +51,9 @@ pub fn set_config(
     crate::config::save_config(&app, &cfg).map_err(|e| e.to_string())?;
     *state.config.lock() = cfg.clone();
 
+    // 同步「预留配对码」到连接中枢（首配对与重连的 SPAKE2 口令，两端必须相同）
+    state.hub.set_pairing_code(cfg.pairing_code.clone());
+
     // 同步手动地址簿：配置是持久化真源，每次保存都据此重建内存地址簿，
     // 使监控任务的兜底直连始终读到最新地址（重启时 lib.rs 也已据此初始化）。
     {
@@ -148,30 +151,11 @@ pub fn list_connected_peers(state: State<AppState>) -> Vec<String> {
     state.hub.connected_peer_ids()
 }
 
-/// 生成 6 位随机配对码并「武装」本端监听（应答方角色）。
-/// 返回该码供前端展示给用户，由用户线下告知对方。
-#[tauri::command]
-pub fn generate_pairing_code(state: State<AppState>) -> String {
-    state.hub.generate_pairing_code()
-}
-
-/// 取消当前武装的配对码。
-#[tauri::command]
-pub fn cancel_pairing(state: State<AppState>) {
-    state.hub.cancel_pairing();
-}
-
-/// 返回当前武装中的配对码（若有），供前端刷新时恢复展示。
-#[tauri::command]
-pub fn get_pending_pairing(state: State<AppState>) -> Option<String> {
-    state.hub.pending_pairing_code()
-}
-
-/// 用户在前端手动发起配对：作为发起方，使用输入的配对码连接指定对端。
+/// 用户在前端手动发起配对：作为发起方，使用设置中的「预留配对码」连接指定对端。
 ///
-/// 对端必须已「生成配对码」并展示同一码（处于武装状态），否则握手会被拒绝。
+/// 对端必须将「预留配对码」设为相同值，否则握手会被拒绝。device_id 取自局域网发现列表。
 #[tauri::command]
-pub fn pair_with(state: State<AppState>, device_id: String, code: String) -> Result<(), String> {
+pub fn pair_with(state: State<AppState>, device_id: String) -> Result<(), String> {
     let peer = {
         let g = state.discovered.lock();
         g.get(&device_id).cloned()
@@ -179,7 +163,21 @@ pub fn pair_with(state: State<AppState>, device_id: String, code: String) -> Res
     let peer = peer.ok_or_else(|| format!("未发现设备 {device_id}（请确认对方已上线且在局域网内）"))?;
     let hub = state.hub.clone();
     tauri::async_runtime::spawn(async move {
-        hub.pair_with(peer, code).await;
+        hub.pair_with(peer).await;
+    });
+    Ok(())
+}
+
+/// 通过手动地址（跨网络 / mDNS 被拦截）发起首配对：用设置中的「预留配对码」
+/// 作为 SPAKE2 口令连接对端。两端必须设置相同码，否则握手失败。
+#[tauri::command]
+pub fn pair_manual(state: State<AppState>, addr: String, port: u16) -> Result<(), String> {
+    if addr.trim().is_empty() {
+        return Err("地址不能为空".to_string());
+    }
+    let hub = state.hub.clone();
+    tauri::async_runtime::spawn(async move {
+        hub.pair_with_manual_address(addr, port).await;
     });
     Ok(())
 }

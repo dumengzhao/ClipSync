@@ -48,24 +48,14 @@ export async function listConnectedPeers(): Promise<string[]> {
   return invoke<string[]>('list_connected_peers');
 }
 
-/** 生成 6 位随机配对码并武装本端监听，返回该码供展示 */
-export async function generatePairingCode(): Promise<string> {
-  return invoke<string>('generate_pairing_code');
+/** 手动发起配对：作为发起方用设置中的「预留配对码」连接指定对端（局域网发现列表内） */
+export async function pairWith(deviceId: string): Promise<void> {
+  return invoke<void>('pair_with', { deviceId });
 }
 
-/** 取消当前武装的配对码 */
-export async function cancelPairing(): Promise<void> {
-  return invoke<void>('cancel_pairing');
-}
-
-/** 返回当前武装中的配对码（挂载时恢复展示） */
-export async function getPendingPairing(): Promise<string | null> {
-  return invoke<string | null>('get_pending_pairing');
-}
-
-/** 手动发起配对：作为发起方用输入的配对码连接指定对端 */
-export async function pairWith(deviceId: string, code: string): Promise<void> {
-  return invoke<void>('pair_with', { deviceId, code });
+/** 通过手动地址（跨网络 / mDNS 被拦截）发起首配对，用「预留配对码」作为 SPAKE2 口令 */
+export async function pairManual(addr: string, port: number): Promise<void> {
+  return invoke<void>('pair_manual', { addr, port });
 }
 
 /** 取消与某设备的配对：清除持久化口令与设备记录并断开连接 */

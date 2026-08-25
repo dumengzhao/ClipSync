@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { getConfig, setConfig, type AppConfig } from './api/tauri';
+import { getConfig, setConfig, pairManual, type AppConfig } from './api/tauri';
 import { open } from '@tauri-apps/plugin-dialog';
 import { applyTheme } from './theme';
 
@@ -82,6 +82,17 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
     update('manual_addresses', list);
   };
 
+  // 通过手动地址（跨网络 / mDNS 被拦截）发起首配对：用设置中的「预留配对码」当 SPAKE2 口令。
+  // 两端须设成相同码，否则握手被拒。
+  const startManualPair = async (addr: string, port: number) => {
+    try {
+      await pairManual(addr, port);
+      setMsg(`正在与「${addr}:${port}」配对…（请确保两端预留配对码相同）`);
+    } catch (e) {
+      setMsg('配对发起失败: ' + String(e));
+    }
+  };
+
   return (
     <div className="settings">
       <div className="settings-header">
@@ -112,7 +123,7 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
 
       <div className="section">网络</div>
       <div className="row">
-        <label>监听端口（默认 24681，可改）</label>
+        <label>监听端口（默认 20071，可改）</label>
         <input
           type="number"
           value={cfg.listen_port}
@@ -128,7 +139,7 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         />
       </div>
       <div className="row">
-        <label>预留配对码（交互式配对暂不使用）</label>
+        <label>预留配对码（两端须相同；跨网络首配对与重连的 SPAKE2 口令）</label>
         <input
           type="text"
           value={cfg.pairing_code}
@@ -226,6 +237,9 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
               <span className="peer-addr">
                 {m.addr}:{m.port}
               </span>
+              <button className="btn btn-sm" onClick={() => startManualPair(m.addr, m.port)}>
+                配对
+              </button>
               <button className="btn btn-sm btn-ghost" onClick={() => removeManual(i)}>
                 删除
               </button>
