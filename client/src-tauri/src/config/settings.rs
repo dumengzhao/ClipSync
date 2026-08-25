@@ -33,6 +33,10 @@ pub struct AppConfig {
     /// 默认 1MB；可调大让更大文件也自动拉取，但过大（如 >10MB）会占用较多带宽/磁盘。
     #[serde(default = "default_auto_pull_threshold_mb")]
     pub auto_pull_threshold_mb: u64,
+    /// 本机复制文件夹时，递归文件数超过此上限则**不推送**给对端，仅本地提示「请压缩后复制」。
+    /// 0 视为「不限制」（任何大小的文件夹都正常同步）。默认 100。
+    #[serde(default = "default_max_folder_files")]
+    pub max_folder_files: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +59,10 @@ fn default_pairing_code() -> String {
 
 fn default_auto_pull_threshold_mb() -> u64 {
     1
+}
+
+fn default_max_folder_files() -> usize {
+    100
 }
 
 /// 默认设备名取本机机器名（hostname），使不同设备默认即可区分。
@@ -89,6 +97,7 @@ impl Default for AppConfig {
             cache_ttl_hours: 24,
             sync_dir: None,
             auto_pull_threshold_mb: 1,
+            max_folder_files: 100,
             theme: Theme::System,
         }
     }

@@ -170,6 +170,9 @@ pub struct ConnectionHub {
     /// 发起方则使用对方显示的码；两端各自独立、无需预先相同。配置加载/保存时由
     /// `set_pairing_code` 同步。
     pairing_code: Mutex<String>,
+    /// 文件夹文件数上限：本机复制文件夹时递归文件数超过此值则拦截推送、仅本地提示。
+    /// 0 表示不限制。配置加载/保存时由 `set_max_folder_files` 同步。
+    max_folder_files: Mutex<usize>,
     /// 已建立加密通道的对端（key 为 device_id）
     peers: Mutex<HashMap<String, Peer>>,
     /// 当前已连地址集合（key = remote `host:port`），用于 mDNS 失效时按手动/已知地址
@@ -198,6 +201,7 @@ impl ConnectionHub {
             engine,
             paired_codes: Mutex::new(HashMap::new()),
             pairing_code: Mutex::new(String::new()),
+            max_folder_files: Mutex::new(100),
             peers: Mutex::new(HashMap::new()),
             connected_addrs: Mutex::new(HashSet::new()),
             connecting: Mutex::new(HashSet::new()),
@@ -213,6 +217,11 @@ impl ConnectionHub {
     /// 同步设置中的「配对码」到内存（配置加载/保存时调用）。
     pub fn set_pairing_code(&self, code: String) {
         *self.pairing_code.lock().unwrap() = code;
+    }
+
+    /// 同步设置中的「文件夹文件数上限」到内存（配置加载/保存时调用）。
+    pub fn set_max_folder_files(&self, n: usize) {
+        *self.max_folder_files.lock().unwrap() = n;
     }
 
     /// 读取当前静态配对口令（供首配对握手使用）。
@@ -353,17 +362,21 @@ impl ConnectionHub {
             .iter()
             .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
             .collect();
-        // 文件夹文件数超过上限：递归计数，一旦超过 100 立即返回（不展开清单、不广播、
+        // 文件夹文件数超过上限：递归计数，一旦超过上限立即返回（不展开清单、不广播、
         // 不写入 active_offers），仅在本地弹提示请用户压缩。无需算出精确总数。
-        const MAX_FOLDER_FILES: usize = 100;
-        if has_folder && existing.iter().any(|p| Self::exceeds_file_limit(p, MAX_FOLDER_FILES)) {
+        // 上限来自设置（max_folder_files），0 表示不限制。
+        let max_folder_files = *self.max_folder_files.lock().unwrap();
+        if max_folder_files > 0
+            && has_folder
+            && existing.iter().any(|p| Self::exceeds_file_limit(p, max_folder_files))
+        {
             let folder_name = if top_names.is_empty() {
                 "该".to_string()
             } else {
                 top_names.join("、")
             };
             tracing::warn!(
-                "文件夹 {folder_name} 文件数量超过 {MAX_FOLDER_FILES}，已取消广播，请压缩后复制"
+                "文件夹 {folder_name} 文件数量超过 {max_folder_files}，已取消广播，请压缩后复制"
             );
             if let Some(app) = self.app.lock().unwrap().clone() {
                 let _ = app.emit(

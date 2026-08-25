@@ -53,6 +53,8 @@ pub fn set_config(
 
     // 同步「配对码」到连接中枢（应答方首配对的常驻口令）
     state.hub.set_pairing_code(cfg.pairing_code.clone());
+    // 同步「文件夹文件数上限」到连接中枢（复制文件夹超限拦截阈值）
+    state.hub.set_max_folder_files(cfg.max_folder_files);
 
     // 同步手动地址簿：配置是持久化真源，每次保存都据此重建内存地址簿，
     // 使监控任务的兜底直连始终读到最新地址（重启时 lib.rs 也已据此初始化）。

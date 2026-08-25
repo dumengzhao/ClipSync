@@ -254,6 +254,20 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
           {thresholdWarn}
         </p>
       )}
+      <div className="row">
+        <label>文件夹文件数上限（0 不限制，默认 100）</label>
+        <input
+          type="number"
+          min={0}
+          value={cfg.max_folder_files ?? 100}
+          onChange={(e) => {
+            const raw = e.target.value.trim();
+            const v = Math.round(Number(raw));
+            if (!Number.isFinite(v) || v < 0) return;
+            update('max_folder_files', v as number);
+          }}
+        />
+      </div>
 
       <div className="section">手动连接地址（mDNS 被拦截时的兜底直连）</div>
       {cfg.manual_addresses && cfg.manual_addresses.length > 0 && (
