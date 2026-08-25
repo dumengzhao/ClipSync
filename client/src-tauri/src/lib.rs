@@ -97,6 +97,14 @@ pub fn run() {
             Some(vec!["--hidden"]),
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // 第二个实例启动时不再新建窗口，而是聚焦已运行的第一个实例主窗口
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .manage(AppState::new())
         .setup(|app| {
             // 启动时显示主窗口（如果未隐藏）

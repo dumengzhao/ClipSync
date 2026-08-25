@@ -353,31 +353,25 @@ impl ConnectionHub {
             .iter()
             .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
             .collect();
-        // 文件夹文件数超过上限：先快速递归计数，超限则直接拦截——
-        // 不展开清单、不向对端广播、不写入 active_offers，仅在本地弹提示请用户压缩。
+        // 文件夹文件数超过上限：递归计数，一旦超过 100 立即返回（不展开清单、不广播、
+        // 不写入 active_offers），仅在本地弹提示请用户压缩。无需算出精确总数。
         const MAX_FOLDER_FILES: usize = 100;
-        if has_folder {
-            let total: usize = existing.iter().map(|p| Self::count_files_recursive(p)).sum();
-            if total > MAX_FOLDER_FILES {
-                let folder_name = if top_names.is_empty() {
-                    "该".to_string()
-                } else {
-                    top_names.join("、")
-                };
-                tracing::warn!(
-                    "文件夹 {folder_name} 文件数量 {total} 超过 {MAX_FOLDER_FILES}，已取消广播，请压缩后复制"
+        if has_folder && existing.iter().any(|p| Self::exceeds_file_limit(p, MAX_FOLDER_FILES)) {
+            let folder_name = if top_names.is_empty() {
+                "该".to_string()
+            } else {
+                top_names.join("、")
+            };
+            tracing::warn!(
+                "文件夹 {folder_name} 文件数量超过 {MAX_FOLDER_FILES}，已取消广播，请压缩后复制"
+            );
+            if let Some(app) = self.app.lock().unwrap().clone() {
+                let _ = app.emit(
+                    "file-count-exceeded",
+                    serde_json::json!({ "folder_name": folder_name }),
                 );
-                if let Some(app) = self.app.lock().unwrap().clone() {
-                    let _ = app.emit(
-                        "file-count-exceeded",
-                        serde_json::json!({
-                            "folder_name": folder_name,
-                            "count": total,
-                        }),
-                    );
-                }
-                return;
             }
+            return;
         }
         let mut files: Vec<FileMeta> = Vec::new();
         let mut local_paths: Vec<PathBuf> = Vec::new();
@@ -786,22 +780,33 @@ impl ConnectionHub {
     })
 }
 
-    /// 递归统计一条路径下的文件数：文件计 1，目录递归累加其子文件。
-    /// 用于「文件夹文件数超限」拦截前的快速计数（不构造完整清单）。
-    fn count_files_recursive(path: &std::path::Path) -> usize {
+    /// 递归判断某路径下的文件数是否超过 `limit`：一旦超过立即返回 true，不继续遍历，
+    /// 不计算精确总数。用于「文件夹文件数超限」拦截（超大目录也不做完整统计，避免卡顿）。
+    fn exceeds_file_limit(path: &std::path::Path, limit: usize) -> bool {
         if path.is_file() {
-            return 1;
+            return 1 > limit;
         }
+        let mut count: usize = 0;
+        let mut stack: Vec<std::path::PathBuf> = Vec::new();
         if path.is_dir() {
-            let mut n = 0;
-            if let Ok(entries) = std::fs::read_dir(path) {
+            stack.push(path.to_path_buf());
+        }
+        while let Some(dir) = stack.pop() {
+            if let Ok(entries) = std::fs::read_dir(&dir) {
                 for e in entries.flatten() {
-                    n += Self::count_files_recursive(&e.path());
+                    let child = e.path();
+                    if child.is_dir() {
+                        stack.push(child);
+                    } else if child.is_file() {
+                        count += 1;
+                        if count > limit {
+                            return true;
+                        }
+                    }
                 }
             }
-            return n;
         }
-        0
+        false
     }
 
     /// 递归展开目录下的所有文件（保留相对结构，含子文件夹），追加到传输清单。
