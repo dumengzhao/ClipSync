@@ -1189,6 +1189,27 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
                         }
                         return;
                     }
+                    // 对端不可达（地址/端口错误、防火墙、WebSocket 握手未完成）：
+                    // 首配对时立即反馈，避免傻等 MAX_PAIRING_ATTEMPTS×5s 才报「配对超时」，
+                    // 否则用户点确认后长时间无结果，感知为「确认没反应」。
+                    let emsg = e.to_string();
+                    if emsg.contains("connect failed")
+                        || emsg.contains("Handshake")
+                        || emsg.contains("handshake")
+                    {
+                        tracing::warn!("pairing with {} unreachable: {e}", peer.device_name);
+                        self.connecting.lock().unwrap().remove(&key);
+                        if let Some(app) = self.app.lock().unwrap().clone() {
+                            let _ = app.emit(
+                                "pairing-failed",
+                                serde_json::json!({
+                                    "device_id": peer.device_id,
+                                    "reason": "对端不可达：请确认对方在线、IP/端口正确（双方监听端口需一致，当前 20071），且未被防火墙拦截",
+                                }),
+                            );
+                        }
+                        return;
+                    }
                     tracing::warn!(
                         "pair attempt {} to {} failed: {e}",
                         attempt + 1,
