@@ -27,29 +27,35 @@ cargo build --release --target x86_64-unknown-linux-musl   # 静态单二进制
 
 ## 状态
 
-方案 v2 已确认（Rust / 管理页+登录 / 文件存储 / 两步信任启用）。进入分阶段实现，见架构方案第 7 节路线图。
+方案 v2 已确认（Rust / 管理页+登录 / 文件存储 / 两步信任启用）。分阶段实现中，见架构方案第 7 节路线图。
 
 ### 阶段 1（已完成 ✅）：服务端骨架 + 文件存储 + 设备 WS + 中继门控
 
 - 设备 WS `/ws`：`auth`(Token 哈希校验) → 注册/更新节点（首次 `enabled=false`/pending）→ `welcome`；`heartbeat`；`relay_text`/`file_notify` 仅当源与目标均 `enabled=true` 且跨 `lan_group` 才转发（密文透传 / 仅广播 manifest）。
-- 管理 REST（`Bearer ADMIN_API_KEY`，阶段2 将替换为登录会话）：`POST /api/admin/networks`（返回一次性 Token）、`GET /api/admin/networks`、设备列表、`enable`/`disable`（触发 `activated`/`deactivated` + `nodes_update`）。
 - 文件存储：`data/networks.json`(Token 仅存哈希) / `data/admin.json`(argon2) / `data/server.key`，原子写 + 启动恢复。
 - 联调脚本已验证：pending→启用→跨 LAN 中继→禁用停发 全部通过。
 
-#### 本地运行（阶段1）
+### 阶段 2（已完成 ✅）：管理页面 + 登录会话
+
+- **登录会话** 取代临时 `ADMIN_API_KEY`：`POST /api/admin/login` 校验账号密码后，用 `server.key` 做 HMAC-SHA256 签发会话 token（7 天有效）；管理 REST 与页面统一由 `admin_auth` 中间件校验该会话。
+- **内嵌管理页**（`rust-embed` 编译时打包进二进制，免部署静态文件）：`GET /admin` 返回 `static/admin.html`（登录、网络列表、创建网络返回一次性 Token、设备列表及启用/禁用）。
+- 阶段2 联调脚本已验证：未登录拦截(401)、错误密码拦截、登录拿 token、授权访问、创建网络、`/admin` 返回页面、伪造 token 被拒。
+
+### 本地运行
 
 ```bash
 cd server
 cargo build                 # 或 cargo build --release
 CLIPSYNC_DATA_DIR=./data \
-ADMIN_API_KEY=你的密钥 \
+ADMIN_USER=admin \
 ADMIN_PASS=你的密码 \
 LISTEN=0.0.0.0:24682 \
 ./target/debug/clipsync-server
 ```
 
+- 打开管理后台：`http://host:24682/admin`（首次用 `ADMIN_USER`/`ADMIN_PASS` 登录）。
 - 健康检查：`GET /healthz`
-- 创网络（拿 Token）：`curl -H "Authorization: Bearer $ADMIN_API_KEY" -d '{"name":"默认","description":""}' http://127.0.0.1:24682/api/admin/networks`
+- 创网络（拿 Token）：登录后在前端「创建网络」按钮，或
+  `curl -X POST -H "Authorization: Bearer <session>" -d '{"name":"默认","description":""}' http://127.0.0.1:24682/api/admin/networks`
+  其中 `<session>` 由 `POST /api/admin/login` 返回。
 - 设备接入：`ws://host:24682/ws`，首条消息 `{"type":"auth","token":"<Token>","device":{"id":"...","name":"...","lan_group":"g1","ext_file_ep":"ip:port","platform":"mac"}}`
-
-> 注：阶段1 管理 API 用 `ADMIN_API_KEY` 简易鉴权，登录页面 + 会话 Cookie/JWT 在阶段2 实现。

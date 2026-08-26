@@ -188,7 +188,7 @@ Server → Client:
 ## 7. 实施路线图（建议分阶段，每阶段可独立验证）
 
 1. **服务端骨架（Rust + 文件存储）** ✅ 已完成并冒烟通过：axum + WS；`networks.json`/`admin.json`/`server.key` 读写；Network 模型 + Token 哈希；`auth`/`heartbeat`；`enabled` 门控的中继 + `nodes_update`。（裸 ws 客户端手测 pending→active 全通过）
-2. **管理页面 + 登录**：管理员账号引导、登录会话、REST API、打包进二进制的静态管理页（网络/设备审批/启用禁用/Token 重置）。
+2. **管理页面 + 登录** ✅ 已完成：管理员登录（`POST /api/admin/login` 校验密码后用 `server_key` 签发 HMAC-SHA256 会话 token，7 天有效）；`admin_auth` 中间件统一校验；`rust-embed` 打包 `static/admin.html` 进二进制（`GET /admin`）；网络/设备审批/启用禁用/Token 重置。已联调：未登录拦截、错误密码拦截、登录拿 token、授权访问、创建网络、页面返回、伪造 token 拒绝。
 3. **客户端 ServerConn + pending/activated 流程**：连接、鉴权、接收 `welcome` 状态、合并已启用节点（先只读展示）。
 4. **文字跨 LAN 中继**：路由决策 + 网络密钥加解密 + `relay_text` 端到端。
 5. **文件跨 LAN**：内嵌 HTTP 文件服务 + `file_notify` + 待复制列表 + 拉取落盘。
