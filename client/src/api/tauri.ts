@@ -132,6 +132,15 @@ export interface AppConfig {
   auto_pull_threshold_mb?: number;
   /** 复制文件夹时递归文件数上限：超过此值则拦截推送、仅本地提示请压缩。0 表示不限制。默认 100 */
   max_folder_files?: number;
+  // ===== 跨局域网中转（服务端） =====
+  /** 服务端 WebSocket 地址，例如 ws://your-host:24682/ws；为空表示不使用服务端 */
+  server_url?: string;
+  /** Network Token（共享密钥）：服务端鉴权 + 跨 LAN 文字端到端加密 */
+  network_token?: string;
+  /** 本机对外文件拉取地址 ip:port（公网可达）；为空则跨 LAN 文件不可拉取 */
+  ext_file_ep?: string;
+  /** 局域网分组标识：相同值视为同一局域网（走直连），不同值走服务端；为空按网段自动推断 */
+  lan_group?: string;
 }
 
 export async function getConfig(): Promise<AppConfig> {
@@ -149,3 +158,45 @@ export async function openSettings(): Promise<void> {
 export async function quitApp(): Promise<void> {
   return invoke<void>('quit_app');
 }
+
+// ===== 跨局域网中转（服务端） =====
+
+/** 服务端连接状态：0 未连接 / 1 待审批(pending) / 2 已启用(active) */
+export async function getServerStatus(): Promise<number> {
+  return invoke<number>('get_server_status');
+}
+
+/** 跨局域网已启用节点（来自服务端下发） */
+export interface RemoteNode {
+  device_id: string;
+  name: string;
+  lan_group: string;
+  ext_file_ep: string;
+  platform: string;
+}
+export async function getServerNodes(): Promise<RemoteNode[]> {
+  return invoke<RemoteNode[]>('get_server_nodes');
+}
+
+/** 跨 LAN「待复制」文件通知 */
+export interface CrossLanOffer {
+  from: string;
+  from_name: string;
+  manifest: { file_name: string; file_size: number; is_dir: boolean }[];
+  ext_file_ep: string;
+}
+export async function listCrossLanOffers(): Promise<CrossLanOffer[]> {
+  return invoke<CrossLanOffer[]>('list_cross_lan_offers');
+}
+
+/** 拉取某条跨 LAN 文件通知（从对端 ext_file_ep 下载并写本机剪贴板） */
+export async function pullCrossLan(
+  extFileEp: string,
+  manifest: unknown,
+): Promise<void> {
+  return invoke<void>('pull_cross_lan', {
+    extFileEp,
+    manifest,
+  });
+}
+

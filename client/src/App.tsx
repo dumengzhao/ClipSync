@@ -10,9 +10,15 @@ import {
   listPendingOffers,
   pullFiles,
   getClipboardText,
+  getServerStatus,
+  getServerNodes,
+  listCrossLanOffers,
+  pullCrossLan,
   type DiscoveredPeer,
   type PairedDeviceInfo,
   type PendingOffer,
+  type RemoteNode,
+  type CrossLanOffer,
 } from './api/tauri';
 import SettingsPage from './SettingsPage';
 import { applyTheme } from './theme';
@@ -52,6 +58,14 @@ export default function App() {
   const [folderWarn, setFolderWarn] = useState<string | null>(null);
   // 手动刷新局域网设备时的加载态
   const [refreshing, setRefreshing] = useState(false);
+  // 跨局域网服务端连接状态（0 未连接 / 1 待审批 / 2 已启用）
+  const [serverStatus, setServerStatus] = useState(0);
+  // 跨局域网已启用节点（来自服务端下发）
+  const [serverNodes, setServerNodes] = useState<RemoteNode[]>([]);
+  // 跨 LAN「待复制」文件清单
+  const [crossLanOffers, setCrossLanOffers] = useState<CrossLanOffer[]>([]);
+  // 跨 LAN 拉取中的 ext_file_ep 集合
+  const [crossPulling, setCrossPulling] = useState<Set<string>>(new Set());
 
   const flash = (m: string) => {
     setMsg(m);
@@ -83,6 +97,10 @@ export default function App() {
       .catch(() => {});
     // 待拉取清单：挂载时主动查一次（兜底事件丢失），并实时订阅对端广播
     listPendingOffers().then(setPendingOffers).catch(() => {});
+    // 跨局域网：挂载时回填服务端状态 / 节点 / 待复制清单
+    getServerStatus().then(setServerStatus).catch(() => {});
+    getServerNodes().then(setServerNodes).catch(() => {});
+    listCrossLanOffers().then(setCrossLanOffers).catch(() => {});
 
     // 对端拷贝文件后广播「待拉取」；本端点击拉取后收到开始/完成事件
     const unlistenFileOffer = listen<PendingOffer>('file-offer', (e) => {
@@ -196,6 +214,16 @@ export default function App() {
         window.setTimeout(() => setFolderWarn(null), 6000);
       },
     );
+    // 跨局域网服务端事件
+    const unlistenServerStatus = listen<number>('server-status', (e) =>
+      setServerStatus(e.payload),
+    );
+    const unlistenServerNodes = listen<RemoteNode[]>('server-nodes', (e) =>
+      setServerNodes(e.payload),
+    );
+    const unlistenCrossLanFile = listen<CrossLanOffer>('cross-lan-file', (e) =>
+      setCrossLanOffers((prev) => [...prev, e.payload]),
+    );
 
     return () => {
       unlistenSettings.then((u) => u());
@@ -211,6 +239,9 @@ export default function App() {
       unlistenFileOffer.then((u) => u());
       unlistenPullStart.then((u) => u());
       unlistenPullComplete.then((u) => u());
+      unlistenServerStatus.then((u) => u());
+      unlistenServerNodes.then((u) => u());
+      unlistenCrossLanFile.then((u) => u());
     };
   }, []);
 
@@ -295,6 +326,25 @@ export default function App() {
         return n;
       });
       flash('拉取失败: ' + String(e));
+    }
+  };
+
+  /// 跨 LAN 拉取：从对端 ext_file_ep 下载文件并写本机剪贴板。
+  const doCrossPull = async (extEp: string, manifest: unknown) => {
+    const key = extEp;
+    setCrossPulling((prev) => new Set(prev).add(key));
+    try {
+      await pullCrossLan(extEp, manifest);
+      setCrossLanOffers((prev) => prev.filter((o) => o.ext_file_ep !== extEp));
+      flash('已拉取跨 LAN 文件');
+    } catch (e) {
+      flash('跨 LAN 拉取失败: ' + String(e));
+    } finally {
+      setCrossPulling((prev) => {
+        const n = new Set(prev);
+        n.delete(key);
+        return n;
+      });
     }
   };
 
@@ -444,6 +494,32 @@ export default function App() {
                 </ul>
               )}
             </section>
+
+            <section className="peers">
+              <h2>跨局域网（服务端）</h2>
+              <div className="peer-addr" style={{ marginBottom: '0.5rem' }}>
+                {serverStatus === 2
+                  ? '已启用 · 参与跨 LAN 同步'
+                  : serverStatus === 1
+                    ? '已连接 · 等待服务端管理员启用'
+                    : '未连接服务端'}
+              </div>
+              {serverNodes.length === 0 ? (
+                <p className="hint">当前没有其他已启用的跨局域网设备</p>
+              ) : (
+                <ul className="peer-list">
+                  {serverNodes.map((n) => (
+                    <li key={n.device_id} className="peer-item">
+                      <span className="peer-name">{n.name}</span>
+                      <span className="peer-addr">{n.lan_group || '默认网络'}</span>
+                      <span className="peer-addr" style={{ opacity: 0.6 }}>
+                        {n.platform}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
           </div>
 
           <div className="app-right">
@@ -495,6 +571,47 @@ export default function App() {
                     拉取
                   </button>
                 )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </section>
+
+            <section className="peers">
+              <h2>待复制（跨 LAN）</h2>
+              {crossLanOffers.length === 0 ? (
+                <p className="hint">跨局域网设备复制文件后会出现在这里</p>
+              ) : (
+                <ul className="peer-list">
+                  {crossLanOffers.map((o) => {
+                    const isPulling = crossPulling.has(o.ext_file_ep);
+                    const names = (o.manifest || [])
+                      .map((f) => f.file_name)
+                      .join('、');
+                    const total = (o.manifest || []).reduce(
+                      (s: number, f: { file_size: number }) => s + (f.file_size || 0),
+                      0,
+                    );
+                    return (
+                      <li key={`${o.from}-${o.ext_file_ep}`} className="peer-item peer-item-action">
+                        <div className="offer-info">
+                          <span className="peer-name" title={names}>{names || '未知文件'}</span>
+                          <span className="peer-addr">
+                            来自 {o.from_name || o.from}
+                            {total > 0 ? ` · ${fmtSize(total)}` : ''}
+                          </span>
+                        </div>
+                        {isPulling ? (
+                          <span className="peer-addr">拉取中…</span>
+                        ) : (
+                          <button
+                            className="btn btn-sm"
+                            onClick={() => doCrossPull(o.ext_file_ep, o.manifest)}
+                          >
+                            拉取
+                          </button>
+                        )}
                       </li>
                     );
                   })}
