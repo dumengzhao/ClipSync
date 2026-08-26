@@ -324,3 +324,47 @@ pub fn cache_stats(state: State<AppState>) -> CacheStats {
         entries: state.cache.len(),
     }
 }
+
+/// 跨局域网服务端连接状态（0 未连接 / 1 待审批 / 2 已启用）。
+#[tauri::command]
+pub fn get_server_status(state: State<AppState>) -> u8 {
+    match state.server_conn.lock().as_ref() {
+        Some(sc) => match sc.status() {
+            crate::server_conn::ServerStatus::Disconnected => 0,
+            crate::server_conn::ServerStatus::Pending => 1,
+            crate::server_conn::ServerStatus::Active => 2,
+        },
+        None => 0,
+    }
+}
+
+/// 跨局域网已启用节点列表（来自服务端下发的 nodes_update）。
+#[tauri::command]
+pub fn get_server_nodes(state: State<AppState>) -> Vec<crate::server_conn::RemoteNode> {
+    state
+        .server_conn
+        .lock()
+        .as_ref()
+        .map(|sc| sc.nodes())
+        .unwrap_or_default()
+}
+
+/// 当前跨 LAN「待复制」清单（前端初始化快照；实时更新走 `cross-lan-file` 事件）。
+#[tauri::command]
+pub fn list_cross_lan_offers(state: State<AppState>) -> Vec<crate::server_conn::CrossLanOffer> {
+    state.cross_lan_offers.lock().clone()
+}
+
+/// 拉取某条跨 LAN 文件通知：从对端 ext_file_ep 下载并写本机剪贴板。
+#[tauri::command]
+pub async fn pull_cross_lan(
+    state: State<'_, AppState>,
+    ext_file_ep: String,
+    manifest: serde_json::Value,
+) -> Result<(), String> {
+    let sc = state.server_conn.lock().clone();
+    let sc = sc.ok_or_else(|| "服务端未连接".to_string())?;
+    sc.pull_cross_lan(&ext_file_ep, manifest)
+        .await
+        .map_err(|e| e.to_string())
+}

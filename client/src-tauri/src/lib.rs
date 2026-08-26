@@ -9,7 +9,10 @@ pub mod crypto;
 pub mod device;
 pub mod discovery;
 pub mod error;
+pub mod file_server;
+pub mod file_share;
 pub mod obs;
+pub mod server_conn;
 pub mod sync;
 pub mod tauri_cmd;
 pub mod transfer;
@@ -18,7 +21,7 @@ pub mod update;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WindowEvent,
+    Listener, Manager, WindowEvent,
 };
 
 use crate::cache::file_cache::FileCache;
@@ -27,6 +30,8 @@ use crate::device::identity::DeviceIdentity;
 use crate::device::registry::DeviceRegistry;
 use crate::discovery::manual::ManualAddressBook;
 use crate::discovery::{DiscoveredPeer, MdnsDiscovery};
+use crate::file_share::FileShare;
+use crate::server_conn::{CrossLanOffer, ServerConn};
 use crate::sync::engine::SyncEngine;
 use crate::transfer::manager::ConnectionHub;
 use parking_lot::Mutex;
@@ -48,6 +53,12 @@ pub struct AppState {
     pub discovery: MdnsDiscovery,
     /// 当前通过 mDNS 发现的局域网对端（供 `list_discovered_peers` 查询）
     pub discovered: Mutex<HashMap<String, DiscoveredPeer>>,
+    /// 跨局域网文件共享注册表（hash → 本地路径，供内嵌 HTTP 服务拉取）
+    pub file_share: Arc<FileShare>,
+    /// 跨局域网服务端连接（含已启用节点表 + 启用态）；setup 时建立
+    pub server_conn: Mutex<Option<Arc<ServerConn>>>,
+    /// 跨 LAN 待复制清单（前端初始化快照用，实时更新走 `cross-lan-file` 事件）
+    pub cross_lan_offers: Mutex<Vec<CrossLanOffer>>,
 }
 
 impl AppState {
@@ -75,6 +86,9 @@ impl AppState {
                 cache,
                 discovery: MdnsDiscovery::new(),
                 discovered: Mutex::new(HashMap::new()),
+                file_share: Arc::new(FileShare::new()),
+                server_conn: Mutex::new(None),
+                cross_lan_offers: Mutex::new(Vec::new()),
             }
     }
 }
@@ -201,6 +215,41 @@ pub fn run() {
                 hub.start(hub_app, hub_port).await;
             });
 
+            // 启动跨局域网服务端连接（常连 + 心跳 + 中继路由）；失败仅记录不阻断启动
+            {
+                let sc = ServerConn::new(
+                    app.handle().clone(),
+                    app.state::<AppState>().engine.clone(),
+                );
+                sc.start();
+                *app.state::<AppState>().server_conn.lock() = Some(sc);
+            }
+
+            // 启动跨 LAN 文件内嵌 HTTP 服务（供对端经 ext_file_ep 直取）
+            {
+                let ep = app.state::<AppState>().config.lock().ext_file_ep.clone();
+                crate::file_server::start_file_server(
+                    app.state::<AppState>().file_share.clone(),
+                    ep,
+                );
+            }
+
+            // 把跨 LAN 待复制通知同时缓冲进状态，供前端初始化快照
+            {
+                let app_handle = app.handle().clone();
+                let _ = app_handle.clone().listen("cross-lan-file", move |event| {
+                    if let Ok(o) =
+                        serde_json::from_str::<CrossLanOffer>(event.payload())
+                    {
+                        app_handle
+                            .state::<AppState>()
+                            .cross_lan_offers
+                            .lock()
+                            .push(o);
+                    }
+                });
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -235,6 +284,10 @@ pub fn run() {
             tauri_cmd::list_pending_offers,
             tauri_cmd::open_settings,
             tauri_cmd::quit_app,
+            tauri_cmd::get_server_status,
+            tauri_cmd::get_server_nodes,
+            tauri_cmd::list_cross_lan_offers,
+            tauri_cmd::pull_cross_lan,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
