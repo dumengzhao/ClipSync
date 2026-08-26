@@ -37,6 +37,20 @@ pub struct AppConfig {
     /// 0 视为「不限制」（任何大小的文件夹都正常同步）。默认 100。
     #[serde(default = "default_max_folder_files")]
     pub max_folder_files: usize,
+    // ===== 跨局域网中转（服务端）相关配置 =====
+    /// 服务端 WebSocket 地址，例如 `ws://your-host:24682/ws`。为空表示不使用服务端（仅局域网直连）。
+    #[serde(default)]
+    pub server_url: String,
+    /// Network Token（共享密钥），用于服务端鉴权 + 跨 LAN 文字端到端加密。
+    #[serde(default)]
+    pub network_token: String,
+    /// 本机在对端眼中用于文件直取的对外地址 `ip:port`（公网可达）。为空则跨 LAN 文件不可拉取。
+    #[serde(default)]
+    pub ext_file_ep: String,
+    /// 局域网分组标识：相同值视为同一局域网（走直连），不同值视为跨局域网（走服务端）。
+    /// 为空时按本机网段自动推断。
+    #[serde(default)]
+    pub lan_group: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +113,10 @@ impl Default for AppConfig {
             auto_pull_threshold_mb: 1,
             max_folder_files: 100,
             theme: Theme::System,
+            server_url: String::new(),
+            network_token: String::new(),
+            ext_file_ep: String::new(),
+            lan_group: String::new(),
         }
     }
 }
