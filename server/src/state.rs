@@ -16,9 +16,7 @@ pub struct AppState {
     pub store: Store,
     pub networks: Mutex<Vec<Network>>,
     pub hub: Hub,
-    pub admin_api_key: String,
-    /// 会话签名密钥（阶段2 登录/管理页会话用，阶段1 仅落盘保留）
-    #[allow(dead_code)]
+    /// 会话签名密钥：登录签发/HMAC 校验 admin 会话
     pub server_key: String,
     pub admin_user: String,
     pub admin_pass_hash: String,

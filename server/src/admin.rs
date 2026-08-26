@@ -1,27 +1,31 @@
-use crate::crypto::{gen_token, hash_token};
+use crate::crypto::{gen_token, hash_token, sign_session, verify_session, SESSION_TTL};
 use crate::models::Network;
-use crate::state::AppState;
+use crate::state::{now_secs, AppState};
 use crate::storage;
 use axum::extract::{Path, Request, State};
-use axum::http::header::AUTHORIZATION;
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use rust_embed::RustEmbed;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-/// 管理 API 鉴权中间件（阶段1：Bearer ADMIN_API_KEY；阶段2 将替换为登录会话）。
+/// 内嵌管理页面资源（编译时打包进二进制，免部署静态文件）。
+#[derive(RustEmbed)]
+#[folder = "static/"]
+struct Assets;
+
+/// 管理 API 鉴权中间件：校验 Bearer 会话 token（HMAC 签名）。
 pub async fn admin_auth(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
-    let ok = req
+    let token = req
         .headers()
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .map(|v| {
-            v.strip_prefix("Bearer ")
-                .map(|t| t == state.admin_api_key)
-                .unwrap_or(false)
-        })
+        .and_then(|v| v.strip_prefix("Bearer "));
+    let ok = token
+        .map(|t| verify_session(&state.server_key, t).is_some())
         .unwrap_or(false);
     if !ok {
         return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"}))).into_response();
@@ -42,12 +46,45 @@ pub struct LoginBody {
     pub pass: String,
 }
 
-/// 登录：校验密码后返回 admin_api_key（阶段2 改为签发会话 Cookie/JWT）。
+/// 登录：校验密码后签发 HMAC 会话 token（7 天有效）。
 pub async fn admin_login(State(state): State<Arc<AppState>>, Json(body): Json<LoginBody>) -> Json<Value> {
     if body.user != state.admin_user || !storage::verify_pass(&state.admin_pass_hash, &body.pass) {
         return Json(json!({"error": "invalid credentials"}));
     }
-    Json(json!({ "token": state.admin_api_key }))
+    let exp = now_secs() + SESSION_TTL;
+    let payload = json!({ "user": state.admin_user, "exp": exp }).to_string();
+    let token = sign_session(&state.server_key, &payload);
+    Json(json!({ "token": token }))
+}
+
+/// GET /admin：返回内嵌的管理页面 HTML。
+pub async fn admin_page() -> Response {
+    match Assets::get("admin.html") {
+        Some(f) => (
+            StatusCode::OK,
+            [(CONTENT_TYPE, "text/html; charset=utf-8")],
+            f.data.to_vec(),
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "admin page not embedded".to_string()).into_response(),
+    }
+}
+
+/// GET /admin/static/*：返回内嵌的其它静态资源（js/css 等）。
+pub async fn admin_static(Path(p): Path<String>) -> Response {
+    match Assets::get(&p) {
+        Some(f) => {
+            let ct: &str = if p.ends_with(".js") {
+                "application/javascript"
+            } else if p.ends_with(".css") {
+                "text/css"
+            } else {
+                "application/octet-stream"
+            };
+            (StatusCode::OK, [(CONTENT_TYPE, ct)], f.data.to_vec()).into_response()
+        }
+        None => (StatusCode::NOT_FOUND, "not found".to_string()).into_response(),
+    }
 }
 
 pub async fn list_networks(State(state): State<Arc<AppState>>) -> Json<Value> {

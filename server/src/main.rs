@@ -16,8 +16,6 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() {
     let data_dir = std::env::var("CLIPSYNC_DATA_DIR").unwrap_or_else(|_| "data".to_string());
-    let admin_api_key =
-        std::env::var("ADMIN_API_KEY").unwrap_or_else(|_| "clipsync-dev-admin-key".to_string());
     let admin_user = std::env::var("ADMIN_USER").unwrap_or_else(|_| "admin".to_string());
     let admin_pass = std::env::var("ADMIN_PASS").unwrap_or_else(|_| "clipsync".to_string());
     let listen = std::env::var("LISTEN").unwrap_or_else(|_| "0.0.0.0:24682".to_string());
@@ -39,9 +37,8 @@ async fn main() {
 
     let state = Arc::new(AppState {
         store,
-        networks: std::sync::Mutex::new(networks),
+  networks: std::sync::Mutex::new(networks),
         hub: hub::Hub::new(),
-        admin_api_key,
         server_key,
         admin_user,
         admin_pass_hash,
@@ -67,6 +64,8 @@ async fn main() {
         .route("/ws", get(ws::device_ws))
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/admin/login", post(admin::admin_login))
+        .route("/admin", get(admin::admin_page))
+        .route("/admin/static/:p", get(admin::admin_static))
         .merge(protected)
         .with_state(state.clone());
 
