@@ -50,10 +50,25 @@ export default function App() {
   const [clipboardText, setClipboardText] = useState<string | null>(null);
   // 本机复制文件夹文件数超上限时的左下角提示
   const [folderWarn, setFolderWarn] = useState<string | null>(null);
+  // 手动刷新局域网设备时的加载态
+  const [refreshing, setRefreshing] = useState(false);
 
   const flash = (m: string) => {
     setMsg(m);
     window.setTimeout(() => setMsg(''), 4000);
+  };
+
+  // 手动刷新局域网发现的设备（重新拉取后端实时 mDNS 发现表）
+  const refreshDiscovery = async () => {
+    setRefreshing(true);
+    try {
+      const list = await listDiscoveredPeers();
+      setDiscovered(list);
+    } catch {
+      /* 忽略：刷新失败不影响已有列表 */
+    } finally {
+      setRefreshing(false);
+    }
   };
 
   useEffect(() => {
@@ -338,7 +353,24 @@ export default function App() {
             </section>
 
             <section className="peers">
-              <h2>局域网发现的设备</h2>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  marginBottom: '0.5rem',
+                }}
+              >
+                <h2 style={{ marginBottom: 0 }}>局域网发现的设备</h2>
+                <button
+                  className="btn btn-sm btn-ghost"
+                  onClick={refreshDiscovery}
+                  disabled={refreshing}
+                  title="重新扫描局域网内的 ClipSync 设备"
+                >
+                  {refreshing ? '刷新中…' : '刷新'}
+                </button>
+              </div>
               {discoveredOnly.length === 0 ? (
                 <p className="hint">局域网内未发现其它 ClipSync 设备</p>
               ) : (
@@ -357,7 +389,15 @@ export default function App() {
                         <span className="peer-name">{p.device_name}</span>
                         <span className="peer-addr">{p.addr}:{p.port}</span>
                         {isPairing ? (
-                          <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.4rem' }}>
+                          <div
+                            style={{
+                              display: 'flex',
+                              flexWrap: 'wrap',
+                              gap: '0.5rem',
+                              marginTop: '0.4rem',
+                              width: '100%',
+                            }}
+                          >
                             <input
                               className="pair-input"
                               autoFocus
@@ -367,13 +407,18 @@ export default function App() {
                               onKeyDown={(e) => {
                                 if (e.key === 'Enter') startPair(p, pairInput);
                               }}
-                              style={{ flex: 1 }}
+                              style={{ flex: '1 1 100%', minWidth: 0 }}
                             />
-                            <button className="btn btn-sm" onClick={() => startPair(p, pairInput)}>
+                            <button
+                              className="btn btn-sm"
+                              style={{ flex: 1 }}
+                              onClick={() => startPair(p, pairInput)}
+                            >
                               确认
                             </button>
                             <button
                               className="btn btn-sm btn-ghost"
+                              style={{ flex: 1 }}
                               onClick={() => {
                                 setPairingTarget(null);
                                 setPairInput('');
