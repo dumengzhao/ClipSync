@@ -346,6 +346,52 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         可在防火墙拦截局域网发现（mDNS）时兜底直连。
       </p>
 
+      <div className="section">跨局域网中转（服务端）</div>
+      <div className="row">
+        <label>服务端地址 (ws://host:port/ws)</label>
+        <input
+          type="text"
+          style={{ width: '260px' }}
+          placeholder="例如 ws://clipsync.example.com:24682/ws"
+          value={cfg.server_url ?? ''}
+          onChange={(e) => update('server_url', e.target.value)}
+        />
+      </div>
+      <div className="row">
+        <label>Network Token（共享密钥）</label>
+        <input
+          type="text"
+          style={{ width: '260px' }}
+          placeholder="服务端创建网络时返回的一次性 Token"
+          value={cfg.network_token ?? ''}
+          onChange={(e) => update('network_token', e.target.value)}
+        />
+      </div>
+      <div className="row">
+        <label>对外文件地址 (ip:port)</label>
+        <input
+          type="text"
+          style={{ width: '200px' }}
+          placeholder="例如 1.2.3.4:24684"
+          value={cfg.ext_file_ep ?? ''}
+          onChange={(e) => update('ext_file_ep', e.target.value)}
+        />
+      </div>
+      <div className="row">
+        <label>局域网分组 (lanGroup，可选)</label>
+        <input
+          type="text"
+          style={{ width: '160px' }}
+          placeholder="留空按网段自动推断"
+          value={cfg.lan_group ?? ''}
+          onChange={(e) => update('lan_group', e.target.value)}
+        />
+      </div>
+      <p className="hint">
+        填入后保存并重启应用：本机将常连服务端，实现跨局域网文字/文件同步。设备需在服务端
+        管理页被管理员「启用」后才参与同步。
+      </p>
+
       <div className="section">缓存</div>
       <div className="row">
         <label>文件缓存有效期 (小时)</label>
