@@ -126,6 +126,11 @@ impl SyncEngine {
         self.clipboard.clone()
     }
 
+    /// 本机设备 ID（用于向服务端鉴权时上报）。
+    pub fn device_id(&self) -> crate::clipboard::types::DeviceId {
+        self.identity.id.clone()
+    }
+
     /// 拉取完成后自动写剪贴板前调用：记录本次写出路径的「规范化哈希」与写入时刻，
     /// 作为「回声」判定依据。处理任务在检测到文件变化时，若读到的路径规范化哈希与之
     /// 一致、或写入发生在 1.5s 内，即视为本机刚写入的回声而丢弃，不广播 Offer；否则
