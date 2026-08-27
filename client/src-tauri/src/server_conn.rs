@@ -17,7 +17,7 @@ use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
@@ -158,6 +158,8 @@ enum ServerToClient {
     },
     Activated,
     Deactivated,
+    /// 服务端已将该设备从网络移除（拉黑）：停止重连，提示需重新配对
+    Removed,
     NodesUpdate {
         nodes: Vec<NodeFields>,
     },
@@ -212,6 +214,8 @@ pub struct ServerConn {
     ws_tx: Mutex<Option<mpsc::UnboundedSender<ClientToServer>>>,
     /// 配置变更（set_config）后唤醒连接循环立即重连。
     reconnect_notify: Notify,
+    /// 被服务端移除（拉黑）标记：置位后停止重连循环，直到 reconnect() 被显式调用。
+    removed: AtomicBool,
 }
 
 impl ServerConn {
@@ -226,6 +230,7 @@ impl ServerConn {
             our_lan_group: Mutex::new(String::new()),
             ws_tx: Mutex::new(None),
             reconnect_notify: Notify::new(),
+            removed: AtomicBool::new(false),
         })
     }
 
@@ -272,6 +277,13 @@ impl ServerConn {
         tauri::async_runtime::spawn(async move {
             let mut backoff: u64 = 2;
             loop {
+                // 被服务端移除（拉黑）：停止重连，直到 reconnect() 被显式调用（管理员恢复后用户手动重连）
+                if conn.removed.load(Ordering::SeqCst) {
+                    conn.set_status(ServerStatus::Disconnected);
+                    let _ = conn.reconnect_notify.notified().await;
+                    backoff = 2;
+                    continue;
+                }
                 let url = app.state::<AppState>().config.lock().server_url.clone();
                 if url.is_empty() {
                     conn.set_status(ServerStatus::Disconnected);
@@ -314,7 +326,9 @@ impl ServerConn {
     }
 
     /// 配置变更后由 set_config 调用，立即唤醒连接循环重连（无需重启应用）。
+    /// 同时清除「已被移除」标记，使被拉黑后管理员恢复的设备可重新尝试入网。
     pub fn reconnect(&self) {
+        self.removed.store(false, Ordering::SeqCst);
         self.reconnect_notify.notify_one();
     }
 
@@ -409,6 +423,13 @@ impl ServerConn {
             ServerToClient::Deactivated => {
                 self.set_status(ServerStatus::Pending);
                 true
+            }
+            ServerToClient::Removed => {
+                // 被服务端移除（拉黑）：停止重连，提示用户需重新配对
+                self.removed.store(true, Ordering::SeqCst);
+                self.set_status(ServerStatus::Disconnected);
+                let _ = self.app.emit("server-removed", ());
+                false
             }
             ServerToClient::NodesUpdate { nodes } => {
                 self.update_nodes(nodes);
