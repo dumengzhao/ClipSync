@@ -59,6 +59,10 @@ impl AppState {
             .ok_or_else(|| "bad_token".to_string())?;
         let net_id = nets[idx].id.clone();
         let now = now_secs();
+        // 黑名单：被移除（拉黑）的设备重连直接拒绝，避免删除后被复活
+        if nets[idx].removed_devices.iter().any(|r| r.device_id == device.id) {
+            return Err("device_removed".to_string());
+        }
         let enabled = {
             let net = &mut nets[idx];
             match net.nodes.iter_mut().find(|n| n.device_id == device.id) {
@@ -309,8 +313,8 @@ impl AppState {
         true
     }
 
-    /// 从网络移除某个设备节点（彻底删除，不再显示；离线残留设备清理即此用途）。
-    /// 若设备仍在线，下发 Deactivated 使其停止同步；其后续重连会被当作新设备重新 pending。
+    /// 从网络移除某个设备节点：彻底删除该节点，并加入 removed_devices 黑名单（永久拒绝其重连，
+    /// 除非管理员「恢复」）。若设备仍在线，下发 Removed 使其立即停止同步并停止重连。
     pub fn remove_device(&self, net_id: &str, dev_id: &str) -> bool {
         let existed = {
             let mut nets = self.networks.lock().unwrap();
@@ -319,15 +323,56 @@ impl AppState {
                 None => return false,
             };
             let before = net.nodes.len();
+            let name = net
+                .nodes
+                .iter()
+                .find(|n| n.device_id == dev_id)
+                .map(|n| n.name.clone())
+                .unwrap_or_default();
             net.nodes.retain(|n| n.device_id != dev_id);
-            net.nodes.len() != before
+            let existed = net.nodes.len() != before;
+            if existed && !net.removed_devices.iter().any(|r| r.device_id == dev_id) {
+                net.removed_devices.push(RemovedDevice {
+                    device_id: dev_id.to_string(),
+                    name,
+                });
+            }
+            existed
         };
         if !existed {
             return false;
         }
         self.save().ok();
-        self.hub.send(dev_id, ServerToClient::Deactivated);
+        self.hub.send(dev_id, ServerToClient::Removed);
         self.broadcast_nodes_update(net_id);
         true
+    }
+
+    /// 从黑名单移除某设备（恢复），恢复后该设备可重新鉴权并入网（成为新的 pending 节点）。
+    pub fn restore_device(&self, net_id: &str, dev_id: &str) -> bool {
+        let existed = {
+            let mut nets = self.networks.lock().unwrap();
+            let net = match nets.iter_mut().find(|n| n.id == net_id) {
+                Some(n) => n,
+                None => return false,
+            };
+            let before = net.removed_devices.len();
+            net.removed_devices.retain(|r| r.device_id != dev_id);
+            net.removed_devices.len() != before
+        };
+        if !existed {
+            return false;
+        }
+        self.save().ok();
+        true
+    }
+
+    /// 返回某网络的黑名单设备列表。
+    pub fn removed_devices(&self, net_id: &str) -> Vec<RemovedDevice> {
+        let nets = self.networks.lock().unwrap();
+        match nets.iter().find(|n| n.id == net_id) {
+            Some(n) => n.removed_devices.clone(),
+            None => vec![],
+        }
     }
 }

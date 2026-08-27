@@ -12,7 +12,19 @@ pub struct Network {
     pub name: String,
     pub description: String,
     pub nodes: Vec<Node>,
+    /// 被管理员移除（拉黑）的设备；其重连鉴权将被拒绝，直至被「恢复」才允许重新配对。
+    #[serde(default)]
+    pub removed_devices: Vec<RemovedDevice>,
     pub created: i64,
+}
+
+/// 被管理员从网络移除（拉黑）的设备记录。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct RemovedDevice {
+    pub device_id: String,
+    /// 移除时记录的设备名，仅用于管理页展示
+    #[serde(default)]
+    pub name: String,
 }
 
 /// 网络内的一台设备。
@@ -70,6 +82,8 @@ pub enum ServerToClient {
     },
     Activated,
     Deactivated,
+    /// 设备已被管理员从网络移除（拉黑）：客户端应停止重连并提示需重新配对
+    Removed,
     NodesUpdate {
         nodes: Vec<NodeInfo>,
     },

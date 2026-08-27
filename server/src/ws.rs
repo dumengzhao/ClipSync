@@ -44,6 +44,9 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppState
                 }
             }
         }
+        // 队列耗尽后优雅发送 Close 帧：确保排队的应用消息（如拉黑后的 Removed）
+        // 在 TCP 拆除前已送达对端，避免被 RST 直接丢弃导致客户端收不到。
+        let _ = sender.send(axum::extract::ws::Message::Close(None)).await;
     });
 
     let mut authed: Option<(String, String)> = None; // (network_id, device_id)
@@ -70,11 +73,22 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppState
                                 authed = Some((net_id, dev_id));
                             }
                             Err(e) => {
-                                let _ = tx.send(OutMsg::App(ServerToClient::Error {
-                                    code: "bad_token".into(),
-                                    msg: e,
-                                }));
-                                break; // 鉴权失败，关闭
+                                // 被拉黑的设备（device_removed）下发 Removed 让客户端明确停止重连
+                                let msg = if e == "device_removed" {
+                                    OutMsg::App(ServerToClient::Removed)
+                                } else {
+                                    OutMsg::App(ServerToClient::Error {
+                                        code: "bad_token".into(),
+                                        msg: e,
+                                    })
+                                };
+                                // 先把拒绝消息送入转发队列，再优雅关闭转发任务，
+                                // 确保 Removed/Error 真正刷到 socket（否则 forward.abort()
+                                // 会在消息发出前杀掉转发任务，客户端收不到）。
+                                let _ = tx.send(msg);
+                                drop(tx);
+                                let _ = forward.await;
+                                return;
                             }
                         }
                     }
