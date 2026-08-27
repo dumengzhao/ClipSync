@@ -49,6 +49,10 @@ async fn main() {
             "/api/admin/networks",
             get(admin::list_networks).post(admin::create_network),
         )
+        .route(
+            "/api/admin/networks/:id/rename",
+            post(admin::rename_network),
+        )
         .route("/api/admin/networks/:id/devices", get(admin::list_devices))
         .route(
             "/api/admin/networks/:id/devices/:dev/enable",

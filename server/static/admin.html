@@ -127,7 +127,7 @@ async function loadNetworks(){
         `<button class="ghost tokbtn" title="显示/隐藏" onclick="toggleTok('${n.id}')">👁</button>`+
         `<button class="ghost tokbtn hidden" id="copy-${n.id}" onclick="copyFrom('tok-${n.id}')">📋 复制</button></div>`
       : '<span class="muted">（旧网络无 Token，请重新创建）</span>';
-    html+=`<tr><td>${esc(n.name)}</td><td>${n.node_count}</td><td>${n.enabled_count}</td><td>${tokCell}</td><td class="muted">${new Date(n.created*1000).toLocaleDateString()}</td><td><button class="ghost" onclick="showDevices('${n.id}','${esc(n.name)}')">查看设备</button></td></tr>`;
+    html+=`<tr id="netrow-${n.id}"><td id="netname-${n.id}">${esc(n.name)}</td><td>${n.node_count}</td><td>${n.enabled_count}</td><td>${tokCell}</td><td class="muted">${new Date(n.created*1000).toLocaleDateString()}</td><td><button class="ghost" onclick="showDevices('${n.id}','${esc(n.name)}')">查看设备</button> <button class="ghost" onclick="startRename('${n.id}')">重命名</button></td></tr>`;
   }
   html+='</tbody></table>';
   box.innerHTML=html;
@@ -139,6 +139,28 @@ async function loadNetworks(){
 }
 
 function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+
+// 网络重命名：行内编辑，保存后刷新列表
+async function startRename(netId){
+  const td = document.getElementById('netname-'+netId);
+  if(!td) return;
+  const cur = td.textContent;
+  td.innerHTML = `<input id="rn-${netId}" value="${esc(cur)}" style="width:120px"> <button class="ghost" onclick="doRename('${netId}')">保存</button> <button class="ghost" onclick="loadNetworks()">取消</button>`;
+  const inp = document.getElementById('rn-'+netId);
+  if(inp){ inp.focus(); inp.select(); }
+}
+async function doRename(netId){
+  const inp = document.getElementById('rn-'+netId);
+  if(!inp) return;
+  const v = inp.value.trim();
+  if(!v){ toast('名称不能为空'); return; }
+  try{
+    const r = await api(`/api/admin/networks/${netId}/rename`, {method:'POST', body: JSON.stringify({name:v})});
+    if(r && r.error){ toast('失败: '+r.error); return; }
+    toast('已重命名');
+    loadNetworks();
+  }catch(e){ toast('失败: '+e.message); }
+}
 
 // Token 眼睛：默认星号，点一下显示明文并露出复制按钮，再点隐藏
 function toggleTok(id){

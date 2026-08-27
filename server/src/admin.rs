@@ -41,6 +41,11 @@ pub struct CreateNetBody {
 }
 
 #[derive(serde::Deserialize)]
+pub struct RenameNetBody {
+    pub name: String,
+}
+
+#[derive(serde::Deserialize)]
 pub struct LoginBody {
     pub user: String,
     pub pass: String,
@@ -126,6 +131,32 @@ pub async fn create_network(
     let _ = state.save();
     // Token 仅在此处明文返回一次
     Json(json!({ "id": net.id, "name": net.name, "token": token }))
+}
+
+pub async fn rename_network(
+    State(state): State<Arc<AppState>>,
+    Path(net_id): Path<String>,
+    Json(body): Json<RenameNetBody>,
+) -> Json<Value> {
+    let new_name = body.name.trim().to_string();
+    if new_name.is_empty() {
+        return Json(json!({ "error": "name required" }));
+    }
+    let found = {
+        let mut nets = state.networks.lock().unwrap();
+        match nets.iter_mut().find(|n| n.id == net_id) {
+            Some(n) => {
+                n.name = new_name;
+                true
+            }
+            None => false,
+        }
+    };
+    if !found {
+        return Json(json!({ "error": "not found" }));
+    }
+    let _ = state.save();
+    Json(json!({ "ok": true }))
 }
 
 pub async fn list_devices(
