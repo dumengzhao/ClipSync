@@ -146,6 +146,7 @@ pub async fn list_devices(
                 "lan_group": n.lan_group,
                 "ext_file_ep": n.ext_file_ep,
                 "platform": n.platform,
+                "hardware_id": n.hardware_id,
                 "enabled": n.enabled,
                 "online": n.online,
                 "last_seen": n.last_seen,

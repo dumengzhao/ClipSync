@@ -39,6 +39,9 @@
   .tokbtn{padding:5px 9px;font-size:12px}
   .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#000d;padding:10px 16px;border-radius:8px;display:none}
   .hidden{display:none}
+  .dev-name{font-weight:600;font-size:14px;line-height:1.3}
+  .uid{font-family:monospace;font-size:11px;color:var(--muted);background:#0d111c;border:1px solid var(--line);border-radius:5px;padding:2px 6px;display:inline-block;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .small{font-size:12px}
 </style>
 </head>
 <body>
@@ -156,6 +159,17 @@ async function copyFrom(elId){
   }
 }
 
+function osLabel(p){
+  return ({windows:'Windows',macos:'macOS',linux:'Linux',android:'Android',ios:'iOS'})[(p||'').toLowerCase()] || p || '未知';
+}
+
+let _devTimer=null;
+function refreshDevicesNow(){
+  if(!currentNet) return;
+  const nm=$('#devTitle').textContent.replace('设备 · ','');
+  showDevices(currentNet, nm);
+}
+
 async function showDevices(netId, name){
   currentNet = netId;
   $('#devPanel').style.display='block';
@@ -163,17 +177,29 @@ async function showDevices(netId, name){
   const {nodes} = await api('/api/admin/networks/'+netId+'/devices');
   const box=$('#devList');
   if(!nodes.length){ box.innerHTML='<span class="muted">暂无设备连接。客户端填入 Token 后会以「未启用」出现在此。</span>'; return; }
-  let html='<table><thead><tr><th>设备</th><th>平台</th><th>LAN</th><th>文件地址</th><th>状态</th><th></th></tr></thead><tbody>';
+  // 在线优先、再按名称排序，便于一眼看清谁在线
+  nodes.sort((a,b)=> (b.online?1:0)-(a.online?1:0) || (a.name||'').localeCompare(b.name||''));
+  let html='<table><thead><tr><th>计算机名 / 操作系统</th><th>唯一 ID</th><th>LAN 分组</th><th>文件地址</th><th>状态</th><th>操作</th></tr></thead><tbody>';
   for(const d of nodes){
-    const status = !d.online ? '<span class="tag offline">离线</span>'
-      : (d.enabled ? '<span class="  tag on">已启用</span>' : '<span class="tag off">未启用</span>');
+    const uid = d.hardware_id || d.device_id; // 硬件指纹优先，回退软件 UUID
+    const status = !d.online ? '<span class="tag offline">● 离线</span>'
+      : (d.enabled ? '<span class="tag on">● 在线 · 已启用</span>' : '<span class="tag off">● 在线 · 未启用</span>');
     const btn = d.enabled
       ? `<button class="danger" onclick="setEnabled('${netId}','${d.device_id}',false)">禁用</button>`
       : `<button class="green" onclick="setEnabled('${netId}','${d.device_id}',true)">启用</button>`;
-    html+=`<tr><td>${esc(d.name)}<div class="muted">${esc(d.device_id)}</div></td><td>${esc(d.platform)}</td><td>${esc(d.lan_group)}</td><td class="muted">${esc(d.ext_file_ep)||'-'}</td><td>${status}</td><td>${btn}</td></tr>`;
+    html+=`<tr>
+      <td><div class="dev-name">🖥 ${esc(d.name||'(未命名)')}</div><div class="muted small">${esc(osLabel(d.platform))}</div></td>
+      <td><code class="uid" title="设备唯一标识（硬件指纹优先）">${esc(uid)}</code></td>
+      <td>${esc(d.lan_group)||'-'}</td>
+      <td class="muted">${esc(d.ext_file_ep)||'-'}</td>
+      <td>${status}</td>
+      <td>${btn}</td>
+    </tr>`;
   }
   html+='</tbody></table>';
   box.innerHTML=html;
+  if(_devTimer) clearInterval(_devTimer);
+  _devTimer=setInterval(refreshDevicesNow, 5000); // 自动刷新，实时反映在线/离线
 }
 
 async function setEnabled(netId, devId, enabled){
