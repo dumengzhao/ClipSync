@@ -13,7 +13,15 @@ import { applyTheme } from './theme';
  */
 export default function SettingsPage({ onBack }: { onBack: () => void }) {
   const [cfg, setCfg] = useState<AppConfig | null>(null);
-  const [msg, setMsg] = useState('');
+  // 以「弹出式 toast」替代底部静态文字，确保保存结果等反馈一定可见（底部 msg 容易看不到）。
+  const [toast, setToast] = useState<{ text: string; type: 'ok' | 'err' } | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const setMsg = (text: string) => {
+    const type: 'ok' | 'err' = /失败|错误|无效|不正确|未授权/.test(text) ? 'err' : 'ok';
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToast({ text, type });
+    toastTimer.current = setTimeout(() => setToast(null), 1800);
+  };
   const [thresholdWarn, setThresholdWarn] = useState('');
   // 手动连接地址（mDNS 被防火墙拦截时的兜底直连）
   const [maLabel, setMaLabel] = useState('');
@@ -70,7 +78,10 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
     };
     return {
       onKeyDown: (e: KeyboardEvent<HTMLInputElement>) => {
-        if (e.key === 'Enter') commit((e.target as HTMLInputElement).value);
+        if (e.key === 'Enter') {
+          commit((e.target as HTMLInputElement).value);
+          (e.target as HTMLInputElement).blur(); // 保存后让输入框失焦
+        }
       },
       onBlur: (e: FocusEvent<HTMLInputElement>) => {
         commit((e.target as HTMLInputElement).value);
@@ -458,7 +469,11 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         </select>
       </div>
 
-      {msg && <div className="msg">{msg}</div>}
+      {toast && (
+        <div className={`toast toast-${toast.type}`} role="status">
+          {toast.text}
+        </div>
+      )}
       </div>
     </div>
   );
