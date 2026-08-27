@@ -179,6 +179,7 @@ pub async fn list_devices(
                 "ext_file_ep": n.ext_file_ep,
                 "platform": n.platform,
                 "hardware_id": n.hardware_id,
+                "os_version": n.os_version,
                 "enabled": n.enabled,
                 "online": n.online,
                 "last_seen": n.last_seen,
