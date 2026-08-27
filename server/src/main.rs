@@ -1,4 +1,5 @@
 mod admin;
+mod admin_ws;
 mod crypto;
 mod hub;
 mod models;
@@ -39,6 +40,7 @@ async fn main() {
         store,
   networks: std::sync::Mutex::new(networks),
         hub: hub::Hub::new(),
+        admin_ws: std::sync::Mutex::new(std::collections::HashMap::new()),
         server_key,
         admin_user,
         admin_pass_hash,
@@ -80,6 +82,7 @@ async fn main() {
         .route("/ws", get(ws::device_ws))
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/admin/login", post(admin::admin_login))
+        .route("/api/admin/ws", get(admin_ws::admin_ws))
         .route("/admin", get(admin::admin_page))
         .route("/admin/static/:p", get(admin::admin_static))
         .merge(protected)

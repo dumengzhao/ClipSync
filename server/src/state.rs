@@ -3,7 +3,11 @@ use crate::hub::{Hub, OutMsg, Tx};
 use crate::models::*;
 use crate::storage::Store;
 use anyhow::Result;
+use serde_json::json;
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::Mutex;
+use tokio::sync::mpsc;
 
 pub fn now_secs() -> i64 {
     std::time::SystemTime::now()
@@ -16,6 +20,8 @@ pub struct AppState {
     pub store: Store,
     pub networks: Mutex<Vec<Network>>,
     pub hub: Hub,
+    /// 管理后台 WebSocket 推送通道：net_id -> 该网络下所有管理页面连接（用于实时刷新设备状态）
+    pub admin_ws: Mutex<HashMap<String, Vec<Arc<mpsc::UnboundedSender<String>>>>>,
     /// 会话签名密钥：登录签发/HMAC 校验 admin 会话
     pub server_key: String,
     pub admin_user: String,
@@ -71,6 +77,7 @@ impl AppState {
                     n.lan_group = device.lan_group.clone();
                     n.ext_file_ep = device.ext_file_ep.clone();
                     n.platform = device.platform.clone();
+                    n.os_version = device.os_version.clone();
                     n.hardware_id = device.hardware_id.clone();
                     n.online = true;
                     n.last_seen = now;
@@ -83,6 +90,7 @@ impl AppState {
                         lan_group: device.lan_group.clone(),
                         ext_file_ep: device.ext_file_ep.clone(),
                         platform: device.platform.clone(),
+                        os_version: device.os_version.clone(),
                         hardware_id: device.hardware_id.clone(),
                         enabled: false,
                         online: true,
@@ -107,6 +115,7 @@ impl AppState {
         let _ = tx.send(OutMsg::App(welcome));
         self.hub.register(&dev_id, &net_id, tx.clone());
         self.save().ok();
+        self.push_admin_nodes(&net_id);
         Ok((net_id, dev_id))
     }
 
@@ -272,6 +281,64 @@ impl AppState {
         };
         for d in dev_ids {
             self.hub.send(&d, msg.clone());
+        }
+        // 管理后台 WebSocket 实时刷新：节点状态变化后推送完整列表
+        self.push_admin_nodes(net_id);
+    }
+
+    /// 管理后台实时刷新：向订阅该网络的所有管理页面 WS 推送完整节点列表（含离线/未启用）。
+    pub fn push_admin_nodes(&self, net_id: &str) {
+        let admin_nodes: Vec<serde_json::Value> = {
+            let nets = self.networks.lock().unwrap();
+            match nets.iter().find(|n| n.id == net_id) {
+                Some(net) => net
+                    .nodes
+                    .iter()
+                    .map(|n| {
+                        json!({
+                            "device_id": n.device_id,
+                            "name": n.name,
+                            "lan_group": n.lan_group,
+                            "ext_file_ep": n.ext_file_ep,
+                            "platform": n.platform,
+                            "hardware_id": n.hardware_id,
+                            "os_version": n.os_version,
+                            "enabled": n.enabled,
+                            "online": n.online,
+                            "last_seen": n.last_seen,
+                        })
+                    })
+                    .collect(),
+                None => return,
+            }
+        };
+        let payload = json!({ "type": "nodes", "nodes": admin_nodes }).to_string();
+        let conns = self.admin_ws.lock().unwrap();
+        if let Some(txs) = conns.get(net_id) {
+            for tx in txs {
+                let _ = tx.send(payload.clone());
+            }
+        }
+    }
+
+    /// 注册一个管理后台 WS 连接（按网络分组）。
+    pub fn register_admin_ws(&self, net_id: &str, tx: Arc<mpsc::UnboundedSender<String>>) {
+        self.admin_ws
+            .lock()
+            .unwrap()
+            .entry(net_id.to_string())
+            .or_default()
+            .push(tx);
+    }
+
+    /// 注销管理后台 WS 连接。
+    pub fn unregister_admin_ws(&self, net_id: &str, tx: &Arc<mpsc::UnboundedSender<String>>) {
+        let mut g = self.admin_ws.lock().unwrap();
+        if let Some(v) = g.get_mut(net_id) {
+            v.retain(|t| !Arc::ptr_eq(t, tx));
+            if v.is_empty() {
+                g.remove(net_id);
+            }
         }
     }
 
