@@ -74,26 +74,15 @@ export default function TitleBar() {
     (e.currentTarget as HTMLElement).classList.toggle('is-hover', on);
   };
 
-  // 手动拖动：用绝对坐标差（clientX - 起始 clientX），不依赖 movementX（macOS WKWebView 恒为 0）
-  const onTitleMouseDown = async (e: React.MouseEvent) => {
+  // 原生拖动：交给 OS 接管鼠标捕获，绝对跟手、无抖动。
+  // 旧实现「mousedown 记录坐标 + mousemove 调 setPosition 跟随」在 Windows 上会因 IPC 异步
+  // 导致窗口更新滞后于鼠标而疯狂抖动。startDragging 由 OS 驱动（需 allow-start-dragging 权限）。
+  // 必须在 mousedown 同步上下文内发起，不可先 await 其它 IPC。
+  const onTitleMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0) return;
     if ((e.target as HTMLElement).closest('.tb-btn')) return; // 按钮区不拖动
     const win = getCurrentWindow();
-    const start = await win.outerPosition();
-    const startX = e.clientX;
-    const startY = e.clientY;
-    const scale = window.devicePixelRatio || 1;
-    const onMove = (ev: MouseEvent) => {
-      const x = Math.round(start.x + (ev.clientX - startX) * scale);
-      const y = Math.round(start.y + (ev.clientY - startY) * scale);
-      invoke('win_set_position', { x, y }).catch((err) => console.error('win_set_position failed', err));
-    };
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+    win.startDragging().catch((err) => console.error('startDragging failed', err));
   };
 
   return (
