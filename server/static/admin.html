@@ -88,6 +88,12 @@
       <h2 id="devTitle">设备</h2>
       <div id="devList" class="muted">加载中…</div>
     </div>
+
+    <div class="panel" id="removedPanel" style="display:none">
+      <h2>已移除设备（黑名单）</h2>
+      <div class="muted" style="margin-bottom:6px">这些设备被永久拒绝入网；点「恢复」后可重新配对。</div>
+      <div id="removedList" class="muted">加载中…</div>
+    </div>
   </div>
 
   <div id="toast" class="toast"></div>
@@ -207,6 +213,34 @@ async function showDevices(netId, name){
   box.innerHTML=html;
   if(_devTimer) clearInterval(_devTimer);
   _devTimer=setInterval(refreshDevicesNow, 5000); // 自动刷新，实时反映在线/离线
+  $('#removedPanel').style.display='block';
+  loadRemoved(netId);
+}
+
+// 加载并渲染当前网络的黑名单（已移除设备）
+async function loadRemoved(netId){
+  const box=$('#removedList');
+  try{
+    const {removed} = await api(`/api/admin/networks/${netId}/removed`);
+    if(!removed || !removed.length){ box.innerHTML='<span class="muted">（无）</span>'; return; }
+    let html='<table><thead><tr><th>设备名</th><th>设备 ID</th><th></th></tr></thead><tbody>';
+    for(const r of removed){
+      html+=`<tr><td>${esc(r.name||'(未知)')}</td><td><code class="uid">${esc(r.device_id)}</code></td>`+
+        `<td><button class="ghost" onclick="restoreDevice('${netId}','${r.device_id}')">恢复</button></td></tr>`;
+    }
+    html+='</tbody></table>';
+    box.innerHTML=html;
+  }catch(e){ box.innerHTML='<span class="muted">加载失败: '+esc(e.message)+'</span>'; }
+}
+
+async function restoreDevice(netId, devId){
+  if(!confirm('确定恢复该设备？恢复后该设备可重新配对并入网。')) return;
+  try{
+    const r = await api(`/api/admin/networks/${netId}/removed/${devId}/restore`, {method:'POST'});
+    if(r && r.error){ toast('恢复失败: '+r.error); return; }
+    toast('已恢复，该设备可重新配对');
+    loadRemoved(netId);
+  }catch(e){ toast('恢复失败: '+e.message); }
 }
 
 async function removeDevice(netId, devId){

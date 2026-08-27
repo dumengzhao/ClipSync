@@ -1,4 +1,4 @@
-use crate::crypto::{gen_token, hash_token, issue_session, verify_session, SESSION_TTL};
+use crate::crypto::{gen_token, hash_token, issue_session, verify_session};
 use crate::models::Network;
 use crate::state::AppState;
 use crate::storage;
@@ -116,6 +116,7 @@ pub async fn create_network(
         name: body.name,
         description: body.description,
         nodes: vec![],
+        removed_devices: vec![],
         created: crate::state::now_secs(),
     };
     {
@@ -183,6 +184,27 @@ pub async fn remove_device_handler(
     Path((net_id, dev_id)): Path<(String, String)>,
 ) -> Json<Value> {
     if state.remove_device(&net_id, &dev_id) {
+        Json(json!({"ok": true}))
+    } else {
+        Json(json!({"error": "not found"}))
+    }
+}
+
+/// GET /api/admin/networks/:id/removed —— 列出该网络黑名单（已移除）设备。
+pub async fn list_removed_handler(
+    State(state): State<Arc<AppState>>,
+    Path(net_id): Path<String>,
+) -> Json<Value> {
+    let removed = state.removed_devices(&net_id);
+    Json(json!({ "removed": removed }))
+}
+
+/// POST /api/admin/networks/:id/removed/:dev/restore —— 从黑名单移除（恢复），允许其重新配对入网。
+pub async fn restore_device_handler(
+    State(state): State<Arc<AppState>>,
+    Path((net_id, dev_id)): Path<(String, String)>,
+) -> Json<Value> {
+    if state.restore_device(&net_id, &dev_id) {
         Json(json!({"ok": true}))
     } else {
         Json(json!({"error": "not found"}))
