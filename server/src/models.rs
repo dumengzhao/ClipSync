@@ -4,8 +4,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Network {
     pub id: String,
-    /// SHA-256(Token)，服务端不存明文 Token
+    /// SHA-256(Token)，用于客户端鉴权校验
     pub token_hash: String,
+    /// 明文 Token：为便于管理后台查看/复制而持久化（仅管理员可读，列表接口返回）
+    #[serde(default)]
+    pub token: String,
     pub name: String,
     pub description: String,
     pub nodes: Vec<Node>,
