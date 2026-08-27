@@ -96,6 +96,7 @@
 const $ = (s)=>document.querySelector(s);
 let token = localStorage.getItem('cs_admin_token') || '';
 let currentNet = null;
+let _netAutoExpanded = false; // 仅首次加载网络列表时默认展开第一个网络的设备列表
 
 function toast(msg){const t=$('#toast');t.textContent=msg;t.style.display='block';setTimeout(()=>t.style.display='none',2500);}
 function authHeaders(){return {'Content-Type':'application/json','Authorization':'Bearer '+token};}
@@ -124,6 +125,11 @@ async function loadNetworks(){
   }
   html+='</tbody></table>';
   box.innerHTML=html;
+  // 默认展开第一个网络的设备列表（仅首次加载时自动展开，避免创建网络后覆盖当前查看）
+  if(!_netAutoExpanded && networks.length){
+    _netAutoExpanded = true;
+    showDevices(networks[0].id, networks[0].name);
+  }
 }
 
 function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
