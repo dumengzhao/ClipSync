@@ -21,6 +21,7 @@ import {
   type CrossLanOffer,
 } from './api/tauri';
 import SettingsPage from './SettingsPage';
+import TitleBar from './TitleBar';
 import { applyTheme } from './theme';
 
 /**
@@ -365,14 +366,15 @@ export default function App() {
   const pairedRef = useRef<PairedDeviceInfo[]>([]);
   pairedRef.current = paired;
 
-  if (view === 'settings') {
-    return <SettingsPage onBack={() => setView('main')} />;
-  }
-
   return (
-    <div className="app">
-      <main className="app-main">
-        <div className="app-layout">
+    <div className="app-shell">
+      <TitleBar />
+      {view === 'settings' ? (
+        <SettingsPage onBack={() => setView('main')} />
+      ) : (
+        <div className="app">
+          <main className="app-main">
+            <div className="app-layout">
           <div className="app-left">
             <section className="peers">
               <h2>已配对设备</h2>
@@ -689,6 +691,8 @@ export default function App() {
           </div>
         </div>
       </main>
+      </div>
+      )}
     </div>
   );
 }
