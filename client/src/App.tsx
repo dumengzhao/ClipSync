@@ -515,10 +515,10 @@ export default function App() {
               )}
               <div className="peer-addr" style={{ marginBottom: '0.5rem' }}>
                 {serverStatus === 2
-                  ? '已启用 · 参与跨 LAN 同步'
+                  ? '本机 · 已启用 · 参与跨 LAN 同步'
                   : serverStatus === 1
-                    ? '已连接 · 等待服务端管理员启用'
-                    : '未连接服务端'}
+                    ? '本机 · 已连接 · 等待服务端管理员启用'
+                    : '本机 · 未连接服务端'}
               </div>
               {serverNodes.length === 0 ? (
                 <p className="hint">当前没有其他已启用的跨局域网设备</p>
