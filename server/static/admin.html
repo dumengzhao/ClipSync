@@ -34,6 +34,9 @@
   #app{display:none}
   .muted{color:var(--muted);font-size:12px}
   .token-box{background:#0d111c;border:1px dashed var(--accent);border-radius:8px;padding:10px;margin-top:8px;word-break:break-all;font-family:monospace}
+  .tok{display:flex;gap:6px;align-items:center}
+  .tok-val{background:#0d111c;border:1px solid var(--line);border-radius:6px;padding:3px 8px;font-size:12px;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tokbtn{padding:5px 9px;font-size:12px}
   .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#000d;padding:10px 16px;border-radius:8px;display:none}
   .hidden{display:none}
 </style>
@@ -74,7 +77,7 @@
           <button id="createNet">创建</button>
         </div>
         <div id="newToken" class="token-box hidden"></div>
-        <div class="muted">⚠️ Token 仅在此显示一次，请妥善保存发给客户端。</div>
+        <div class="muted">⚠️ Token 已持久化保存，可在下方网络列表中随时 👁 查看并 📋 复制。</div>
       </div>
     </div>
 
@@ -106,15 +109,52 @@ async function loadNetworks(){
   const {networks} = await api('/api/admin/networks');
   const box = $('#netList');
   if(!networks.length){ box.innerHTML='<span class="muted">暂无网络，请创建。</span>'; return; }
-  let html='<table><thead><tr><th>名称</th><th>节点</th><th>已启用</th><th>创建</th><th></th></tr></thead><tbody>';
+  let html='<table><thead><tr><th>名称</th><th>节点</th><th>已启用</th><th>Token</th><th>创建</th><th></th></tr></thead><tbody>';
   for(const n of networks){
-    html+=`<tr><td>${esc(n.name)}</td><td>${n.node_count}</td><td>${n.enabled_count}</td><td class="muted">${new Date(n.created*1000).toLocaleDateString()}</td><td><button class="ghost" onclick="showDevices('${n.id}','${esc(n.name)}')">查看设备</button></td></tr>`;
+    const tok = n.token || '';
+    const tokCell = tok
+      ? `<div class="tok"><code id="tok-${n.id}" class="tok-val" data-token="${esc(tok)}">••••••••••••••••</code>`+
+        `<button class="ghost tokbtn" title="显示/隐藏" onclick="toggleTok('${n.id}')">👁</button>`+
+        `<button class="ghost tokbtn hidden" id="copy-${n.id}" onclick="copyFrom('tok-${n.id}')">📋 复制</button></div>`
+      : '<span class="muted">（旧网络无 Token，请重新创建）</span>';
+    html+=`<tr><td>${esc(n.name)}</td><td>${n.node_count}</td><td>${n.enabled_count}</td><td>${tokCell}</td><td class="muted">${new Date(n.created*1000).toLocaleDateString()}</td><td><button class="ghost" onclick="showDevices('${n.id}','${esc(n.name)}')">查看设备</button></td></tr>`;
   }
   html+='</tbody></table>';
   box.innerHTML=html;
 }
 
 function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+
+// Token 眼睛：默认星号，点一下显示明文并露出复制按钮，再点隐藏
+function toggleTok(id){
+  const el=document.getElementById('tok-'+id);
+  const copy=document.getElementById('copy-'+id);
+  if(!el) return;
+  if(el.dataset.shown==='1'){
+    el.textContent='••••••••••••••••';
+    el.dataset.shown='0';
+    if(copy) copy.classList.add('hidden');
+  }else{
+    el.textContent=el.dataset.token||el.textContent;
+    el.dataset.shown='1';
+    if(copy) copy.classList.remove('hidden');
+  }
+}
+// 复制按钮：从元素的 data-token 取明文复制（优先），失败回退 execCommand
+async function copyFrom(elId){
+  const el=document.getElementById(elId);
+  if(!el) return;
+  const t=el.dataset.token||el.textContent;
+  try{
+    await navigator.clipboard.writeText(t);
+    toast('Token 已复制到剪贴板');
+  }catch(e){
+    try{
+      const ta=document.createElement('textarea'); ta.value=t; document.body.appendChild(ta); ta.select();
+      document.execCommand('copy'); ta.remove(); toast('Token 已复制到剪贴板');
+    }catch(_){ toast('复制失败，请手动选择复制'); }
+  }
+}
 
 async function showDevices(netId, name){
   currentNet = netId;
@@ -149,7 +189,7 @@ $('#createNet').onclick=async()=>{
   if(!name){ toast('请输入名称'); return; }
   const r = await api('/api/admin/networks',{method:'POST',body:JSON.stringify({name, description:$('#netDesc').value})});
   $('#newToken').classList.remove('hidden');
-  $('#newToken').textContent='Token（仅显示一次）：'+r.token;
+  $('#newToken').innerHTML = `<div class="tok"><code id="newtok" class="tok-val" data-token="${esc(r.token)}">${esc(r.token)}</code><button class="ghost tokbtn" onclick="copyFrom('newtok')">📋 复制</button></div>`;
   $('#netName').value=''; $('#netDesc').value='';
   await loadNetworks();
 };

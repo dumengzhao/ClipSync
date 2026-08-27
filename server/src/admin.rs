@@ -96,6 +96,7 @@ pub async fn list_networks(State(state): State<Arc<AppState>>) -> Json<Value> {
                 "id": n.id,
                 "name": n.name,
                 "description": n.description,
+                "token": n.token,
                 "created": n.created,
                 "node_count": n.nodes.len(),
                 "enabled_count": n.nodes.iter().filter(|x| x.enabled).count(),
@@ -113,6 +114,7 @@ pub async fn create_network(
     let net = Network {
         id: gen_token(),
         token_hash: hash_token(&token),
+        token: token.clone(),
         name: body.name,
         description: body.description,
         nodes: vec![],
