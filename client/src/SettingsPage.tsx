@@ -388,8 +388,8 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         />
       </div>
       <p className="hint">
-        填入后保存并重启应用：本机将常连服务端，实现跨局域网文字/文件同步。设备需在服务端
-        管理页被管理员「启用」后才参与同步。
+        填入后点「保存」即自动重连服务端（无需重启）：本机常连服务端，实现跨局域网文字/文件同步。
+        设备需在服务端管理页被管理员「启用」后才参与同步。
       </p>
 
       <div className="section">缓存</div>

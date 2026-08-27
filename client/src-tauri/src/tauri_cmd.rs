@@ -81,6 +81,14 @@ pub fn set_config(
         }
     }
 
+    // 跨局域网服务端配置可能已变更：唤醒连接循环立即重连（无需重启应用）
+    {
+        let sc = state.server_conn.lock();
+        if let Some(sc) = sc.as_ref() {
+            sc.reconnect();
+        }
+    }
+
     Ok(())
 }
 
