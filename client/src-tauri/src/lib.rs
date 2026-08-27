@@ -59,6 +59,9 @@ pub struct AppState {
     pub server_conn: Mutex<Option<Arc<ServerConn>>>,
     /// 跨 LAN 待复制清单（前端初始化快照用，实时更新走 `cross-lan-file` 事件）
     pub cross_lan_offers: Mutex<Vec<CrossLanOffer>>,
+    /// 跨 LAN 文件传输密钥（服务端 Welcome 派生，与文字中继共用 network_key）。
+    /// 供内嵌 HTTP 文件服务加密、拉取端解密；未连服务端时为 None。
+    pub network_key: Arc<std::sync::Mutex<Option<[u8; 32]>>>,
 }
 
 impl AppState {
@@ -89,6 +92,7 @@ impl AppState {
                 file_share: Arc::new(FileShare::new()),
                 server_conn: Mutex::new(None),
                 cross_lan_offers: Mutex::new(Vec::new()),
+                network_key: Arc::new(std::sync::Mutex::new(None)),
             }
     }
 }
@@ -226,6 +230,7 @@ pub fn run() {
                 let ep = app.state::<AppState>().config.lock().ext_file_ep.clone();
                 crate::file_server::start_file_server(
                     app.state::<AppState>().file_share.clone(),
+                    app.state::<AppState>().network_key.clone(),
                     ep,
                 );
             }

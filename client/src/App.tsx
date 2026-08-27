@@ -10,7 +10,6 @@ import {
   listPendingOffers,
   pullFiles,
   getClipboardText,
-  getServerStatus,
   getServerNodes,
   listCrossLanOffers,
   pullCrossLan,
@@ -59,8 +58,6 @@ export default function App() {
   const [folderWarn, setFolderWarn] = useState<string | null>(null);
   // 手动刷新局域网设备时的加载态
   const [refreshing, setRefreshing] = useState(false);
-  // 跨局域网服务端连接状态（0 未连接 / 1 待审批 / 2 已启用）
-  const [serverStatus, setServerStatus] = useState(0);
   // 服务端是否已将该设备移除（拉黑）：移除后停止重连并提示重新配对
   const [serverRemoved, setServerRemoved] = useState(false);
   // 跨局域网已启用节点（来自服务端下发）
@@ -100,8 +97,7 @@ export default function App() {
       .catch(() => {});
     // 待拉取清单：挂载时主动查一次（兜底事件丢失），并实时订阅对端广播
     listPendingOffers().then(setPendingOffers).catch(() => {});
-    // 跨局域网：挂载时回填服务端状态 / 节点 / 待复制清单
-    getServerStatus().then(setServerStatus).catch(() => {});
+    // 跨局域网：挂载时回填服务端节点 / 待复制清单（连接状态由标题栏订阅 server-status 事件）
     getServerNodes().then(setServerNodes).catch(() => {});
     listCrossLanOffers().then(setCrossLanOffers).catch(() => {});
 
@@ -218,9 +214,8 @@ export default function App() {
       },
     );
     // 跨局域网服务端事件
+    // 跨局域网服务端连接状态（标题栏左侧展示）；本处仅需在重连成功时清除「被移除」提示
     const unlistenServerStatus = listen<number>('server-status', (e) => {
-      setServerStatus(e.payload);
-      // 重新连上（pending/active）即视为已恢复，清除「被移除」提示
       if (e.payload === 1 || e.payload === 2) setServerRemoved(false);
     });
     const unlistenServerRemoved = listen('server-removed', () =>
@@ -358,7 +353,6 @@ export default function App() {
   };
 
   const pairedIds = new Set(paired.map((p) => p.id));
-  const discoveredIds = new Set(discovered.map((p) => p.device_id));
   // 已配对设备不重复出现在「发现」列表中
   const discoveredOnly = discovered.filter((p) => !pairedIds.has(p.device_id));
   // 用 ref 持有最新已配对集合，供下面 peer-discovered 监听在闭包内判断，
@@ -377,37 +371,63 @@ export default function App() {
             <div className="app-layout">
           <div className="app-left">
             <section className="peers">
-              <h2>已配对设备</h2>
-              {paired.length === 0 ? (
-                <p className="hint">还没有已配对设备，请在下方发起配对</p>
+              {serverRemoved && (
+                <div
+                  className="msg"
+                  style={{ color: '#dc2626', marginBottom: '0.5rem' }}
+                >
+                  设备已被服务端移除（拉黑）。如需重新使用，请在设置中重新填写服务端地址并保存以重新配对。
+                </div>
+              )}
+              {paired.length === 0 && serverNodes.length === 0 ? (
+                <p className="hint">还没有已配对设备或已连接的跨局域网设备</p>
               ) : (
                 <ul className="peer-list">
                   {paired.map((p) => {
                     const isConnected = connected.has(p.id);
-                    const status = isConnected
-                      ? '已连接'
-                      : discoveredIds.has(p.id)
-                        ? '连接中…'
-                        : '离线';
                     return (
-                      <li key={p.id} className="peer-item peer-item-action">
-                        <span className={`peer-dot ${isConnected ? 'on' : 'off'}`} />
-                        <span className="peer-name">{p.name}</span>
-                        <span className="peer-addr">
-                          {status}
-                          {p.fingerprint ? ` · ${p.fingerprint.slice(0, 8)}` : ''}
+                      <li key={`p-${p.id}`} className="peer-item peer-unified">
+                        <span className="peer-type-icon wifi" title="局域网设备">
+                          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                            <path d="M5 12.5a10 10 0 0 1 14 0" />
+                            <path d="M8.5 16a5 5 0 0 1 7 0" />
+                            <circle cx="12" cy="19" r="1" fill="currentColor" stroke="none" />
+                          </svg>
                         </span>
-                        {p.last_addr && (
-                          <span className="peer-addr" style={{ opacity: 0.6 }}>
-                            {p.last_addr}
-                          </span>
-                        )}
-                        <button className="btn btn-ghost btn-sm" onClick={() => removePairing(p)}>
-                          取消配对
-                        </button>
+                        <div className="peer-main">
+                          <span className="peer-name">{p.name}</span>
+                          <span className="peer-id">{p.id}</span>
+                          <div className="peer-action-row">
+                            <span className="peer-addr">
+                              {isConnected ? '已连接' : p.last_addr ? p.last_addr : '离线'}
+                            </span>
+                            <button className="btn btn-ghost btn-sm" onClick={() => removePairing(p)}>
+                              取消配对
+                            </button>
+                          </div>
+                        </div>
                       </li>
                     );
                   })}
+                  {serverNodes.map((n) => (
+                    <li key={`n-${n.device_id}`} className="peer-item peer-unified">
+                      <span className="peer-type-icon cloud" title="跨局域网设备（服务端）">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M17.5 19a4.5 4.5 0 0 0 0-9 6 6 0 0 0-11.6 1.5A3.5 3.5 0 0 0 6.5 19z" />
+                        </svg>
+                      </span>
+                      <div className="peer-main">
+                        <span className="peer-name">{n.name}</span>
+                        <span className="peer-id">{n.device_id}</span>
+                        <div className="peer-action-row">
+                          <span className="peer-addr">{n.ext_file_ep || '—'}</span>
+                          <span className="peer-meta">
+                            {[n.lan_group, n.platform].filter(Boolean).join(' · ') || '—'}
+                          </span>
+                        </div>
+                      </div>
+                    </li>
+                  ))}
                 </ul>
               )}
             </section>
@@ -505,39 +525,7 @@ export default function App() {
               )}
             </section>
 
-            <section className="peers">
-              <h2>跨局域网（服务端）</h2>
-              {serverRemoved && (
-                <div
-                  className="msg"
-                  style={{ color: '#dc2626', marginBottom: '0.5rem' }}
-                >
-                  设备已被服务端移除（拉黑）。如需重新使用，请在设置中重新填写服务端地址并保存以重新配对。
-                </div>
-              )}
-              <div className="peer-addr" style={{ marginBottom: '0.5rem' }}>
-                {serverStatus === 2
-                  ? '本机 · 已启用 · 参与跨 LAN 同步'
-                  : serverStatus === 1
-                    ? '本机 · 已连接 · 等待服务端管理员启用'
-                    : '本机 · 未连接服务端'}
-              </div>
-              {serverNodes.length === 0 ? (
-                <p className="hint">当前没有其他已启用的跨局域网设备</p>
-              ) : (
-                <ul className="peer-list">
-                  {serverNodes.map((n) => (
-                    <li key={n.device_id} className="peer-item">
-                      <span className="peer-name">{n.name}</span>
-                      <span className="peer-addr">{n.lan_group || '默认网络'}</span>
-                      <span className="peer-addr" style={{ opacity: 0.6 }}>
-                        {n.platform}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
+            {/* 跨局域网（服务端）板块已合并到上方统一设备列表；本机启用状态见标题栏左侧 */}
           </div>
 
           <div className="app-right">
