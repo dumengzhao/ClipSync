@@ -49,13 +49,13 @@ cargo build                 # 或 cargo build --release
 CLIPSYNC_DATA_DIR=./data \
 ADMIN_USER=admin \
 ADMIN_PASS=你的密码 \
-LISTEN=0.0.0.0:24682 \
+LISTEN=0.0.0.0:20070 \
 ./target/debug/clipsync-server
 ```
 
-- 打开管理后台：`http://host:24682/admin`（首次用 `ADMIN_USER`/`ADMIN_PASS` 登录）。
+- 打开管理后台：`http://host:20070/admin`（首次用 `ADMIN_USER`/`ADMIN_PASS` 登录）。
 - 健康检查：`GET /healthz`
 - 创网络（拿 Token）：登录后在前端「创建网络」按钮，或
-  `curl -X POST -H "Authorization: Bearer <session>" -d '{"name":"默认","description":""}' http://127.0.0.1:24682/api/admin/networks`
+  `curl -X POST -H "Authorization: Bearer <session>" -d '{"name":"默认","description":""}' http://127.0.0.1:20070/api/admin/networks`
   其中 `<session>` 由 `POST /api/admin/login` 返回。
-- 设备接入：`ws://host:24682/ws`，首条消息 `{"type":"auth","token":"<Token>","device":{"id":"...","name":"...","lan_group":"g1","ext_file_ep":"ip:port","platform":"mac"}}`
+- 设备接入：`ws://host:20070/ws`，首条消息 `{"type":"auth","token":"<Token>","device":{"id":"...","name":"...","lan_group":"g1","ext_file_ep":"ip:port","platform":"mac"}}`
