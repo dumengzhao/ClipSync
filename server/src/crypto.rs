@@ -62,4 +62,4 @@ pub fn verify_session(key: &str, token: &str) -> Option<String> {
 }
 
 /// 会话有效期（秒）：7 天。
-pub const SESSION_TTL: i64 = 7 * 24 * 3600;
+pub const SESSION_TTL: i64 = 3 * 24 * 3600;
