@@ -401,7 +401,7 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         <input
           type="text"
           style={{ width: '260px' }}
-          placeholder="例如 ws://clipsync.example.com:24682/ws"
+          placeholder="例如 ws://clipsync.example.com:20070/ws"
           value={cfg.server_url ?? ''}
           onChange={(e) => update('server_url', e.target.value)}
           {...textSave('server_url')}

@@ -133,7 +133,7 @@ export interface AppConfig {
   /** 复制文件夹时递归文件数上限：超过此值则拦截推送、仅本地提示请压缩。0 表示不限制。默认 100 */
   max_folder_files?: number;
   // ===== 跨局域网中转（服务端） =====
-  /** 服务端 WebSocket 地址，例如 ws://your-host:24682/ws；为空表示不使用服务端 */
+  /** 服务端 WebSocket 地址，例如 ws://your-host:20070/ws；为空表示不使用服务端 */
   server_url?: string;
   /** Network Token（共享密钥）：服务端鉴权 + 跨 LAN 文字端到端加密 */
   network_token?: string;

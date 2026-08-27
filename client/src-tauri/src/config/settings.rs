@@ -38,7 +38,7 @@ pub struct AppConfig {
     #[serde(default = "default_max_folder_files")]
     pub max_folder_files: usize,
     // ===== 跨局域网中转（服务端）相关配置 =====
-    /// 服务端 WebSocket 地址，例如 `ws://your-host:24682/ws`。为空表示不使用服务端（仅局域网直连）。
+    /// 服务端 WebSocket 地址，例如 `ws://your-host:20070/ws`。为空表示不使用服务端（仅局域网直连）。
     #[serde(default)]
     pub server_url: String,
     /// Network Token（共享密钥），用于服务端鉴权 + 跨 LAN 文字端到端加密。
