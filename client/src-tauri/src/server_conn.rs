@@ -96,6 +96,56 @@ struct DeviceFields {
     lan_group: String,
     ext_file_ep: String,
     platform: String,
+    hardware_id: String,
+}
+
+/// 跨平台硬件唯一标识（用于服务端区分同一台物理机器）。
+/// 优先级：macOS IOPlatformUUID / Windows MachineGuid / Linux /etc/machine-id；
+/// 均失败时返回空串，由调用方以 device_id（持久化 UUID）兜底。
+fn hardware_id() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(out) = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | grep IOPlatformUUID")
+            .output()
+        {
+            let s = String::from_utf8_lossy(&out.stdout);
+            // 形如：  "IOPlatformUUID" = "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"
+            let parts: Vec<&str> = s.split('"').collect();
+            if parts.len() >= 4 {
+                let h = parts[3].trim().to_string();
+                if !h.is_empty() {
+                    return h;
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(out) = std::process::Command::new("reg")
+            .args(["query", "HKLM\\SOFTWARE\\Microsoft\\Cryptography", "/v", "MachineGuid"])
+            .output()
+        {
+            let s = String::from_utf8_lossy(&out.stdout);
+            if let Some(h) = s.split_whitespace().last() {
+                let h = h.trim().to_string();
+                if !h.is_empty() {
+                    return h;
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(s) = std::fs::read_to_string("/etc/machine-id") {
+            let s = s.trim().to_string();
+            if !s.is_empty() {
+                return s;
+            }
+        }
+    }
+    String::new()
 }
 
 #[derive(Deserialize)]
@@ -278,6 +328,10 @@ impl ServerConn {
         if cfg.network_token.trim().is_empty() {
             anyhow::bail!("network_token 为空，无法连接服务端");
         }
+        let mut hw = hardware_id();
+        if hw.is_empty() {
+            hw = self.engine.device_id().0.clone();
+        }
         let auth = ClientToServer::Auth {
             token: cfg.network_token.clone(),
             device: DeviceFields {
@@ -286,6 +340,7 @@ impl ServerConn {
                 lan_group: self.our_lan_group.lock().unwrap().clone(),
                 ext_file_ep: cfg.ext_file_ep.clone(),
                 platform: std::env::consts::OS.to_string(),
+                hardware_id: hw,
             },
         };
         send_json(&mut w_tx, &auth).await?;
