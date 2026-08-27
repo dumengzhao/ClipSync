@@ -23,6 +23,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio::sync::Notify;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::WebSocketStream;
@@ -159,6 +160,8 @@ pub struct ServerConn {
     our_lan_group: Mutex<String>,
     /// WS 发送通道（消息由连接任务转发）。断开时为 None。
     ws_tx: Mutex<Option<mpsc::UnboundedSender<ClientToServer>>>,
+    /// 配置变更（set_config）后唤醒连接循环立即重连。
+    reconnect_notify: Notify,
 }
 
 impl ServerConn {
@@ -172,6 +175,7 @@ impl ServerConn {
             nodes: Mutex::new(Vec::new()),
             our_lan_group: Mutex::new(String::new()),
             ws_tx: Mutex::new(None),
+            reconnect_notify: Notify::new(),
         })
     }
 
@@ -221,8 +225,11 @@ impl ServerConn {
                 let url = app.state::<AppState>().config.lock().server_url.clone();
                 if url.is_empty() {
                     conn.set_status(ServerStatus::Disconnected);
-                    tokio::time::sleep(Duration::from_secs(10)).await;
-                    continue;
+                    // 等待「配置已保存」信号或定时轮询，避免空跑。
+                    tokio::select! {
+                        _ = conn.reconnect_notify.notified() => continue,
+                        _ = tokio::time::sleep(Duration::from_secs(10)) => continue,
+                    }
                 }
                 *conn.our_lan_group.lock().unwrap() =
                     infer_lan_group(&app.state::<AppState>().config.lock().lan_group);
@@ -235,7 +242,11 @@ impl ServerConn {
                     }
                 }
                 conn.set_status(ServerStatus::Disconnected);
-                tokio::time::sleep(Duration::from_secs(backoff)).await;
+                // 断开后等待退避；期间若配置变更被唤醒则立即重连（读取最新配置）。
+                tokio::select! {
+                    _ = conn.reconnect_notify.notified() => {}
+                    _ = tokio::time::sleep(Duration::from_secs(backoff)) => {}
+                }
                 backoff = (backoff * 2).min(60);
             }
         });
@@ -248,7 +259,13 @@ impl ServerConn {
             ServerStatus::Active => 2u8,
         };
         self.status.store(v, Ordering::SeqCst);
-        let _ = self.app.emit("server-status", s);
+        // 注意：前端 server-status 事件按数字 0/1/2 解析，不能发枚举（会序列化成字符串）。
+        let _ = self.app.emit("server-status", v);
+    }
+
+    /// 配置变更后由 set_config 调用，立即唤醒连接循环重连（无需重启应用）。
+    pub fn reconnect(&self) {
+        self.reconnect_notify.notify_one();
     }
 
     /// 建立一条 WS 连接并运行，直到断开返回。
