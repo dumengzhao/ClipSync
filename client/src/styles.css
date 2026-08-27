@@ -475,7 +475,14 @@ body {
   user-select: none;
 }
 
-/* 标题栏整体作为拖动区，但右侧按钮区与按钮本身不参与拖动 */
+/* 标题栏左侧信息区 + 中间空白条作为拖动区（挂 data-tauri-drag-region）；
+   右侧按钮区不带该属性，按钮点击不会被拖动逻辑吞掉 */
+.titlebar-spacer {
+  flex: 1 1 auto;
+  height: 100%;
+  min-width: 0;
+}
+
 .titlebar-actions {
   display: flex;
   align-items: center;
@@ -522,7 +529,7 @@ body {
   transition: background 0.12s ease, color 0.12s ease;
 }
 
-.tb-btn:hover {
+.tb-btn.is-hover {
   background: rgba(148, 163, 184, 0.20);
   color: #f1f5f9;
 }
@@ -531,7 +538,7 @@ body {
   background: rgba(148, 163, 184, 0.30);
 }
 
-.tb-close:hover {
+.tb-close.is-hover {
   background: #e81123;
   color: #fff;
 }
