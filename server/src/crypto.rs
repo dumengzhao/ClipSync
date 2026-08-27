@@ -1,5 +1,5 @@
-use base64::Engine;
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Token → SHA-256 哈希（服务端只存哈希，用于连接校验）。
@@ -17,33 +17,48 @@ pub fn gen_token() -> String {
     hex::encode(bytes)
 }
 
-/// 会话签名：HMAC-SHA256(server_key, payload)。服务端登录后下发，替代明文 admin_api_key。
-pub fn sign_session(key: &str, payload: &str) -> String {
-    use hmac::{Hmac, Mac};
-    type HmacSha256 = Hmac<Sha256>;
-    let mut mac = HmacSha256::new_from_slice(key.as_bytes()).expect("hmac key");
-    mac.update(payload.as_bytes());
-    let sig = mac.finalize().into_bytes();
-    let mut out = payload.as_bytes().to_vec();
-    out.push(b'.');
-    out.extend_from_slice(&sig);
-    base64::engine::general_purpose::STANDARD.encode(out)
+/// 管理员会话 Claims（标准 JWT）。
+#[derive(Debug, Serialize, Deserialize)]
+struct Claims {
+    /// 主题：管理员用户名
+    sub: String,
+    /// 签发时间（Unix 秒）
+    iat: usize,
+    /// 过期时间（Unix 秒）
+    exp: usize,
 }
 
-/// 校验会话签名，成功返回 payload（JSON 字符串）。失败返回 None。
-/// payload 形如 `{"user":"..","exp":..}`，此处只验签名，有效期由调用方检查。
+fn now_unix() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// 签发管理员会话 JWT（HS256，密钥为 server.key）。
+/// 完全无状态：令牌自包含 exp，服务端不存储任何会话。
+pub fn issue_session(key: &str, user: &str) -> String {
+    let now = now_unix() as usize;
+    let claims = Claims {
+        sub: user.to_string(),
+        iat: now,
+        exp: now + SESSION_TTL as usize,
+    };
+    let enc = jsonwebtoken::EncodingKey::from_secret(key.as_bytes());
+    jsonwebtoken::encode(&jsonwebtoken::Header::default(), &claims, &enc)
+        .expect("jwt encode")
+}
+
+/// 校验管理员会话 JWT（验签名 + 验 exp，由 jsonwebtoken 库保证）。
+/// 成功返回用户名（sub），失败返回 None。
 pub fn verify_session(key: &str, token: &str) -> Option<String> {
-    use hmac::{Hmac, Mac};
-    type HmacSha256 = Hmac<Sha256>;
-    let decoded = base64::engine::general_purpose::STANDARD.decode(token).ok()?;
-    let dot = decoded.iter().position(|&b| b == b'.')?;
-    let (payload, sig) = decoded.split_at(dot);
-    let payload = std::str::from_utf8(&payload[..payload.len()]).ok()?;
-    let sig = &sig[1..];
-    let mut mac = HmacSha256::new_from_slice(key.as_bytes()).ok()?;
-    mac.update(payload.as_bytes());
-    mac.verify_slice(sig).ok()?;
-    Some(payload.to_string())
+    let dec = jsonwebtoken::DecodingKey::from_secret(key.as_bytes());
+    let validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+    match jsonwebtoken::decode::<Claims>(token, &dec, &validation) {
+        Ok(data) => Some(data.claims.sub),
+        Err(_) => None,
+    }
 }
 
 /// 会话有效期（秒）：7 天。

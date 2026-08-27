@@ -1,6 +1,6 @@
-use crate::crypto::{gen_token, hash_token, sign_session, verify_session, SESSION_TTL};
+use crate::crypto::{gen_token, hash_token, issue_session, verify_session, SESSION_TTL};
 use crate::models::Network;
-use crate::state::{now_secs, AppState};
+use crate::state::AppState;
 use crate::storage;
 use axum::extract::{Path, Request, State};
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
@@ -46,14 +46,12 @@ pub struct LoginBody {
     pub pass: String,
 }
 
-/// 登录：校验密码后签发 HMAC 会话 token（7 天有效）。
+/// 登录：校验密码后签发标准 JWT 会话令牌（HS256，7 天有效，无状态）。
 pub async fn admin_login(State(state): State<Arc<AppState>>, Json(body): Json<LoginBody>) -> Json<Value> {
     if body.user != state.admin_user || !storage::verify_pass(&state.admin_pass_hash, &body.pass) {
         return Json(json!({"error": "invalid credentials"}));
     }
-    let exp = now_secs() + SESSION_TTL;
-    let payload = json!({ "user": state.admin_user, "exp": exp }).to_string();
-    let token = sign_session(&state.server_key, &payload);
+    let token = issue_session(&state.server_key, &state.admin_user);
     Json(json!({ "token": token }))
 }
 
