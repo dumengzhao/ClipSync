@@ -402,6 +402,17 @@ body {
   font: inherit;
 }
 
+/* 去掉数字输入框右侧的上下箭头加减按钮 */
+.settings .row input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+.settings .row input[type="number"]::-webkit-outer-spin-button,
+.settings .row input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
 .settings .row input[type="checkbox"] {
   width: 18px;
   height: 18px;
