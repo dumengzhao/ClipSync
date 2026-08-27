@@ -214,7 +214,7 @@ pub struct ServerConn {
     ws_tx: Mutex<Option<mpsc::UnboundedSender<ClientToServer>>>,
     /// 配置变更（set_config）后唤醒连接循环立即重连。
     reconnect_notify: Notify,
-    /// 被服务端移除（拉黑）标记：置位后停止重连循环，直到 reconnect() 被显式调用。
+    /// 被服务端移除（拉黑）标记：置位后仍周期性重试以便自愈，管理员后台恢复设备后下次连接即清除。
     removed: AtomicBool,
 }
 
@@ -277,12 +277,16 @@ impl ServerConn {
         tauri::async_runtime::spawn(async move {
             let mut backoff: u64 = 2;
             loop {
-                // 被服务端移除（拉黑）：停止重连，直到 reconnect() 被显式调用（管理员恢复后用户手动重连）
+                // 被服务端移除（拉黑）：仍周期性重试，以便管理员在后台恢复设备后客户端能自愈；
+                // 退避 30s 避免频繁打扰服务端。用户手动重存配置会经 reconnect() 立即唤醒重试。
                 if conn.removed.load(Ordering::SeqCst) {
                     conn.set_status(ServerStatus::Disconnected);
-                    let _ = conn.reconnect_notify.notified().await;
-                    backoff = 2;
-                    continue;
+                    tokio::select! {
+                        _ = conn.reconnect_notify.notified() => { backoff = 2; }
+                        _ = tokio::time::sleep(Duration::from_secs(30)) => {}
+                    }
+                    // 落到下方尝试连接：仍被拉黑会再次收到 Removed 回到此处；
+                    // 已恢复则收到 Welcome 并清除 removed 标记（见 handle_server_message）。
                 }
                 let url = app.state::<AppState>().config.lock().server_url.clone();
                 if url.is_empty() {
@@ -412,6 +416,8 @@ impl ServerConn {
                     &network.id,
                 );
                 *self.network_key.lock().unwrap() = Some(key);
+                // 成功入网即清除拉黑标记（管理员恢复设备 / 误报后自愈），下次循环不再走拉黑重试分支
+                self.removed.store(false, Ordering::SeqCst);
                 self.set_status(ServerStatus::from_str(&status));
                 self.update_nodes(nodes);
                 true
