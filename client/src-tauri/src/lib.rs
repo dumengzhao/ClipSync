@@ -281,6 +281,9 @@ pub fn run() {
             tauri_cmd::open_settings,
             tauri_cmd::quit_app,
             hide_app_window,
+            win_minimize,
+            win_toggle_maximize,
+            win_set_position,
             tauri_cmd::get_server_status,
             tauri_cmd::get_server_nodes,
             tauri_cmd::list_cross_lan_offers,
@@ -380,4 +383,35 @@ fn hide_main_window(app: &tauri::AppHandle) {
 #[tauri::command]
 fn hide_app_window(app: tauri::AppHandle) {
     hide_main_window(&app);
+}
+
+/// 标题栏「最小化」按钮：走 Rust 命令而非 JS `getCurrentWindow().minimize()`，
+/// 因为该 JS 窗口写操作在本项目未被授予权限（日志曾报 allow-minimize not allowed），
+/// 而 Rust 侧调用无需前端窗口权限。
+#[tauri::command]
+fn win_minimize(app: tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.minimize();
+    }
+}
+
+/// 标题栏「最大化/还原」按钮，理由同上（allow-toggle-maximize not allowed）。
+/// WebviewWindow 无 toggle_maximize，手动根据当前状态切换。
+#[tauri::command]
+fn win_toggle_maximize(app: tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        if w.is_maximized().unwrap_or(false) {
+            let _ = w.unmaximize();
+        } else {
+            let _ = w.maximize();
+        }
+    }
+}
+
+/// 手动拖动用：设置窗口物理坐标（allow-set-position not allowed 时 JS 设置会失败）。
+#[tauri::command]
+fn win_set_position(app: tauri::AppHandle, x: i32, y: i32) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
+    }
 }

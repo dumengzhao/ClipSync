@@ -1,69 +1,142 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
 /**
  * 完全自定义窗口标题栏（decorations:false 时启用）。
- * - 左侧为可拖动区 + 自定义信息（应用名 · 本机设备名）；
- * - 右侧三个统一风格按钮：最小化 / 最大化 / 关闭。
- * 拖动用 Tauri 原生 `data-tauri-drag-region`（Rust 侧在真实 mousedown 事件栈同步触发拖动，
- * 比 JS 调 Window.startDragging() 在 macOS 上可靠；且自动跳过 button 等交互元素，不影响按钮点击）。
- * 关闭走 hide_app_window 命令，复用 Rust「隐藏而非退出」逻辑。
+ * - 左侧信息区 + 中间空白条为拖动区；按钮区不触发拖动。
+ * - 拖动用「mousedown 记录窗口位置 + mousemove 用 setPosition 跟随」手动实现，
+ *   使用 clientX 绝对坐标差（macOS WKWebView 的 movementX 在未锁定时恒为 0，不可靠）。
+ * - 按钮 hover 底色用 JS 控制的 .is-hover 类（而非 CSS :hover），关闭点击时立即移除，
+ *   窗口重开（main-shown）时再兜底清除，避免红/灰底残留与「闪一下」。
  */
 export default function TitleBar() {
   const [deviceName, setDeviceName] = useState('');
+  // 重开瞬间抑制 hover：窗口出现时指针若停在按钮上会触发 mouseenter，
+  // 必须忽略，直到用户真正移动鼠标，否则关闭按钮红底「闪一下」。
+  const suppressHoverRef = useRef(false);
 
   useEffect(() => {
     invoke<string>('get_device_name')
       .then(setDeviceName)
       .catch(() => setDeviceName(''));
 
-    // 窗口再次显示时强制回流，清除隐藏期间残留的 :hover 红底（指针未真正移开导致卡住）
+    // 窗口再次显示时：
+    // 1) 兜底清除残留 hover 底色；
+    // 2) 抑制 hover 检测，直到用户真正移动鼠标——否则指针若停在关闭按钮上，
+    //    WKWebView 在窗口出现时会派发 mouseenter，重新点亮红底 → 重开「闪一下」。
     const unlisten = listen('main-shown', () => {
+      document
+        .querySelectorAll('.titlebar .tb-btn.is-hover')
+        .forEach((el) => el.classList.remove('is-hover'));
+      suppressHoverRef.current = true;
       const body = document.body;
       const prev = body.style.pointerEvents;
       body.style.pointerEvents = 'none';
-      void body.offsetHeight; // 强制重排，让浏览器重算 hover 状态
+      void body.offsetHeight; // 强制重排
       body.style.pointerEvents = prev;
     });
+
+    // 首次真实 mousemove 后解除抑制：此后正常 hover 高亮恢复
+    const onFirstMove = () => {
+      suppressHoverRef.current = false;
+      window.removeEventListener('mousemove', onFirstMove);
+    };
+    window.addEventListener('mousemove', onFirstMove);
+
     return () => {
       unlisten.then((u) => u());
+      window.removeEventListener('mousemove', onFirstMove);
     };
   }, []);
 
+  // 最小化 / 最大化 / 拖动 全部走 Rust 命令（见 lib.rs 的 win_minimize / win_toggle_maximize /
+  // win_set_position）——因为 JS 的 getCurrentWindow().minimize()/setPosition() 等写操作在本项目
+  // 未被授予权限（日志曾报 allow-minimize / allow-set-position not allowed），Rust 侧调用无此限制。
   const minimize = () => {
-    getCurrentWindow().minimize().catch(() => {});
+    invoke('win_minimize').catch((e) => console.error('win_minimize failed', e));
   };
 
   const toggleMax = () => {
-    getCurrentWindow().toggleMaximize().catch(() => {});
+    invoke('win_toggle_maximize').catch((e) => console.error('win_toggle_maximize failed', e));
   };
 
-  const close = () => {
-    // 复用 Rust 的「关闭=隐藏」语义，而不是直接 destroy
-    invoke('hide_app_window').catch(() => {});
+  const close = (e: React.MouseEvent) => {
+    // 关闭瞬间立即移除自身 hover 底色，避免窗口隐藏导致 mouseleave 不触发、
+    // 重开时 main-shown 清除前先「闪一下」红底
+    (e.currentTarget as HTMLElement).classList.remove('is-hover');
+    invoke('hide_app_window').catch((e) => console.error('hide_app_window failed', e));
+  };
+
+  const setHover = (e: React.MouseEvent, on: boolean) => {
+    if (suppressHoverRef.current && on) return; // 重开瞬间不点亮 hover 底色
+    (e.currentTarget as HTMLElement).classList.toggle('is-hover', on);
+  };
+
+  // 手动拖动：用绝对坐标差（clientX - 起始 clientX），不依赖 movementX（macOS WKWebView 恒为 0）
+  const onTitleMouseDown = async (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    if ((e.target as HTMLElement).closest('.tb-btn')) return; // 按钮区不拖动
+    const win = getCurrentWindow();
+    const start = await win.outerPosition();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const scale = window.devicePixelRatio || 1;
+    const onMove = (ev: MouseEvent) => {
+      const x = Math.round(start.x + (ev.clientX - startX) * scale);
+      const y = Math.round(start.y + (ev.clientY - startY) * scale);
+      invoke('win_set_position', { x, y }).catch((err) => console.error('win_set_position failed', err));
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
   };
 
   return (
-    <div className="titlebar" data-tauri-drag-region>
+    <div className="titlebar" onMouseDown={onTitleMouseDown}>
       <div className="titlebar-info">
         <span className="titlebar-logo">ClipSync</span>
         {deviceName && <span className="titlebar-sep">·</span>}
         {deviceName && <span className="titlebar-device">{deviceName}</span>}
       </div>
+      <div className="titlebar-spacer" />
       <div className="titlebar-actions">
-        <button className="tb-btn" onClick={minimize} title="最小化" aria-label="最小化">
+        <button
+          className="tb-btn"
+          onClick={minimize}
+          onMouseEnter={(e) => setHover(e, true)}
+          onMouseLeave={(e) => setHover(e, false)}
+          title="最小化"
+          aria-label="最小化"
+        >
           <svg width="10" height="10" viewBox="0 0 10 10">
             <line x1="1.5" y1="5" x2="8.5" y2="5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
           </svg>
         </button>
-        <button className="tb-btn" onClick={toggleMax} title="最大化" aria-label="最大化">
+        <button
+          className="tb-btn"
+          onClick={toggleMax}
+          onMouseEnter={(e) => setHover(e, true)}
+          onMouseLeave={(e) => setHover(e, false)}
+          title="最大化"
+          aria-label="最大化"
+        >
           <svg width="10" height="10" viewBox="0 0 10 10">
             <rect x="1.4" y="1.4" width="7.2" height="7.2" fill="none" stroke="currentColor" strokeWidth="1.1" />
           </svg>
         </button>
-        <button className="tb-btn tb-close" onClick={close} title="关闭" aria-label="关闭">
+        <button
+          className="tb-btn tb-close"
+          onClick={(e) => close(e)}
+          onMouseEnter={(e) => setHover(e, true)}
+          onMouseLeave={(e) => setHover(e, false)}
+          title="关闭"
+          aria-label="关闭"
+        >
           <svg width="10" height="10" viewBox="0 0 10 10">
             <line x1="2" y1="2" x2="8" y2="8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
             <line x1="8" y1="2" x2="2" y2="8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
