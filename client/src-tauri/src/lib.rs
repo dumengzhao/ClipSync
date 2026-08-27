@@ -284,6 +284,7 @@ pub fn run() {
             tauri_cmd::list_pending_offers,
             tauri_cmd::open_settings,
             tauri_cmd::quit_app,
+            hide_app_window,
             tauri_cmd::get_server_status,
             tauri_cmd::get_server_nodes,
             tauri_cmd::list_cross_lan_offers,
@@ -375,4 +376,10 @@ fn hide_main_window(app: &tauri::AppHandle) {
         use tauri::ActivationPolicy;
         let _ = app.set_activation_policy(ActivationPolicy::Accessory);
     }
+}
+
+/// 自定义标题栏「关闭」按钮调用：隐藏主窗口而非退出进程（与点击原生 X 行为一致）
+#[tauri::command]
+fn hide_app_window(app: tauri::AppHandle) {
+    hide_main_window(&app);
 }

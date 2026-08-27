@@ -455,3 +455,90 @@ body {
   from { opacity: 0; transform: translateX(-50%) translateY(-6px); }
   to { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
+
+/* ===== 自定义窗口标题栏（decorations:false 时启用） ===== */
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.titlebar {
+  flex: 0 0 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px 0 12px;
+  background: rgba(148, 163, 184, 0.10);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.22);
+  user-select: none;
+  -webkit-app-region: drag; /* 拖动兜底（Tauri 主要用 data-tauri-drag-region） */
+}
+
+/* 标题栏整体作为拖动区，但右侧按钮区与按钮本身不参与拖动 */
+.titlebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  -webkit-app-region: no-drag;
+}
+
+.titlebar-info {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #94a3b8;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.titlebar-logo {
+  font-weight: 600;
+  color: #e2e8f0;
+}
+
+.titlebar-sep {
+  opacity: 0.5;
+}
+
+.titlebar-device {
+  color: #cbd5e1;
+}
+
+.tb-btn {
+  width: 32px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: #cbd5e1;
+  border-radius: 6px;
+  cursor: pointer;
+  padding: 0;
+  -webkit-app-region: no-drag;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.tb-btn:hover {
+  background: rgba(148, 163, 184, 0.20);
+  color: #f1f5f9;
+}
+
+.tb-btn:active {
+  background: rgba(148, 163, 184, 0.30);
+}
+
+.tb-close:hover {
+  background: #e81123;
+  color: #fff;
+}
+
+.tb-close:active {
+  background: #c20e1c;
+}
