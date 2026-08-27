@@ -197,33 +197,35 @@ function osLabel(p){
   return ({windows:'Windows',macos:'macOS',linux:'Linux',android:'Android',ios:'iOS'})[(p||'').toLowerCase()] || p || '未知';
 }
 
-let _devTimer=null;
-function refreshDevicesNow(){
-  if(!currentNet) return;
-  const nm=$('#devTitle').textContent.replace('设备 · ','');
-  showDevices(currentNet, nm);
+let _devWs=null;          // 当前管理后台实时刷新 WebSocket
+
+function closeDevWs(){
+  if(_devWs){ try{ _devWs.close(); }catch(e){} _devWs=null; }
 }
 
-async function showDevices(netId, name){
-  currentNet = netId;
-  $('#devPanel').style.display='block';
-  $('#devTitle').textContent='设备 · '+name;
-  const {nodes} = await api('/api/admin/networks/'+netId+'/devices');
+// 仅靠 HTTP 重新拉取一次设备列表（操作后兜底 / WS 不可用时使用）
+function refreshDevicesNow(){
+  if(!currentNet) return;
+  loadDevicesHttp(currentNet);
+}
+
+function renderDevices(nodes){
   const box=$('#devList');
-  if(!nodes.length){ box.innerHTML='<span class="muted">暂无设备连接。客户端填入 Token 后会以「未启用」出现在此。</span>'; return; }
+  if(!nodes || !nodes.length){ box.innerHTML='<span class="muted">暂无设备连接。客户端填入 Token 后会以「未启用」出现在此。</span>'; return; }
   // 在线优先、再按名称排序，便于一眼看清谁在线
   nodes.sort((a,b)=> (b.online?1:0)-(a.online?1:0) || (a.name||'').localeCompare(b.name||''));
-  let html='<table><thead><tr><th>计算机名 / 操作系统</th><th>唯一 ID</th><th>LAN 分组</th><th>文件地址</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+  let html='<table><thead><tr><th>设备信息</th><th>设备ID</th><th>LAN 分组</th><th>文件地址</th><th>状态</th><th>操作</th></tr></thead><tbody>';
   for(const d of nodes){
     const uid = d.hardware_id || d.device_id; // 硬件指纹优先，回退软件 UUID
+    const osTxt = [osLabel(d.platform), d.os_version].filter(Boolean).join(' ');
     const status = !d.online ? '<span class="tag offline">● 离线</span>'
       : (d.enabled ? '<span class="tag on">● 在线 · 已启用</span>' : '<span class="tag off">● 在线 · 未启用</span>');
     const btn = d.enabled
-      ? `<button class="danger" onclick="setEnabled('${netId}','${d.device_id}',false)">禁用</button>`
-      : `<button class="green" onclick="setEnabled('${netId}','${d.device_id}',true)">启用</button>`;
-    const delBtn = `<button class="ghost" title="从网络移除该设备" onclick="removeDevice('${netId}','${d.device_id}')">删除</button>`;
+      ? `<button class="danger" onclick="setEnabled('${currentNet}','${d.device_id}',false)">禁用</button>`
+      : `<button class="green" onclick="setEnabled('${currentNet}','${d.device_id}',true)">启用</button>`;
+    const delBtn = `<button class="ghost" title="从网络移除该设备" onclick="removeDevice('${currentNet}','${d.device_id}')">删除</button>`;
     html+=`<tr>
-      <td><div class="dev-name">🖥 ${esc(d.name||'(未命名)')}</div><div class="muted small">${esc(osLabel(d.platform))}</div></td>
+      <td><div class="dev-name">🖥 ${esc(d.name||'(未命名)')}</div><div class="muted small">${esc(osTxt)}</div></td>
       <td><code class="uid" title="设备唯一标识（硬件指纹优先）">${esc(uid)}</code></td>
       <td>${esc(d.lan_group)||'-'}</td>
       <td class="muted">${esc(d.ext_file_ep)||'-'}</td>
@@ -233,8 +235,40 @@ async function showDevices(netId, name){
   }
   html+='</tbody></table>';
   box.innerHTML=html;
-  if(_devTimer) clearInterval(_devTimer);
-  _devTimer=setInterval(refreshDevicesNow, 5000); // 自动刷新，实时反映在线/离线
+}
+
+// 初载：先 HTTP 拉一次（WS 建立前即有内容），随后由 WS 推送实时刷新
+async function loadDevicesHttp(netId){
+  try{
+    const {nodes} = await api('/api/admin/networks/'+netId+'/devices');
+    renderDevices(nodes);
+  }catch(e){ /* 401 已在 api() 内统一处理 */ }
+}
+
+// 打开实时刷新 WebSocket：服务端在节点状态变化（连接/启用/禁用/移除）时主动推送完整列表
+function openDevWs(netId){
+  closeDevWs();
+  const proto = location.protocol==='https:' ? 'wss' : 'ws';
+  const url = `${proto}://${location.host}/api/admin/ws?token=${encodeURIComponent(token)}&net_id=${encodeURIComponent(netId)}`;
+  try{
+    const ws = new WebSocket(url);
+    ws.onmessage = (ev)=>{
+      try{
+        const msg = JSON.parse(ev.data);
+        if(msg && msg.type==='nodes' && Array.isArray(msg.nodes)){ renderDevices(msg.nodes); }
+      }catch(_){}
+    };
+    ws.onclose = ()=>{ /* 切换网络/登出时由 closeDevWs 主动关闭；此处不自动重连以免堆积 */ };
+    _devWs = ws;
+  }catch(e){ /* 浏览器不支持 WS：仅保留 HTTP 初始加载 */ }
+}
+
+async function showDevices(netId, name){
+  currentNet = netId;
+  $('#devPanel').style.display='block';
+  $('#devTitle').textContent='设备 · '+name;
+  await loadDevicesHttp(netId);
+  openDevWs(netId);
   $('#removedPanel').style.display='block';
   loadRemoved(netId);
 }
@@ -271,7 +305,7 @@ async function removeDevice(netId, devId){
     const r = await api(`/api/admin/networks/${netId}/devices/${devId}/remove`, {method:'POST'});
     if(r && r.error){ toast('移除失败: '+r.error); return; }
     toast('已移除设备');
-    await showDevices(netId, $('#devTitle').textContent.replace('设备 · ',''));
+    await loadDevicesHttp(netId); // WS 推送到达后会再次刷新；此处兜底确保立即反映
   }catch(e){ toast('移除失败: '+e.message); }
 }
 
@@ -279,7 +313,7 @@ async function setEnabled(netId, devId, enabled){
   const action = enabled?'enable':'disable';
   await api(`/api/admin/networks/${netId}/devices/${devId}/${action}`, {method:'POST'});
   toast(enabled?'已启用':'已禁用');
-  await showDevices(netId, $('#devTitle').textContent.replace('设备 · ',''));
+  await loadDevicesHttp(netId); // WS 推送到达后会再次刷新；此处兜底确保立即反映
 }
 
 $('#newNet').onclick=()=>{ $('#newNetPanel').classList.toggle('hidden'); };
@@ -303,7 +337,7 @@ $('#loginBtn').onclick=async()=>{
 };
 $('#logout').onclick=()=>{ logout(); };
 
-function logout(){ token=''; localStorage.removeItem('cs_admin_token'); $('#app').style.display='none'; $('#login').style.display='block'; }
+function logout(){ token=''; closeDevWs(); localStorage.removeItem('cs_admin_token'); $('#app').style.display='none'; $('#login').style.display='block'; }
 function enterApp(){ $('#login').style.display='none'; $('#app').style.display='block'; loadNetworks(); }
 
 (async()=>{
