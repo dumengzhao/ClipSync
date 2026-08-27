@@ -21,7 +21,7 @@ pub mod update;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Listener, Manager, WindowEvent,
+    Emitter, Listener, Manager, WindowEvent,
 };
 
 use crate::cache::file_cache::FileCache;
@@ -363,6 +363,8 @@ fn show_main_window(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         w.show().ok();
         w.set_focus().ok();
+        // 通知前端窗口已显示：TitleBar 监听此事件强制回流，清除隐藏期间残留的 :hover 红底
+        let _ = app.emit("main-shown", ());
     }
 }
 
