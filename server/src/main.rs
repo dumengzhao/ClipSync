@@ -18,7 +18,7 @@ async fn main() {
     let data_dir = std::env::var("CLIPSYNC_DATA_DIR").unwrap_or_else(|_| "data".to_string());
     let admin_user = std::env::var("ADMIN_USER").unwrap_or_else(|_| "admin".to_string());
     let admin_pass = std::env::var("ADMIN_PASS").unwrap_or_else(|_| "clipsync".to_string());
-    let listen = std::env::var("LISTEN").unwrap_or_else(|_| "0.0.0.0:24682".to_string());
+    let listen = std::env::var("LISTEN").unwrap_or_else(|_| "0.0.0.0:20070".to_string());
 
     let store = storage::Store::new(PathBuf::from(&data_dir));
     let networks = store.load_networks();
