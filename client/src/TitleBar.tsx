@@ -2,25 +2,25 @@ import { useEffect, useRef, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { getServerStatus } from './api/tauri';
 
 /**
  * 完全自定义窗口标题栏（decorations:false 时启用）。
- * - 左侧信息区 + 中间空白条为拖动区；按钮区不触发拖动。
- * - 拖动用「mousedown 记录窗口位置 + mousemove 用 setPosition 跟随」手动实现，
- *   使用 clientX 绝对坐标差（macOS WKWebView 的 movementX 在未锁定时恒为 0，不可靠）。
+ * - 左侧信息区显示跨局域网服务端连接状态（订阅 server-status 事件）；按钮区不触发拖动。
+ * - 拖动用 OS 原生 startDragging（绝对跟手、无抖动）。
  * - 按钮 hover 底色用 JS 控制的 .is-hover 类（而非 CSS :hover），关闭点击时立即移除，
  *   窗口重开（main-shown）时再兜底清除，避免红/灰底残留与「闪一下」。
  */
 export default function TitleBar() {
-  const [deviceName, setDeviceName] = useState('');
+  // 跨局域网服务端连接状态：0 未连接 / 1 待启用 / 2 已启用
+  const [serverStatus, setServerStatus] = useState(0);
   // 重开瞬间抑制 hover：窗口出现时指针若停在按钮上会触发 mouseenter，
   // 必须忽略，直到用户真正移动鼠标，否则关闭按钮红底「闪一下」。
   const suppressHoverRef = useRef(false);
 
   useEffect(() => {
-    invoke<string>('get_device_name')
-      .then(setDeviceName)
-      .catch(() => setDeviceName(''));
+    // 挂载时回填初始连接状态（之后由 server-status 事件实时更新）
+    getServerStatus().then(setServerStatus).catch(() => setServerStatus(0));
 
     // 窗口再次显示时：
     // 1) 兜底清除残留 hover 底色；
@@ -45,8 +45,14 @@ export default function TitleBar() {
     };
     window.addEventListener('mousemove', onFirstMove);
 
+    // 跨局域网服务端连接状态：实时更新左侧状态文案
+    const unlistenStatus = listen<number>('server-status', (e) =>
+      setServerStatus(e.payload),
+    );
+
     return () => {
       unlisten.then((u) => u());
+      unlistenStatus.then((u) => u());
       window.removeEventListener('mousemove', onFirstMove);
     };
   }, []);
@@ -87,10 +93,23 @@ export default function TitleBar() {
 
   return (
     <div className="titlebar" onMouseDown={onTitleMouseDown}>
-      <div className="titlebar-info">
-        <span className="titlebar-logo">ClipSync</span>
-        {deviceName && <span className="titlebar-sep">·</span>}
-        {deviceName && <span className="titlebar-device">{deviceName}</span>}
+      <div className="titlebar-info" title="跨局域网服务端连接状态">
+        <span
+          className={
+            'titlebar-status ' +
+            (serverStatus === 2
+              ? 'active'
+              : serverStatus === 1
+                ? 'pending'
+                : 'disconnected')
+          }
+        >
+          {serverStatus === 2
+            ? '跨 LAN 同步 · 已启用'
+            : serverStatus === 1
+              ? '跨 LAN 同步 · 待启用'
+              : '跨 LAN 同步 · 未连接'}
+        </span>
       </div>
       <div className="titlebar-spacer" />
       <div className="titlebar-actions">

@@ -474,6 +474,8 @@ impl ServerConn {
                     &network.id,
                 );
                 *self.network_key.lock().unwrap() = Some(key);
+                // 同步到 AppState，供内嵌 HTTP 文件服务加密 / 拉取端解密复用同一个网络密钥
+                *self.app.state::<AppState>().network_key.lock().unwrap() = Some(key);
                 // 成功入网即清除拉黑标记（管理员恢复设备 / 误报后自愈），下次循环不再走拉黑重试分支
                 self.removed.store(false, Ordering::SeqCst);
                 self.set_status(ServerStatus::from_str(&status));
@@ -689,7 +691,30 @@ impl ServerConn {
         for f in &files {
             let hash = f.hash.clone().unwrap_or_default();
             let url = format!("http://{ext_file_ep}/file/{hash}");
-            let bytes = reqwest::get(&url).await?.bytes().await?;
+            let raw = reqwest::get(&url).await?.bytes().await?;
+            // 跨 LAN 文件字节在传输层加密（nonce 12B 前置，复用 network_key）：
+            // 下载后解密写盘；密钥未就绪（本机未连服务端）则按明文写盘（降级）。
+            let key = *state.network_key.lock().unwrap();
+            let bytes: Vec<u8> = match key {
+                Some(k) if raw.len() >= NONCE_SIZE => {
+                    let (nonce, ct) = raw.split_at(NONCE_SIZE);
+                    let nonce_arr: Option<[u8; NONCE_SIZE]> = nonce.try_into().ok();
+                    match nonce_arr {
+                        Some(n) => match decrypt(&k, &n, ct) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                tracing::warn!("跨 LAN 文件解密失败，按明文写盘: {e}");
+                                raw.to_vec()
+                            }
+                        },
+                        None => {
+                            tracing::warn!("跨 LAN 文件 nonce 长度异常，按明文写盘");
+                            raw.to_vec()
+                        }
+                    }
+                }
+                _ => raw.to_vec(),
+            };
             let dest = std::path::Path::new(&sync_dir).join(&f.file_name);
             if let Some(parent) = dest.parent() {
                 let _ = std::fs::create_dir_all(parent);

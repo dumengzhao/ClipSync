@@ -265,6 +265,78 @@ body {
   margin-right: 0.5rem;
 }
 
+/* 统一设备列表（已配对 + 服务端）：一项同样式，右上角图标区分类型 */
+.peer-unified {
+  position: relative;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.3rem;
+}
+
+.peer-unified .peer-name {
+  flex: 0 1 auto;
+}
+
+.peer-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding-right: 1.4rem; /* 给右上角图标留出空间 */
+}
+
+/* 注册到服务端的设备 ID（一排显示） */
+.peer-id {
+  font-size: 0.72rem;
+  color: #6b7280;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  word-break: break-all;
+}
+
+.peer-action-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-top: 0.2rem;
+}
+
+.peer-action-row .peer-addr {
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 非局域网设备（云）右侧副信息：lan_group / platform */
+.peer-meta {
+  color: #888;
+  font-size: 0.78rem;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 0 0 auto;
+  margin-left: 0.5rem;
+}
+
+/* 设备类型图标（右上角）：局域网=wifi，其它=云朵 */
+.peer-type-icon {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  display: inline-flex;
+  color: #94a3b8;
+}
+
+.peer-type-icon.wifi {
+  color: #22c55e;
+}
+
+.peer-type-icon.cloud {
+  color: #38bdf8;
+}
+
 .pair-input-row {
   display: flex;
   align-items: center;
@@ -499,6 +571,22 @@ body {
   white-space: nowrap;
   text-overflow: ellipsis;
   min-width: 0;
+}
+
+.titlebar-status {
+  color: #94a3b8;
+}
+
+.titlebar-status.active {
+  color: #22c55e;
+}
+
+.titlebar-status.pending {
+  color: #f59e0b;
+}
+
+.titlebar-status.disconnected {
+  color: #94a3b8;
 }
 
 .titlebar-logo {
