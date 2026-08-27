@@ -283,7 +283,6 @@ pub fn run() {
             hide_app_window,
             win_minimize,
             win_toggle_maximize,
-            win_set_position,
             tauri_cmd::get_server_status,
             tauri_cmd::get_server_nodes,
             tauri_cmd::list_cross_lan_offers,
@@ -405,13 +404,5 @@ fn win_toggle_maximize(app: tauri::AppHandle) {
         } else {
             let _ = w.maximize();
         }
-    }
-}
-
-/// 手动拖动用：设置窗口物理坐标（allow-set-position not allowed 时 JS 设置会失败）。
-#[tauri::command]
-fn win_set_position(app: tauri::AppHandle, x: i32, y: i32) {
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
     }
 }

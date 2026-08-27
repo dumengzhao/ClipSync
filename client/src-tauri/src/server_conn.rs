@@ -440,7 +440,7 @@ impl ServerConn {
                     if !self.handle_server_message(msg, &mut w_tx).await { break; }
                 }
                 _ = hb.tick() => {
-                    if w_tx.send(Message::Text(serde_json::to_string(&ClientToServer::Heartbeat).unwrap().into())).await.is_err() { break; }
+                    if w_tx.send(Message::Text(serde_json::to_string(&ClientToServer::Heartbeat).unwrap())).await.is_err() { break; }
                 }
             }
         }
@@ -538,7 +538,7 @@ impl ServerConn {
 
     /// 接收对端文字中继：解密 → apply_remote。
     async fn handle_relay_text(&self, _from: &str, ct: &str) {
-        let key = match self.network_key.lock().unwrap().clone() {
+        let key = match *self.network_key.lock().unwrap() {
             Some(k) => k,
             None => {
                 tracing::warn!("收到 relay_text 但无网络密钥，忽略");
@@ -604,7 +604,7 @@ impl ServerConn {
         if self.status() != ServerStatus::Active || self.network_key.lock().unwrap().is_none() {
             return;
         }
-        let key = self.network_key.lock().unwrap().clone().unwrap();
+        let key = (*self.network_key.lock().unwrap()).unwrap();
         let our_lg = self.our_lan_group.lock().unwrap().clone();
         let nodes = self.nodes.lock().unwrap().clone();
         for n in nodes.iter().filter(|n| lan_differ(&our_lg, &n.lan_group)) {
@@ -710,7 +710,7 @@ impl ServerConn {
 /// 发送已序列化 JSON 消息。
 async fn send_json(w_tx: &mut WsSink, msg: &ClientToServer) -> anyhow::Result<()> {
     let s = serde_json::to_string(msg)?;
-    w_tx.send(Message::Text(s.into())).await?;
+    w_tx.send(Message::Text(s)).await?;
     Ok(())
 }
 
