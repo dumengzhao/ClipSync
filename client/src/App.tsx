@@ -60,6 +60,8 @@ export default function App() {
   const [refreshing, setRefreshing] = useState(false);
   // 跨局域网服务端连接状态（0 未连接 / 1 待审批 / 2 已启用）
   const [serverStatus, setServerStatus] = useState(0);
+  // 服务端是否已将该设备移除（拉黑）：移除后停止重连并提示重新配对
+  const [serverRemoved, setServerRemoved] = useState(false);
   // 跨局域网已启用节点（来自服务端下发）
   const [serverNodes, setServerNodes] = useState<RemoteNode[]>([]);
   // 跨 LAN「待复制」文件清单
@@ -215,8 +217,13 @@ export default function App() {
       },
     );
     // 跨局域网服务端事件
-    const unlistenServerStatus = listen<number>('server-status', (e) =>
-      setServerStatus(e.payload),
+    const unlistenServerStatus = listen<number>('server-status', (e) => {
+      setServerStatus(e.payload);
+      // 重新连上（pending/active）即视为已恢复，清除「被移除」提示
+      if (e.payload === 1 || e.payload === 2) setServerRemoved(false);
+    });
+    const unlistenServerRemoved = listen('server-removed', () =>
+      setServerRemoved(true),
     );
     const unlistenServerNodes = listen<RemoteNode[]>('server-nodes', (e) =>
       setServerNodes(e.payload),
@@ -240,6 +247,7 @@ export default function App() {
       unlistenPullStart.then((u) => u());
       unlistenPullComplete.then((u) => u());
       unlistenServerStatus.then((u) => u());
+      unlistenServerRemoved.then((u) => u());
       unlistenServerNodes.then((u) => u());
       unlistenCrossLanFile.then((u) => u());
     };
@@ -497,6 +505,14 @@ export default function App() {
 
             <section className="peers">
               <h2>跨局域网（服务端）</h2>
+              {serverRemoved && (
+                <div
+                  className="msg"
+                  style={{ color: '#dc2626', marginBottom: '0.5rem' }}
+                >
+                  设备已被服务端移除（拉黑）。如需重新使用，请在设置中重新填写服务端地址并保存以重新配对。
+                </div>
+              )}
               <div className="peer-addr" style={{ marginBottom: '0.5rem' }}>
                 {serverStatus === 2
                   ? '已启用 · 参与跨 LAN 同步'
