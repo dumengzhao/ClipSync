@@ -1,12 +1,15 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type MouseEvent } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 
 /**
  * 完全自定义窗口标题栏（decorations:false 时启用）。
  * - 左侧为可拖动区 + 自定义信息（应用名 · 本机设备名）；
  * - 右侧三个统一风格的按钮：最小化 / 最大化 / 关闭。
- * 关闭走 `hide_app_window` 命令，复用 Rust 端「隐藏而非退出」逻辑（窗口隐藏 + 移除 Dock 图标）。
+ * 拖动用 Window.startDragging()（标题栏 mousedown 时触发，按钮区除外），
+ * 不再依赖 data-tauri-drag-region / -webkit-app-region，避免与按钮点击冲突。
+ * 关闭走 hide_app_window 命令，复用 Rust「隐藏而非退出」逻辑。
  */
 export default function TitleBar() {
   const [deviceName, setDeviceName] = useState('');
@@ -15,7 +18,28 @@ export default function TitleBar() {
     invoke<string>('get_device_name')
       .then(setDeviceName)
       .catch(() => setDeviceName(''));
+
+    // 窗口再次显示时强制回流，清除隐藏期间残留的 :hover 红底（指针未真正移开导致卡住）
+    const unlisten = listen('main-shown', () => {
+      const body = document.body;
+      const prev = body.style.pointerEvents;
+      body.style.pointerEvents = 'none';
+      void body.offsetHeight; // 强制重排，让浏览器重算 hover 状态
+      body.style.pointerEvents = prev;
+    });
+    return () => {
+      unlisten.then((u) => u());
+    };
   }, []);
+
+  // 标题栏 mousedown 触发拖动；点到按钮则跳过（按钮各自处理点击）
+  const onTitleMouseDown = (e: MouseEvent) => {
+    const target = e.target as HTMLElement;
+    if (target.closest('.tb-btn')) return;
+    if (e.buttons === 1) {
+      getCurrentWindow().startDragging().catch(() => {});
+    }
+  };
 
   const minimize = () => {
     getCurrentWindow().minimize().catch(() => {});
@@ -31,8 +55,8 @@ export default function TitleBar() {
   };
 
   return (
-    <div className="titlebar" data-tauri-drag-region>
-      <div className="titlebar-info" data-tauri-drag-region>
+    <div className="titlebar" onMouseDown={onTitleMouseDown}>
+      <div className="titlebar-info">
         <span className="titlebar-logo">ClipSync</span>
         {deviceName && <span className="titlebar-sep">·</span>}
         {deviceName && <span className="titlebar-device">{deviceName}</span>}

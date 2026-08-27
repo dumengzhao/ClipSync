@@ -473,7 +473,6 @@ body {
   background: rgba(148, 163, 184, 0.10);
   border-bottom: 1px solid rgba(148, 163, 184, 0.22);
   user-select: none;
-  -webkit-app-region: drag; /* 拖动兜底（Tauri 主要用 data-tauri-drag-region） */
 }
 
 /* 标题栏整体作为拖动区，但右侧按钮区与按钮本身不参与拖动 */
@@ -481,7 +480,6 @@ body {
   display: flex;
   align-items: center;
   gap: 2px;
-  -webkit-app-region: no-drag;
 }
 
 .titlebar-info {
@@ -521,7 +519,6 @@ body {
   border-radius: 6px;
   cursor: pointer;
   padding: 0;
-  -webkit-app-region: no-drag;
   transition: background 0.12s ease, color 0.12s ease;
 }
 
