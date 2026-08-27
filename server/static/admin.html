@@ -193,19 +193,30 @@ async function showDevices(netId, name){
     const btn = d.enabled
       ? `<button class="danger" onclick="setEnabled('${netId}','${d.device_id}',false)">禁用</button>`
       : `<button class="green" onclick="setEnabled('${netId}','${d.device_id}',true)">启用</button>`;
+    const delBtn = `<button class="ghost" title="从网络移除该设备" onclick="removeDevice('${netId}','${d.device_id}')">删除</button>`;
     html+=`<tr>
       <td><div class="dev-name">🖥 ${esc(d.name||'(未命名)')}</div><div class="muted small">${esc(osLabel(d.platform))}</div></td>
       <td><code class="uid" title="设备唯一标识（硬件指纹优先）">${esc(uid)}</code></td>
       <td>${esc(d.lan_group)||'-'}</td>
       <td class="muted">${esc(d.ext_file_ep)||'-'}</td>
       <td>${status}</td>
-      <td>${btn}</td>
+      <td>${btn} ${delBtn}</td>
     </tr>`;
   }
   html+='</tbody></table>';
   box.innerHTML=html;
   if(_devTimer) clearInterval(_devTimer);
   _devTimer=setInterval(refreshDevicesNow, 5000); // 自动刷新，实时反映在线/离线
+}
+
+async function removeDevice(netId, devId){
+  if(!confirm('确定从网络移除该设备？\n移除后该设备将不再显示，且需重新配对才能再次加入。')) return;
+  try{
+    const r = await api(`/api/admin/networks/${netId}/devices/${devId}/remove`, {method:'POST'});
+    if(r && r.error){ toast('移除失败: '+r.error); return; }
+    toast('已移除设备');
+    await showDevices(netId, $('#devTitle').textContent.replace('设备 · ',''));
+  }catch(e){ toast('移除失败: '+e.message); }
 }
 
 async function setEnabled(netId, devId, enabled){

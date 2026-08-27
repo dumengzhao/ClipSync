@@ -177,3 +177,14 @@ pub async fn disable_device_handler(
         Json(json!({"error": "not found"}))
     }
 }
+
+pub async fn remove_device_handler(
+    State(state): State<Arc<AppState>>,
+    Path((net_id, dev_id)): Path<(String, String)>,
+) -> Json<Value> {
+    if state.remove_device(&net_id, &dev_id) {
+        Json(json!({"ok": true}))
+    } else {
+        Json(json!({"error": "not found"}))
+    }
+}

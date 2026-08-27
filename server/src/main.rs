@@ -58,6 +58,10 @@ async fn main() {
             "/api/admin/networks/:id/devices/:dev/disable",
             post(admin::disable_device_handler),
         )
+        .route(
+            "/api/admin/networks/:id/devices/:dev/remove",
+            post(admin::remove_device_handler),
+        )
         .route_layer(from_fn_with_state(state.clone(), admin::admin_auth));
 
     let app = axum::Router::new()

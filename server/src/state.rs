@@ -308,4 +308,26 @@ impl AppState {
         self.broadcast_nodes_update(net_id);
         true
     }
+
+    /// 从网络移除某个设备节点（彻底删除，不再显示；离线残留设备清理即此用途）。
+    /// 若设备仍在线，下发 Deactivated 使其停止同步；其后续重连会被当作新设备重新 pending。
+    pub fn remove_device(&self, net_id: &str, dev_id: &str) -> bool {
+        let existed = {
+            let mut nets = self.networks.lock().unwrap();
+            let net = match nets.iter_mut().find(|n| n.id == net_id) {
+                Some(n) => n,
+                None => return false,
+            };
+            let before = net.nodes.len();
+            net.nodes.retain(|n| n.device_id != dev_id);
+            net.nodes.len() != before
+        };
+        if !existed {
+            return false;
+        }
+        self.save().ok();
+        self.hub.send(dev_id, ServerToClient::Deactivated);
+        self.broadcast_nodes_update(net_id);
+        true
+    }
 }
