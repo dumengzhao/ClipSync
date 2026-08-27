@@ -97,6 +97,8 @@ struct DeviceFields {
     ext_file_ep: String,
     platform: String,
     hardware_id: String,
+    /// 操作系统版本号（如 macOS 14.5 / Windows 11 Pro），由客户端上报供管理后台展示
+    os_version: String,
 }
 
 /// 跨平台硬件唯一标识（用于服务端区分同一台物理机器）。
@@ -142,6 +144,60 @@ fn hardware_id() -> String {
             let s = s.trim().to_string();
             if !s.is_empty() {
                 return s;
+            }
+        }
+    }
+    String::new()
+}
+
+/// 跨平台获取操作系统版本号（如 macOS 14.5 / Windows 11 Pro / Ubuntu 22.04.3 LTS）。
+/// 失败时返回空串，由服务端以「未知」占位。
+fn os_version() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(out) = std::process::Command::new("sw_vers")
+            .arg("-productVersion")
+            .output()
+        {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !s.is_empty() {
+                return s;
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(out) = std::process::Command::new("reg")
+            .args([
+                "query",
+                "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+                "/v",
+                "ProductName",
+            ])
+            .output()
+        {
+            let s = String::from_utf8_lossy(&out.stdout);
+            // 注册表输出形如：`    ProductName    REG_SZ    Windows 11 Pro`
+            if let Some(idx) = s.find("REG_SZ") {
+                let v = s[idx + "REG_SZ".len()..].trim().to_string();
+                // 去掉前缀 "Windows "，避免与前端 osLabel 重复
+                let v = v.strip_prefix("Windows ").unwrap_or(&v).to_string();
+                if !v.is_empty() {
+                    return v;
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(s) = std::fs::read_to_string("/etc/os-release") {
+            for line in s.lines() {
+                if let Some(v) = line.strip_prefix("PRETTY_NAME=") {
+                    let v = v.trim_matches('"').to_string();
+                    if !v.is_empty() {
+                        return v;
+                    }
+                }
             }
         }
     }
@@ -350,6 +406,7 @@ impl ServerConn {
         if hw.is_empty() {
             hw = self.engine.device_id().0.clone();
         }
+        let os_ver = os_version();
         let auth = ClientToServer::Auth {
             token: cfg.network_token.clone(),
             device: DeviceFields {
@@ -359,6 +416,7 @@ impl ServerConn {
                 ext_file_ep: cfg.ext_file_ep.clone(),
                 platform: std::env::consts::OS.to_string(),
                 hardware_id: hw,
+                os_version: os_ver,
             },
         };
         send_json(&mut w_tx, &auth).await?;

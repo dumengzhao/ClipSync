@@ -37,6 +37,9 @@ pub struct Node {
     /// 对外文件拉取地址 ip:port（公网可达）
     pub ext_file_ep: String,
     pub platform: String,
+    /// 操作系统版本号（如 macOS 14.5 / Windows 11），由客户端上报
+    #[serde(default)]
+    pub os_version: String,
     /// 硬件级唯一标识（跨平台指纹，优先于 device_id 展示）
     #[serde(default)]
     pub hardware_id: String,
@@ -54,6 +57,9 @@ pub struct DeviceInfo {
     pub lan_group: String,
     pub ext_file_ep: String,
     pub platform: String,
+    /// 操作系统版本号（如 macOS 14.5 / Windows 11），由客户端上报
+    #[serde(default)]
+    pub os_version: String,
     /// 硬件级唯一标识（跨平台指纹），缺失时服务端以 device.id 兜底
     #[serde(default)]
     pub hardware_id: String,
