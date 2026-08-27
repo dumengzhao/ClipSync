@@ -38,6 +38,7 @@ impl AppState {
                 lan_group: n.lan_group.clone(),
                 ext_file_ep: n.ext_file_ep.clone(),
                 platform: n.platform.clone(),
+                hardware_id: n.hardware_id.clone(),
             })
             .collect()
     }
@@ -66,6 +67,7 @@ impl AppState {
                     n.lan_group = device.lan_group.clone();
                     n.ext_file_ep = device.ext_file_ep.clone();
                     n.platform = device.platform.clone();
+                    n.hardware_id = device.hardware_id.clone();
                     n.online = true;
                     n.last_seen = now;
                     n.enabled
@@ -77,6 +79,7 @@ impl AppState {
                         lan_group: device.lan_group.clone(),
                         ext_file_ep: device.ext_file_ep.clone(),
                         platform: device.platform.clone(),
+                        hardware_id: device.hardware_id.clone(),
                         enabled: false,
                         online: true,
                         last_seen: now,
