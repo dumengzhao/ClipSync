@@ -31,15 +31,10 @@ pub fn start_file_server(
             return;
         }
     };
-    let host = ep
-        .rsplit_once(':')
-        .map(|(h, _)| h.to_string())
-        .unwrap_or_default();
-    let addr = if host.is_empty() {
-        format!("0.0.0.0:{port}")
-    } else {
-        format!("{host}:{port}")
-    };
+    // 本机监听所有接口（0.0.0.0）：`ext_file_ep` 中的 host 仅作为「对端连接本机」的对外
+    // 通告地址，不应用于本机 bind——否则填公网/域名地址时会 bind 到本机不存在的 IP 而失败
+    //（os error 10049），对端经该地址仍可达（经本机公网网卡/端口映射）。
+    let addr = format!("0.0.0.0:{port}");
 
     thread::spawn(move || {
         let server = match tiny_http::Server::http(&addr) {
