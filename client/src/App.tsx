@@ -444,9 +444,6 @@ export default function App() {
                           <span className="peer-id">{n.device_id}</span>
                           <div className="peer-action-row">
                             <span className="peer-addr">{n.ext_file_ep || '—'}</span>
-                            <span className="peer-meta">
-                              {[n.lan_group, n.platform].filter(Boolean).join(' · ') || '—'}
-                            </span>
                           </div>
                         </div>
                       </li>
