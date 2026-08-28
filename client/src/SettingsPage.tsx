@@ -420,17 +420,26 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
       </div>
       <div className="row">
         <label>对外文件地址（ip:{cfg.listen_port}[动态获取]）</label>
-        <input
-          type="text"
-          style={{ width: '200px' }}
-          placeholder="例如 1.2.3.4"
-          value={cfg.ext_file_ep ?? ''}
-          onChange={(e) => update('ext_file_ep', e.target.value)}
-          {...textSave('ext_file_ep')}
-        />
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flex: '0 0 auto' }}>
+          <input
+            type="text"
+            style={{ width: '200px' }}
+            placeholder="例如 1.2.3.4"
+            value={cfg.ext_file_ep ?? ''}
+            onChange={(e) => {
+              // 仅允许 IP/域名字符：遇到端口分隔符、空格或路径立即截断，确保输入框只填 IP
+              const ip = e.target.value
+                .split(/[:\s/]/)[0]
+                .replace(/[^0-9a-zA-Z.\-]/g, '');
+              update('ext_file_ep', ip);
+            }}
+            {...textSave('ext_file_ep')}
+          />
+          <span className="ext-ep-port">:{cfg.listen_port}</span>
+        </div>
       </div>
       <p className="hint">
-        只需填写本机对外可达的 IP（域名亦可），端口自动取上方监听端口 {cfg.listen_port}，无需填写；
+        输入框只填本机对外可达的 IP（域名亦可），右侧端口自动取监听端口，无需填写；
         对端将按「ip:{cfg.listen_port}」拉取文件。
       </p>
       <div className="row">
