@@ -152,12 +152,10 @@ pub fn run() {
                 }
             }
 
-            // 主窗口显隐：手动打开（无 --hidden）一律显示；自启（带 --hidden）时按
-            // 「自启后显示主窗口」配置决定（默认显示）。窗口默认 visible=false，需显式 show。
+            // 主窗口显隐：通用开关「启动后是否打开主窗口」(show_main_window_on_launch)
+            // 控制，自启与手动启动行为一致（默认显示）。窗口默认 visible=false，需显式 show。
             {
-                let is_autostart = std::env::args().any(|a| a == "--hidden");
-                let show_window = !is_autostart || persisted.show_main_window_on_launch;
-                if show_window {
+                if persisted.show_main_window_on_launch {
                     if let Some(window) = app.get_webview_window("main") {
                         let _ = window.show();
                     }
