@@ -11,6 +11,7 @@ import {
   pullFiles,
   getClipboardText,
   getServerNodes,
+  getServerStatus,
   listCrossLanOffers,
   pullCrossLan,
   type DiscoveredPeer,
@@ -60,6 +61,9 @@ export default function App() {
   const [refreshing, setRefreshing] = useState(false);
   // 服务端是否已将该设备移除（拉黑）：移除后停止重连并提示重新配对
   const [serverRemoved, setServerRemoved] = useState(false);
+  // 本机与服务端（跨 LAN 中继）连接状态：0 未连接 / 1 待审批 / 2 已启用（active）
+  // 服务端节点不逐节点下发在线状态，以本机连接状态作为在线代理
+  const [serverStatus, setServerStatus] = useState<number>(0);
   // 跨局域网已启用节点（来自服务端下发）
   const [serverNodes, setServerNodes] = useState<RemoteNode[]>([]);
   // 跨 LAN「待复制」文件清单
@@ -99,6 +103,7 @@ export default function App() {
     listPendingOffers().then(setPendingOffers).catch(() => {});
     // 跨局域网：挂载时回填服务端节点 / 待复制清单（连接状态由标题栏订阅 server-status 事件）
     getServerNodes().then(setServerNodes).catch(() => {});
+    getServerStatus().then(setServerStatus).catch(() => {});
     listCrossLanOffers().then(setCrossLanOffers).catch(() => {});
 
     // 对端拷贝文件后广播「待拉取」；本端点击拉取后收到开始/完成事件
@@ -216,6 +221,7 @@ export default function App() {
     // 跨局域网服务端事件
     // 跨局域网服务端连接状态（标题栏左侧展示）；本处仅需在重连成功时清除「被移除」提示
     const unlistenServerStatus = listen<number>('server-status', (e) => {
+      setServerStatus(e.payload);
       if (e.payload === 1 || e.payload === 2) setServerRemoved(false);
     });
     const unlistenServerRemoved = listen('server-removed', () =>
@@ -384,22 +390,26 @@ export default function App() {
               ) : (
                 <ul className="peer-list">
                   {paired.map((p) => {
-                    const isConnected = connected.has(p.id);
+                    const isOnline = connected.has(p.id);
                     return (
                       <li key={`p-${p.id}`} className="peer-item peer-unified">
-                        <span className="peer-type-icon wifi" title="局域网设备">
+                        <span className={`peer-type-icon wifi ${isOnline ? 'online' : 'offline'}`} title="局域网设备">
                           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                             <path d="M5 12.5a10 10 0 0 1 14 0" />
                             <path d="M8.5 16a5 5 0 0 1 7 0" />
                             <circle cx="12" cy="19" r="1" fill="currentColor" stroke="none" />
                           </svg>
+                          {!isOnline && <span className="icon-slash" />}
                         </span>
                         <div className="peer-main">
-                          <span className="peer-name">{p.name}</span>
+                          <div className="peer-name-row">
+                            <span className={`peer-dot ${isOnline ? 'on' : 'off'}`} />
+                            <span className="peer-name">{p.name}</span>
+                          </div>
                           <span className="peer-id">{p.id}</span>
                           <div className="peer-action-row">
                             <span className="peer-addr">
-                              {isConnected ? '已连接' : p.last_addr ? p.last_addr : '离线'}
+                              {isOnline ? '已连接' : p.last_addr ? p.last_addr : '离线'}
                             </span>
                             <button className="btn btn-ghost btn-sm" onClick={() => removePairing(p)}>
                               取消配对
@@ -409,25 +419,32 @@ export default function App() {
                       </li>
                     );
                   })}
-                  {serverNodes.map((n) => (
-                    <li key={`n-${n.device_id}`} className="peer-item peer-unified">
-                      <span className="peer-type-icon cloud" title="跨局域网设备（服务端）">
-                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          <path d="M17.5 19a4.5 4.5 0 0 0 0-9 6 6 0 0 0-11.6 1.5A3.5 3.5 0 0 0 6.5 19z" />
-                        </svg>
-                      </span>
-                      <div className="peer-main">
-                        <span className="peer-name">{n.name}</span>
-                        <span className="peer-id">{n.device_id}</span>
-                        <div className="peer-action-row">
-                          <span className="peer-addr">{n.ext_file_ep || '—'}</span>
-                          <span className="peer-meta">
-                            {[n.lan_group, n.platform].filter(Boolean).join(' · ') || '—'}
-                          </span>
+                  {serverNodes.map((n) => {
+                    const isOnline = serverStatus === 2;
+                    return (
+                      <li key={`n-${n.device_id}`} className="peer-item peer-unified">
+                        <span className={`peer-type-icon cloud ${isOnline ? 'online' : 'offline'}`} title="跨局域网设备（服务端）">
+                          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M17.5 19a4.5 4.5 0 0 0 0-9 6 6 0 0 0-11.6 1.5A3.5 3.5 0 0 0 6.5 19z" />
+                          </svg>
+                          {!isOnline && <span className="icon-slash" />}
+                        </span>
+                        <div className="peer-main">
+                          <div className="peer-name-row">
+                            <span className={`peer-dot ${isOnline ? 'on' : 'off'}`} />
+                            <span className="peer-name">{n.name}</span>
+                          </div>
+                          <span className="peer-id">{n.device_id}</span>
+                          <div className="peer-action-row">
+                            <span className="peer-addr">{n.ext_file_ep || '—'}</span>
+                            <span className="peer-meta">
+                              {[n.lan_group, n.platform].filter(Boolean).join(' · ') || '—'}
+                            </span>
+                          </div>
                         </div>
-                      </div>
-                    </li>
-                  ))}
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </section>
