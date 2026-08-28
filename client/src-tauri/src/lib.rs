@@ -20,7 +20,7 @@ pub mod update;
 
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
     Emitter, Listener, Manager, WindowEvent,
 };
 
@@ -337,27 +337,9 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
-            match event {
-                // 双击托盘图标：打开（或聚焦）主窗口
-                TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } => {
-                    show_main_window(tray.app_handle());
-                }
-                // 单击：已显示则隐藏，已隐藏则打开（保留原有切换行为）
-                TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                } => {
-                    let app = tray.app_handle();
-                    if let Some(w) = app.get_webview_window("main") {
-                        if w.is_visible().unwrap_or(false) {
-                            hide_main_window(&app);
-                        } else {
-                            show_main_window(&app);
-                        }
-                    }
-                }
-                _ => {}
+            // 双击托盘图标：打开（或聚焦）主窗口；单击不处理，避免误触隐藏/切换窗口
+            if let TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } = event {
+                show_main_window(tray.app_handle());
             }
         })
         .build(app)?;
