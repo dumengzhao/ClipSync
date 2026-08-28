@@ -552,6 +552,12 @@ impl ConnectionHub {
                         }),
                     );
                 }
+                // 需手动拉取的传输：弹出托盘小窗口供一键拉取（不抢焦点，置顶显示）
+                if !auto_pull {
+                    if let Some(app) = self.app.lock().unwrap().clone() {
+                        Self::show_pull_toast(&app);
+                    }
+                }
                 // 小于阈值的传输自动拉取：直接走与手动拉取相同的链路（写盘 + 写本机剪贴板）。
                 if auto_pull {
                     let hub = self.clone();
@@ -652,6 +658,25 @@ impl ConnectionHub {
 
     /// 接收方点击「拉取」：建立落盘任务、发拉取请求，分片到位后写入 `sync_dir`，
     /// 完成后自动把下载路径写进本机剪贴板（用户直接 Ctrl+V 即可粘贴）。
+    /// 收到需手动拉取的 Offer 时，把预声明的 pull-toast 小窗口定位到屏幕右下角并弹出。
+    /// 不抢焦点（conf 中 focus=false），由 alwaysOnTop 保证置顶可见。
+    fn show_pull_toast(app: &AppHandle) {
+        const WIN_W: i32 = 340;
+        const WIN_H: i32 = 200;
+        const MARGIN: i32 = 16;
+        const TASKBAR: i32 = 48;
+        let Some(w) = app.get_webview_window("pull-toast") else {
+            return;
+        };
+        if let Ok(Some(mon)) = app.primary_monitor() {
+            let s = mon.size();
+            let x = (s.width as i32) - WIN_W - MARGIN;
+            let y = (s.height as i32) - WIN_H - MARGIN - TASKBAR;
+            let _ = w.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x, y }));
+        }
+        let _ = w.show();
+    }
+
     pub async fn pull_files(self: Arc<Self>, transfer_id: String) {
         let offer = {
             let mut g = self.pending_offers.lock().unwrap();
@@ -740,6 +765,8 @@ impl ConnectionHub {
             use tokio::io::AsyncWriteExt;
             let mut written: u64 = 0;
             let mut received: Vec<PathBuf> = Vec::new();
+            let mut last_progress_at = std::time::Instant::now();
+            let mut last_progress_pct: u32 = 0;
             while let Some(chunk) = chunk_rx.recv().await {
                 let Some(payload) = chunk else { break; };
                 if payload.file_index < targets.len() {
@@ -758,6 +785,26 @@ impl ConnectionHub {
                                 received.push(path.clone());
                             }
                         }
+                    }
+                }
+                // 节流上报进度：每 ≥5% 或间隔 ≥200ms 至多 emit 一次，避免事件洪峰
+                let pct = (written * 100 / total.max(1)) as u32;
+                let now = std::time::Instant::now();
+                if pct.saturating_sub(last_progress_pct) >= 5
+                    || now.duration_since(last_progress_at) >= std::time::Duration::from_millis(200)
+                {
+                    last_progress_pct = pct;
+                    last_progress_at = now;
+                    if let Some(a) = &app {
+                        let _ = a.emit(
+                            "file-pull-progress",
+                            serde_json::json!({
+                                "transfer_id": tid,
+                                "received": written,
+                                "total": total,
+                                "percent": pct,
+                            }),
+                        );
                     }
                 }
             }
