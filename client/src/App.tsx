@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import {
   getConfig,
+  getDeviceId,
   getPairedDevices,
   listDiscoveredPeers,
   listConnectedPeers,
@@ -64,6 +65,8 @@ export default function App() {
   // 本机与服务端（跨 LAN 中继）连接状态：0 未连接 / 1 待审批 / 2 已启用（active）
   // 服务端节点不逐节点下发在线状态，以本机连接状态作为在线代理
   const [serverStatus, setServerStatus] = useState<number>(0);
+  // 本机 device_id：用于从服务端节点列表中过滤掉本机自身
+  const [myId, setMyId] = useState<string>('');
   // 跨局域网已启用节点（来自服务端下发）
   const [serverNodes, setServerNodes] = useState<RemoteNode[]>([]);
   // 跨 LAN「待复制」文件清单
@@ -104,6 +107,7 @@ export default function App() {
     // 跨局域网：挂载时回填服务端节点 / 待复制清单（连接状态由标题栏订阅 server-status 事件）
     getServerNodes().then(setServerNodes).catch(() => {});
     getServerStatus().then(setServerStatus).catch(() => {});
+    getDeviceId().then(setMyId).catch(() => {});
     listCrossLanOffers().then(setCrossLanOffers).catch(() => {});
 
     // 对端拷贝文件后广播「待拉取」；本端点击拉取后收到开始/完成事件
@@ -361,6 +365,9 @@ export default function App() {
   const pairedIds = new Set(paired.map((p) => p.id));
   // 已配对设备不重复出现在「发现」列表中
   const discoveredOnly = discovered.filter((p) => !pairedIds.has(p.device_id));
+  // 局域网（已配对）+ 本机：服务端节点若与之重复，则只显示局域网版本并过滤掉本机自身
+  const lanAndSelfIds = new Set<string>([...pairedIds, myId].filter(Boolean));
+  const visibleServerNodes = serverNodes.filter((n) => !lanAndSelfIds.has(n.device_id));
   // 用 ref 持有最新已配对集合，供下面 peer-discovered 监听在闭包内判断，
   // 避免挂载初期 paired 尚未加载完成时把已配对设备写进发现列表（竞态闪现）。
   const pairedRef = useRef<PairedDeviceInfo[]>([]);
@@ -385,7 +392,7 @@ export default function App() {
                   设备已被服务端移除（拉黑）。如需重新使用，请在设置中重新填写服务端地址并保存以重新配对。
                 </div>
               )}
-              {paired.length === 0 && serverNodes.length === 0 ? (
+              {paired.length === 0 && visibleServerNodes.length === 0 ? (
                 <p className="hint">还没有已配对设备或已连接的跨局域网设备</p>
               ) : (
                 <ul className="peer-list">
@@ -419,7 +426,7 @@ export default function App() {
                       </li>
                     );
                   })}
-                  {serverNodes.map((n) => {
+                  {visibleServerNodes.map((n) => {
                     const isOnline = serverStatus === 2;
                     return (
                       <li key={`n-${n.device_id}`} className="peer-item peer-unified">
