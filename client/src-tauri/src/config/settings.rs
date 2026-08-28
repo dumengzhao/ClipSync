@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 pub struct AppConfig {
     pub device_name: String,
     pub auto_start: bool,
+    /// 开机自启后是否显示主窗口（仅当 `auto_start` 为真时生效）。默认显示。
+    #[serde(default = "default_true")]
+    pub show_main_window_on_launch: bool,
     pub sync_text: bool,
     pub sync_image: bool,
     pub sync_file: bool,
@@ -79,6 +82,10 @@ fn default_max_folder_files() -> usize {
     100
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// 默认设备名取本机机器名（hostname），使不同设备默认即可区分。
 /// 取不到（或为空）时回退到固定占位名，避免空名称。
 pub fn default_device_name() -> String {
@@ -97,7 +104,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             device_name: default_device_name(),
-            auto_start: true,
+            auto_start: false,
             sync_text: true,
             sync_image: true,
             sync_file: true,
@@ -117,6 +124,7 @@ impl Default for AppConfig {
             network_token: String::new(),
             ext_file_ep: String::new(),
             lan_group: String::new(),
+            show_main_window_on_launch: true,
         }
     }
 }

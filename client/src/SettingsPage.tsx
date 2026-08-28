@@ -260,6 +260,26 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
           onChange={(e) => persist({ enable_mdns: e.target.checked })}
         />
       </div>
+
+      <div className="section">启动</div>
+      <div className="row">
+        <label>开机自启</label>
+        <input
+          type="checkbox"
+          checked={cfg.auto_start}
+          onChange={(e) => persist({ auto_start: e.target.checked })}
+        />
+      </div>
+      <div className="row">
+        <label>自启后显示主窗口</label>
+        <input
+          type="checkbox"
+          checked={cfg.auto_start && (cfg.show_main_window_on_launch ?? true)}
+          disabled={!cfg.auto_start}
+          onChange={(e) => persist({ show_main_window_on_launch: e.target.checked })}
+        />
+      </div>
+
       <div className="row">
         <label>配对码</label>
         <div style={{ display: 'flex', gap: '0.5rem', flex: '0 0 auto' }}>

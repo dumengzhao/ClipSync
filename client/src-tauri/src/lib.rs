@@ -24,6 +24,8 @@ use tauri::{
     Emitter, Listener, Manager, WindowEvent,
 };
 
+use tauri_plugin_autostart::ManagerExt;
+
 use crate::cache::file_cache::FileCache;
 use crate::config::AppConfig;
 use crate::device::identity::DeviceIdentity;
@@ -121,29 +123,45 @@ pub fn run() {
         }))
         .manage(AppState::new())
         .setup(|app| {
-            // 启动时显示主窗口（如果未隐藏）
-            if let Some(window) = app.get_webview_window("main") {
-                if std::env::args().nth(1).as_deref() != Some("--hidden") {
-                    window.show()?;
-                }
-            }
-
             build_tray(app)?;
 
             // 加载持久化配置（覆盖默认），使改过的端口等设置重启后仍生效
             let handle = app.handle().clone();
-            {
-                let mut persisted = crate::config::load_config(&handle);
+            let persisted = {
+                let mut cfg = crate::config::load_config(&handle);
                 // 配对码默认随机生成：若为空或仍是出厂默认值 "000000"，则生成一个新的
                 // 随机码并持久化，保证每台设备安装后都有独立配对码（无需用户手动设置）。
-                if persisted.pairing_code.trim().is_empty()
-                    || persisted.pairing_code.trim() == "000000"
-                {
-                    let new_code = crate::crypto::pake::generate_pairing_code();
-                    persisted.pairing_code = new_code;
-                    let _ = crate::config::save_config(&handle, &persisted);
+                if cfg.pairing_code.trim().is_empty() || cfg.pairing_code.trim() == "000000" {
+                    cfg.pairing_code = crate::crypto::pake::generate_pairing_code();
+                    let _ = crate::config::save_config(&handle, &cfg);
                 }
-                *app.state::<AppState>().config.lock() = persisted;
+                *app.state::<AppState>().config.lock() = cfg.clone();
+                cfg
+            };
+
+            // 对齐「开机自启」与系统自启条目：配置为开则注册、为关则移除，
+            // 使重启或状态漂移后自启行为与设置一致（用户在设置页切换也走 set_config 副作用）。
+            {
+                let mgr = app.autolaunch();
+                if let Err(e) = if persisted.auto_start {
+                    mgr.enable()
+                } else {
+                    mgr.disable()
+                } {
+                    tracing::warn!("autostart 状态对齐失败（不影响启动）: {e}");
+                }
+            }
+
+            // 主窗口显隐：手动打开（无 --hidden）一律显示；自启（带 --hidden）时按
+            // 「自启后显示主窗口」配置决定（默认显示）。窗口默认 visible=false，需显式 show。
+            {
+                let is_autostart = std::env::args().any(|a| a == "--hidden");
+                let show_window = !is_autostart || persisted.show_main_window_on_launch;
+                if show_window {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.show();
+                    }
+                }
             }
 
             // 同步「配对码」到连接中枢：作为 SPAKE2 应答方的常驻口令，
