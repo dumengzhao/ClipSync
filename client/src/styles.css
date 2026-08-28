@@ -355,16 +355,16 @@ body {
   color: #94a3b8;
 }
 
-/* 离线设备的类型图标上加斜杠：跨过图标中心的对角短线 */
+/* 离线设备的类型图标上加反斜杠：端点收进图标轮廓内，不超出 */
 .icon-slash {
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 19px;
+  width: 16px;
   height: 2px;
   background: currentColor;
   border-radius: 1px;
-  transform: translate(-50%, -50%) rotate(-45deg);
+  transform: translate(-50%, -50%) rotate(45deg);
   pointer-events: none;
 }
 
