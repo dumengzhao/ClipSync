@@ -266,6 +266,9 @@ impl AppState {
 
     pub fn broadcast_nodes_update(&self, net_id: &str) {
         let (dev_ids, msg) = {
+            // 向所有在线节点广播（含未激活/pending），与 Welcome 一致：
+            // pending 客户端本就通过 Welcome 看到 enabled 节点，这里让其也能实时刷新，
+            // 否则未激活设备只能在自己重连拿到 Welcome 时才更新，表现为「改了不实时、重启才拉到」。
             let nets = self.networks.lock().unwrap();
             let net = match nets.iter().find(|n| n.id == net_id) {
                 Some(n) => n,
@@ -274,7 +277,7 @@ impl AppState {
             let dev_ids: Vec<String> = net
                 .nodes
                 .iter()
-                .filter(|n| n.enabled && n.online)
+                .filter(|n| n.online)
                 .map(|n| n.device_id.clone())
                 .collect();
             let msg = ServerToClient::NodesUpdate {
