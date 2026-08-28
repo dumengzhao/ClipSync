@@ -271,7 +271,7 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         />
       </div>
       <div className="row">
-        <label>自启后显示主窗口</label>
+        <label>启动后是否打开主窗口</label>
         <input
           type="checkbox"
           checked={cfg.auto_start && (cfg.show_main_window_on_launch ?? true)}
