@@ -2,97 +2,302 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>ClipSync 管理后台</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>ClipSync 控制台</title>
 <style>
   :root{
-    --bg:#0f1320; --panel:#1a2030; --line:#2a3245; --text:#e6e9ef; --muted:#9aa4b8;
-    --accent:#5b8cff; --red:#ff6b6b; --green:#37c98b; --amber:#f0b429;
+    --bg:#04070f;
+    --panel:rgba(11,18,35,.78);
+    --line:rgba(56,189,248,.14);
+    --line-strong:rgba(56,189,248,.38);
+    --text:#d7e5f7;
+    --muted:#5d7191;
+    --cyan:#22d3ee;
+    --blue:#38bdf8;
+    --violet:#818cf8;
+    --green:#34d399;
+    --amber:#fbbf24;
+    --red:#f87171;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
   }
-  *{box-sizing:border-box}
-  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC",sans-serif;
-       background:var(--bg); color:var(--text); padding:24px;}
-  h1{font-size:20px;margin:0 0 16px}
-  h2{font-size:15px;margin:18px 0 8px;color:var(--muted)}
-  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
-  input{background:#0d111c;border:1px solid var(--line);color:var(--text);padding:9px 11px;border-radius:8px;font-size:14px;outline:none}
-  input:focus{border-color:var(--accent)}
-  button{background:var(--accent);color:#fff;border:none;padding:9px 14px;border-radius:8px;font-size:13px;cursor:pointer}
-  button.ghost{background:transparent;border:1px solid var(--line);color:var(--text)}
-  button.danger{background:var(--red)}
-  button.green{background:var(--green)}
-  button:disabled{opacity:.5;cursor:not-allowed}
-  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;padding:0}
+  body{
+    font-family:var(--sans);background:var(--bg);color:var(--text);
+    min-height:100vh;font-size:14px;line-height:1.5;
+  }
+  /* 深空网格 + 顶部光晕背景 */
+  body::before{
+    content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
+    background:
+      radial-gradient(ellipse 90% 55% at 50% -12%, rgba(56,189,248,.13), transparent 65%),
+      radial-gradient(ellipse 50% 40% at 90% 110%, rgba(129,140,248,.08), transparent 60%),
+      linear-gradient(rgba(56,189,248,.035) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(56,189,248,.035) 1px, transparent 1px);
+    background-size:100% 100%,100% 100%,44px 44px,44px 44px;
+  }
+  #login,#app{position:relative;z-index:1}
+
+  h1,h2,h3{margin:0;font-weight:600}
+  button{font-family:var(--sans);cursor:pointer;border:none;border-radius:8px;font-size:13px;padding:9px 16px;min-height:38px;
+    background:linear-gradient(135deg,#0ea5c9,#2563eb);color:#fff;letter-spacing:.03em;
+    box-shadow:0 0 14px rgba(34,211,238,.25), inset 0 1px 0 rgba(255,255,255,.15);
+    transition:box-shadow .15s,transform .1s;}
+  button:hover{box-shadow:0 0 22px rgba(34,211,238,.45), inset 0 1px 0 rgba(255,255,255,.2)}
+  button:active{transform:translateY(1px)}
+  button.ghost{background:transparent;border:1px solid var(--line-strong);color:var(--text);box-shadow:none}
+  button.ghost:hover{border-color:var(--cyan);color:var(--cyan);box-shadow:0 0 12px rgba(34,211,238,.18)}
+  button.danger{background:linear-gradient(135deg,#e11d48,#9f1239);box-shadow:0 0 14px rgba(248,113,113,.22)}
+  button.green{background:linear-gradient(135deg,#10b981,#047857);box-shadow:0 0 14px rgba(52,211,153,.22)}
+  button.sm{padding:6px 12px;min-height:32px;font-size:12px}
+  button:disabled{opacity:.45;cursor:not-allowed}
+
+  input{
+    background:rgba(4,9,20,.85);border:1px solid var(--line-strong);color:var(--text);
+    padding:10px 12px;border-radius:8px;font-size:16px;outline:none;font-family:var(--sans);
+    transition:border-color .15s, box-shadow .15s;}
+  input:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(34,211,238,.15)}
+  input::placeholder{color:var(--muted)}
+
+  /* ---------- 顶栏 ---------- */
+  .topbar{
+    display:flex;justify-content:space-between;align-items:center;
+    padding:14px 20px;border-bottom:1px solid var(--line);
+    background:rgba(4,7,15,.8);backdrop-filter:blur(14px);
+    position:sticky;top:0;z-index:10;}
+  .brand{font-family:var(--mono);font-size:15px;letter-spacing:.14em;color:var(--text)}
+  .brand b{color:var(--cyan);font-weight:700;text-shadow:0 0 12px rgba(34,211,238,.6)}
+  .brand em{font-style:normal;color:var(--muted);font-size:11px;letter-spacing:.28em;margin-left:8px}
+  .wrap{max-width:1080px;margin:0 auto;padding:20px 16px 60px}
+
+  /* ---------- HUD 面板（角标边框） ---------- */
+  .panel{
+    position:relative;background:var(--panel);border:1px solid var(--line);
+    border-radius:14px;padding:18px;margin-bottom:16px;backdrop-filter:blur(12px);}
+  .panel::before,.panel::after{content:'';position:absolute;width:14px;height:14px;opacity:.8;pointer-events:none}
+  .panel::before{top:-1px;left:-1px;border-top:2px solid var(--cyan);border-left:2px solid var(--cyan);border-top-left-radius:13px}
+  .panel::after{bottom:-1px;right:-1px;border-bottom:2px solid var(--cyan);border-right:2px solid var(--cyan);border-bottom-right-radius:13px}
+  .panel-title{
+    font-family:var(--mono);font-size:12px;letter-spacing:.22em;color:var(--muted);
+    text-transform:uppercase;margin-bottom:14px;display:flex;align-items:center;gap:10px;}
+  .panel-title::after{content:'';flex:1;height:1px;background:linear-gradient(90deg,var(--line-strong),transparent)}
+  .panel-title .n{color:var(--cyan);letter-spacing:.05em}
+
+  /* ---------- 登录 ---------- */
+  #login{display:none;max-width:380px;margin:0 auto;padding:12vh 16px 0}
+  #login .logo{text-align:center;margin-bottom:26px}
+  #login .logo .mark{
+    width:56px;height:56px;margin:0 auto 14px;border-radius:14px;
+    background:linear-gradient(135deg,rgba(34,211,238,.2),rgba(37,99,235,.25));
+    border:1px solid var(--line-strong);display:flex;align-items:center;justify-content:center;
+    font-family:var(--mono);font-size:22px;color:var(--cyan);
+    box-shadow:0 0 30px rgba(34,211,238,.3);animation:logoPulse 3s ease-in-out infinite;}
+  @keyframes logoPulse{50%{box-shadow:0 0 46px rgba(34,211,238,.55)}}
+  #login h1{font-family:var(--mono);font-size:18px;letter-spacing:.2em;text-align:center}
+  #login h1 b{color:var(--cyan)}
+  #login .sub{text-align:center;color:var(--muted);font-size:11px;letter-spacing:.3em;margin-top:6px;font-family:var(--mono)}
+  #login form{display:flex;flex-direction:column;gap:12px;margin-top:22px}
+  #loginErr{color:var(--red);font-size:12px;text-align:center;min-height:16px}
+
+  /* ---------- 网络列表（主页） ---------- */
+  .section-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;gap:10px;flex-wrap:wrap}
+  .section-head h2{font-size:17px;letter-spacing:.06em}
+  .section-head h2 .cnt{font-family:var(--mono);font-size:12px;color:var(--cyan);margin-left:8px}
+  .net-grid{display:grid;gap:12px}
+  .net-card{
+    display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px 20px;
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:16px 18px;cursor:pointer;backdrop-filter:blur(10px);
+    transition:border-color .15s, box-shadow .15s, transform .12s;}
+  .net-card:hover{border-color:var(--line-strong);box-shadow:0 0 26px rgba(34,211,238,.14);transform:translateY(-2px)}
+  .net-card:active{transform:translateY(0)}
+  .net-name{font-size:15px;font-weight:600;display:flex;align-items:center;gap:9px;min-width:0}
+  .net-name .arrow{color:var(--muted);font-family:var(--mono);transition:color .15s,transform .15s}
+  .net-card:hover .arrow{color:var(--cyan);transform:translateX(3px)}
+  .net-name span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .net-stats{display:flex;gap:26px;align-items:center}
+  .stat{text-align:right}
+  .stat .num{font-family:var(--mono);font-size:19px;font-weight:600;color:var(--cyan);line-height:1.2;text-shadow:0 0 14px rgba(34,211,238,.35)}
+  .stat .num.dim{color:var(--muted);text-shadow:none}
+  .stat .num.on{color:var(--green);text-shadow:0 0 14px rgba(52,211,153,.35)}
+  .stat .lbl{font-size:10px;color:var(--muted);letter-spacing:.12em}
+  .net-created{grid-column:1 / -1;font-size:11px;color:var(--muted);font-family:var(--mono);letter-spacing:.04em}
+  .empty{color:var(--muted);text-align:center;padding:34px 0;font-size:13px}
+
+  /* ---------- 创建网络 ---------- */
+  #newNetPanel{margin-bottom:16px}
+  .form-row{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
+  .form-row .fld{display:flex;flex-direction:column;gap:5px;flex:1;min-width:160px}
+  .form-row .fld label{font-size:11px;color:var(--muted);letter-spacing:.1em}
+  .token-box{
+    margin-top:14px;background:rgba(4,9,20,.9);border:1px dashed var(--line-strong);
+    border-radius:10px;padding:12px;word-break:break-all;font-family:var(--mono);font-size:12px;color:var(--cyan)}
+  .hint{color:var(--muted);font-size:12px;margin-top:8px}
+
+  /* ---------- 明细页 ---------- */
+  .back-btn{margin-bottom:14px;font-family:var(--mono);letter-spacing:.08em}
+  .meta-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+  .meta-head h2{font-size:19px;letter-spacing:.03em;word-break:break-all}
+  .meta-desc{color:var(--muted);font-size:13px;margin-top:6px;word-break:break-all}
+  /* PC：ID / Created / Token 三列水平摆放，竖线分隔；Token 列更宽 */
+  .meta-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) minmax(0,1.7fr);gap:0;margin-top:16px}
+  .meta-item{padding:0 18px;border-left:1px solid var(--line);min-width:0}
+  .meta-item:first-child{padding-left:0;border-left:none}
+  .meta-item:last-child{padding-right:0}
+  .meta-item .k{font-size:10px;color:var(--muted);letter-spacing:.16em;font-family:var(--mono);text-transform:uppercase;margin-bottom:5px}
+  .meta-item .v{font-family:var(--mono);font-size:13px;word-break:break-all}
+  .tok{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .tok-val{
+    background:rgba(4,9,20,.9);border:1px solid var(--line);border-radius:6px;
+    padding:5px 10px;font-family:var(--mono);font-size:12px;color:var(--cyan);
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
+
+  /* ---------- 节点 / 黑名单表格 ---------- */
   table{width:100%;border-collapse:collapse;font-size:13px}
-  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
-  th{color:var(--muted);font-weight:500}
-  .tag{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px}
-  .tag.on{background:rgba(55,201,139,.18);color:var(--green)}
-  .tag.off{background:rgba(240,180,41,.18);color:var(--amber)}
-  .tag.offline{background:rgba(154,164,184,.18);color:var(--muted)}
-  #login{display:none;max-width:360px;margin:60px auto}
-  #app{display:none}
-  .muted{color:var(--muted);font-size:12px}
-  .token-box{background:#0d111c;border:1px dashed var(--accent);border-radius:8px;padding:10px;margin-top:8px;word-break:break-all;font-family:monospace}
-  .tok{display:flex;gap:6px;align-items:center}
-  .tok-val{background:#0d111c;border:1px solid var(--line);border-radius:6px;padding:3px 8px;font-size:12px;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .tokbtn{padding:5px 9px;font-size:12px}
-  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#000d;padding:10px 16px;border-radius:8px;display:none}
-  .hidden{display:none}
-  .dev-name{font-weight:600;font-size:14px;line-height:1.3}
-  .uid{font-family:monospace;font-size:11px;color:var(--muted);background:#0d111c;border:1px solid var(--line);border-radius:5px;padding:2px 6px;display:inline-block;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .small{font-size:12px}
+  th,td{text-align:left;padding:11px 12px;border-bottom:1px solid var(--line);vertical-align:middle}
+  th{color:var(--muted);font-weight:500;font-size:11px;letter-spacing:.14em;font-family:var(--mono);text-transform:uppercase}
+  tbody tr{transition:background .12s}
+  tbody tr:hover{background:rgba(56,189,248,.05)}
+  tbody tr:last-child td{border-bottom:none}
+  .dev-name{font-weight:600;font-size:14px}
+  .dev-os{color:var(--muted);font-size:11px;margin-top:2px;font-family:var(--mono)}
+  .uid{
+    font-family:var(--mono);font-size:11px;color:var(--muted);
+    background:rgba(4,9,20,.85);border:1px solid var(--line);border-radius:5px;
+    padding:3px 7px;display:inline-block;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tag{display:inline-flex;align-items:center;gap:7px;padding:4px 11px;border-radius:999px;font-size:12px;white-space:nowrap}
+  .tag::before{content:'';width:7px;height:7px;border-radius:50%;background:currentColor}
+  .tag.on{background:rgba(52,211,153,.12);color:var(--green)}
+  .tag.on::before{box-shadow:0 0 8px var(--green);animation:pulse 2.2s ease-in-out infinite}
+  .tag.off{background:rgba(251,191,36,.12);color:var(--amber)}
+  .tag.offline{background:rgba(93,113,145,.14);color:var(--muted)}
+  @keyframes pulse{50%{opacity:.4}}
+  .ops{display:flex;gap:8px;flex-wrap:wrap}
+  .mono{font-family:var(--mono);font-size:12px;color:var(--muted)}
+
+  .toast{
+    position:fixed;bottom:calc(20px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);
+    background:rgba(4,9,20,.95);border:1px solid var(--line-strong);color:var(--cyan);
+    padding:11px 20px;border-radius:10px;display:none;z-index:99;font-size:13px;
+    box-shadow:0 0 24px rgba(34,211,238,.25);font-family:var(--mono);letter-spacing:.04em}
+  .hidden{display:none !important}
+
+  /* ---------- 移动端 ≤768px ---------- */
+  @media (max-width:768px){
+    .wrap{padding:14px 12px 48px}
+    .topbar{padding:12px 14px}
+    .brand em{display:none}
+    .panel{padding:15px 14px;border-radius:12px}
+    .net-card{grid-template-columns:1fr;padding:15px}
+    .net-stats{gap:0;justify-content:space-between;border-top:1px solid var(--line);padding-top:12px;margin-top:4px}
+    .stat{text-align:left}
+    .stat .num{font-size:17px}
+    /* 表格 → 卡片：每行一张卡，字段带标签 */
+    table.resp, table.resp thead, table.resp tbody, table.resp tr, table.resp td{display:block;width:100%}
+    table.resp thead{display:none}
+    table.resp tr{
+      background:rgba(4,9,20,.5);border:1px solid var(--line);border-radius:10px;
+      margin-bottom:12px;padding:6px 4px;}
+    table.resp td{border-bottom:none;padding:7px 12px;display:flex;justify-content:space-between;align-items:center;gap:14px}
+    table.resp td::before{
+      content:attr(data-label);color:var(--muted);font-size:10px;letter-spacing:.14em;
+      font-family:var(--mono);text-transform:uppercase;flex-shrink:0}
+    table.resp td > *{min-width:0}
+    .ops{justify-content:flex-end}
+    .ops button{flex:1;max-width:140px}
+    .uid{max-width:180px}
+    /* 手机：垂直堆叠，分隔线由竖转横 */
+    .meta-grid{grid-template-columns:1fr;gap:0}
+    .meta-item{padding:14px 0 0;border-left:none;border-top:1px solid var(--line)}
+    .meta-item:first-child{padding-top:0;border-top:none}
+  }
 </style>
 </head>
 <body>
-  <!-- 登录 -->
+  <!-- ============ 登录 ============ -->
   <div id="login">
-    <h1>ClipSync 管理后台</h1>
+    <div class="logo">
+      <div class="mark">⇄</div>
+      <h1>CLIP<b>SYNC</b></h1>
+      <div class="sub">CONTROL CONSOLE</div>
+    </div>
     <div class="panel">
-      <div class="row" style="flex-direction:column;align-items:stretch">
-        <input id="u" placeholder="用户名" style="margin-bottom:8px"/>
-        <input id="p" type="password" placeholder="密码" style="margin-bottom:12px"/>
-        <button id="loginBtn">登录</button>
-      </div>
-      <div id="loginErr" class="muted" style="color:var(--red);margin-top:8px"></div>
+      <form id="loginForm">
+        <input id="u" placeholder="用户名" autocomplete="username" />
+        <input id="p" type="password" placeholder="密码" autocomplete="current-password" />
+        <button type="submit" id="loginBtn">接 入</button>
+        <div id="loginErr"></div>
+      </form>
     </div>
   </div>
 
-  <!-- 主界面 -->
-  <div id="app">
-    <div class="row" style="justify-content:space-between">
-      <h1>ClipSync 管理后台</h1>
-      <div class="row">
-        <button class="ghost" id="logout">退出登录</button>
-      </div>
-    </div>
+  <!-- ============ 主界面 ============ -->
+  <div id="app" style="display:none">
+    <header class="topbar">
+      <div class="brand">CLIP<b>SYNC</b><em>CONTROL</em></div>
+      <button class="ghost sm" id="logout">退出</button>
+    </header>
+    <div class="wrap">
 
-    <div class="panel">
-      <div class="row" style="justify-content:space-between">
-        <h2 style="margin:0">网络</h2>
-        <button id="newNet">+ 创建网络</button>
-      </div>
-      <div id="netList" class="muted" style="margin-top:8px">加载中…</div>
-      <div id="newNetPanel" class="hidden" style="margin-top:12px">
-        <div class="row" style="align-items:flex-end">
-          <div><div class="muted" style="margin-bottom:4px">名称</div><input id="netName" placeholder="如 My Network"/></div>
-          <div><div class="muted" style="margin-bottom:4px">描述（可选）</div><input id="netDesc" placeholder=""/></div>
-          <button id="createNet">创建</button>
+      <!-- ===== 视图 1：网络列表 ===== -->
+      <section id="viewList">
+        <div class="section-head">
+          <h2>网络<span class="cnt" id="netCount"></span></h2>
+          <button class="sm" id="newNet">+ 创建网络</button>
         </div>
-        <div id="newToken" class="token-box hidden"></div>
-        <div class="muted">⚠️ Token 已持久化保存，可在下方网络列表中随时 👁 查看并 📋 复制。</div>
-      </div>
-    </div>
 
-    <div class="panel" id="devPanel" style="display:none">
-      <h2 id="devTitle">设备</h2>
-      <div id="devList" class="muted">加载中…</div>
-    </div>
+        <div class="panel hidden" id="newNetPanel">
+          <div class="panel-title">NEW NETWORK</div>
+          <div class="form-row">
+            <div class="fld"><label>名称</label><input id="netName" placeholder="如 My Network"/></div>
+            <div class="fld"><label>描述（可选）</label><input id="netDesc" placeholder=""/></div>
+            <button id="createNet">创建</button>
+          </div>
+          <div id="newToken" class="token-box hidden"></div>
+          <div class="hint">⚠ Token 已持久化保存，可在网络明细页随时查看并复制。</div>
+        </div>
 
-    <div class="panel" id="removedPanel" style="display:none">
-      <h2>已移除设备（黑名单）</h2>
-      <div class="muted" style="margin-bottom:6px">这些设备被永久拒绝入网；点「恢复」后可重新配对。</div>
-      <div id="removedList" class="muted">加载中…</div>
+        <div id="netList" class="net-grid"></div>
+      </section>
+
+      <!-- ===== 视图 2：网络明细 ===== -->
+      <section id="viewDetail" class="hidden">
+        <button class="ghost sm back-btn" id="backBtn">‹ 网络列表</button>
+
+        <div class="panel">
+          <div class="meta-head">
+            <div style="min-width:0">
+              <h2 id="dName"></h2>
+              <div class="meta-desc" id="dDesc"></div>
+            </div>
+            <button class="ghost sm" id="renameBtn">重命名</button>
+          </div>
+          <div class="meta-grid">
+            <div class="meta-item"><div class="k">Network ID</div><div class="v" id="dId"></div></div>
+            <div class="meta-item"><div class="k">Created</div><div class="v" id="dCreated"></div></div>
+            <div class="meta-item"><div class="k">Access Token</div>
+              <div class="tok">
+                <code id="tok-val" class="tok-val" data-token="">••••••••••••••••</code>
+                <button class="ghost sm" id="tokEye">显示</button>
+                <button class="ghost sm hidden" id="tokCopy">复制</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title">NODES <span class="n" id="nodeCount"></span></div>
+          <div id="devList" class="empty">加载中…</div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title">BLOCKED <span class="n" id="removedCount"></span></div>
+          <div class="hint" style="margin:0 0 10px">已移除设备被永久拒绝入网；「恢复」后可重新配对。</div>
+          <div id="removedList" class="empty">加载中…</div>
+        </div>
+      </section>
+
     </div>
   </div>
 
@@ -101,11 +306,13 @@
 <script>
 const $ = (s)=>document.querySelector(s);
 let token = localStorage.getItem('cs_admin_token') || '';
-let currentNet = null;
-let _netAutoExpanded = false; // 仅首次加载网络列表时默认展开第一个网络的设备列表
+let currentNet = null;          // 当前明细页网络 id
+let _netCache = [];             // 网络列表缓存（明细页取 name/token/desc 用）
+let _devWs = null;              // 明细页实时刷新 WebSocket
 
 function toast(msg){const t=$('#toast');t.textContent=msg;t.style.display='block';setTimeout(()=>t.style.display='none',2500);}
 function authHeaders(){return {'Content-Type':'application/json','Authorization':'Bearer '+token};}
+function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 
 async function api(path, opts={}){
   const res = await fetch(path, Object.assign({headers:authHeaders()}, opts));
@@ -115,137 +322,131 @@ async function api(path, opts={}){
   return data;
 }
 
+/* ================= 路由 ================= */
+function route(){
+  const m = location.hash.match(/^#\/net\/([^/]+)$/);
+  if(m){ openDetail(decodeURIComponent(m[1])); }
+  else { openList(); }
+}
+window.addEventListener('hashchange', route);
+
+function showView(name){
+  $('#viewList').classList.toggle('hidden', name!=='list');
+  $('#viewDetail').classList.toggle('hidden', name!=='detail');
+  window.scrollTo(0,0);
+}
+
+/* ================= 视图 1：网络列表 ================= */
 async function loadNetworks(){
   const {networks} = await api('/api/admin/networks');
+  _netCache = networks || [];
+  renderNetList();
+  // 若正在明细页，同步刷新该网络元信息（重命名/创建后立即反映）
+  if(currentNet){ renderNetMeta(currentNet); }
+}
+
+function renderNetList(){
   const box = $('#netList');
-  if(!networks.length){ box.innerHTML='<span class="muted">暂无网络，请创建。</span>'; return; }
-  let html='<table><thead><tr><th>名称</th><th>节点</th><th>已启用</th><th>Token</th><th>创建</th><th></th></tr></thead><tbody>';
-  for(const n of networks){
-    const tok = n.token || '';
-    const tokCell = tok
-      ? `<div class="tok"><code id="tok-${n.id}" class="tok-val" data-token="${esc(tok)}">••••••••••••••••</code>`+
-        `<button class="ghost tokbtn" title="显示/隐藏" onclick="toggleTok('${n.id}')">👁</button>`+
-        `<button class="ghost tokbtn hidden" id="copy-${n.id}" onclick="copyFrom('tok-${n.id}')">📋 复制</button></div>`
-      : '<span class="muted">（旧网络无 Token，请重新创建）</span>';
-    html+=`<tr id="netrow-${n.id}"><td id="netname-${n.id}">${esc(n.name)}</td><td>${n.node_count}</td><td>${n.enabled_count}</td><td>${tokCell}</td><td class="muted">${new Date(n.created*1000).toLocaleDateString()}</td><td><button class="ghost" onclick="showDevices('${n.id}','${esc(n.name)}')">查看设备</button> <button class="ghost" onclick="startRename('${n.id}')">重命名</button></td></tr>`;
-  }
-  html+='</tbody></table>';
-  box.innerHTML=html;
-  // 默认展开第一个网络的设备列表（仅首次加载时自动展开，避免创建网络后覆盖当前查看）
-  if(!_netAutoExpanded && networks.length){
-    _netAutoExpanded = true;
-    showDevices(networks[0].id, networks[0].name);
-  }
+  $('#netCount').textContent = _netCache.length ? '['+_netCache.length+']' : '';
+  if(!_netCache.length){ box.innerHTML='<div class="empty">暂无网络，点击「+ 创建网络」开始。</div>'; return; }
+  box.innerHTML = _netCache.map(n=>`
+    <div class="net-card" onclick="location.hash='#/net/${encodeURIComponent(n.id)}'">
+      <div class="net-name"><span>${esc(n.name)}</span><span class="arrow">›</span></div>
+      <div class="net-stats">
+        <div class="stat"><div class="num">${n.node_count}</div><div class="lbl">节点</div></div>
+        <div class="stat"><div class="num ${n.enabled_count>0?'on':'dim'}">${n.enabled_count}</div><div class="lbl">已启用</div></div>
+        <div class="stat"><div class="num dim" style="font-size:13px">${new Date(n.created*1000).toLocaleDateString()}</div><div class="lbl">创建</div></div>
+      </div>
+    </div>`).join('');
 }
 
-function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
-
-// 网络重命名：行内编辑，保存后刷新列表
-async function startRename(netId){
-  const td = document.getElementById('netname-'+netId);
-  if(!td) return;
-  const cur = td.textContent;
-  td.innerHTML = `<input id="rn-${netId}" value="${esc(cur)}" style="width:120px"> <button class="ghost" onclick="doRename('${netId}')">保存</button> <button class="ghost" onclick="loadNetworks()">取消</button>`;
-  const inp = document.getElementById('rn-'+netId);
-  if(inp){ inp.focus(); inp.select(); }
-}
-async function doRename(netId){
-  const inp = document.getElementById('rn-'+netId);
-  if(!inp) return;
-  const v = inp.value.trim();
-  if(!v){ toast('名称不能为空'); return; }
-  try{
-    const r = await api(`/api/admin/networks/${netId}/rename`, {method:'POST', body: JSON.stringify({name:v})});
-    if(r && r.error){ toast('失败: '+r.error); return; }
-    toast('已重命名');
-    loadNetworks();
-  }catch(e){ toast('失败: '+e.message); }
+function openList(){
+  currentNet = null;
+  closeDevWs();
+  showView('list');
+  loadNetworks().catch(()=>{});
 }
 
-// Token 眼睛：默认星号，点一下显示明文并露出复制按钮，再点隐藏
-function toggleTok(id){
-  const el=document.getElementById('tok-'+id);
-  const copy=document.getElementById('copy-'+id);
-  if(!el) return;
-  if(el.dataset.shown==='1'){
-    el.textContent='••••••••••••••••';
-    el.dataset.shown='0';
-    if(copy) copy.classList.add('hidden');
+/* ================= 视图 2：网络明细 ================= */
+function renderNetMeta(netId){
+  const n = _netCache.find(x=>x.id===netId);
+  if(!n) return;
+  $('#dName').textContent = n.name;
+  $('#dDesc').textContent = n.description || '';
+  $('#dId').textContent = n.id;
+  $('#dCreated').textContent = new Date(n.created*1000).toLocaleString();
+  const tokEl = $('#tok-val');
+  if(n.token){
+    tokEl.dataset.token = n.token;
+    if(tokEl.dataset.shown==='1'){ tokEl.textContent = n.token; }
+    $('#tokEye').style.display='';
   }else{
-    el.textContent=el.dataset.token||el.textContent;
-    el.dataset.shown='1';
-    if(copy) copy.classList.remove('hidden');
-  }
-}
-// 复制按钮：从元素的 data-token 取明文复制（优先），失败回退 execCommand
-async function copyFrom(elId){
-  const el=document.getElementById(elId);
-  if(!el) return;
-  const t=el.dataset.token||el.textContent;
-  try{
-    await navigator.clipboard.writeText(t);
-    toast('Token 已复制到剪贴板');
-  }catch(e){
-    try{
-      const ta=document.createElement('textarea'); ta.value=t; document.body.appendChild(ta); ta.select();
-      document.execCommand('copy'); ta.remove(); toast('Token 已复制到剪贴板');
-    }catch(_){ toast('复制失败，请手动选择复制'); }
+    tokEl.dataset.token = '';
+    tokEl.textContent = '（旧网络无 Token，请重新创建）';
+    $('#tokEye').style.display='none';
+    $('#tokCopy').classList.add('hidden');
   }
 }
 
+async function openDetail(netId){
+  currentNet = netId;
+  closeDevWs();
+  showView('detail');
+  // 确保有网络元信息（直接以 hash 进入时缓存可能为空）
+  if(!_netCache.find(x=>x.id===netId)){
+    try{ await loadNetworks(); }catch(e){}
+  }
+  renderNetMeta(netId);
+  await loadDevicesHttp(netId);
+  openDevWs(netId);
+  loadRemoved(netId);
+}
+
+/* ================= 节点列表 ================= */
 function osLabel(p){
   return ({windows:'Windows',macos:'macOS',linux:'Linux',android:'Android',ios:'iOS'})[(p||'').toLowerCase()] || p || '未知';
 }
 
-let _devWs=null;          // 当前管理后台实时刷新 WebSocket
-
-function closeDevWs(){
-  if(_devWs){ try{ _devWs.close(); }catch(e){} _devWs=null; }
-}
-
-// 仅靠 HTTP 重新拉取一次设备列表（操作后兜底 / WS 不可用时使用）
-function refreshDevicesNow(){
-  if(!currentNet) return;
-  loadDevicesHttp(currentNet);
-}
-
 function renderDevices(nodes){
   const box=$('#devList');
-  if(!nodes || !nodes.length){ box.innerHTML='<span class="muted">暂无设备连接。客户端填入 Token 后会以「未启用」出现在此。</span>'; return; }
-  // 在线优先、再按名称排序，便于一眼看清谁在线
+  $('#nodeCount').textContent = nodes && nodes.length ? '['+nodes.length+']' : '[0]';
+  if(!nodes || !nodes.length){
+    box.innerHTML='<div class="empty">暂无设备连接。客户端填入 Token 后会以「未启用」出现在此。</div>'; return;
+  }
   nodes.sort((a,b)=> (b.online?1:0)-(a.online?1:0) || (a.name||'').localeCompare(b.name||''));
-  let html='<table><thead><tr><th>设备信息</th><th>设备ID</th><th>LAN 分组</th><th>文件地址</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+  let html='<table class="resp"><thead><tr><th>设备</th><th>设备ID</th><th>LAN 分组</th><th>文件地址</th><th>状态</th><th>操作</th></tr></thead><tbody>';
   for(const d of nodes){
-    const uid = d.hardware_id || d.device_id; // 硬件指纹优先，回退软件 UUID
+    const uid = d.hardware_id || d.device_id;
     const osTxt = [osLabel(d.platform), d.os_version].filter(Boolean).join(' ');
-    const status = !d.online ? '<span class="tag offline">● 离线</span>'
-      : (d.enabled ? '<span class="tag on">● 在线 · 已启用</span>' : '<span class="tag off">● 在线 · 未启用</span>');
+    const status = !d.online ? '<span class="tag offline">离线</span>'
+      : (d.enabled ? '<span class="tag on">在线 · 已启用</span>' : '<span class="tag off">在线 · 未启用</span>');
     const btn = d.enabled
-      ? `<button class="danger" onclick="setEnabled('${currentNet}','${d.device_id}',false)">禁用</button>`
-      : `<button class="green" onclick="setEnabled('${currentNet}','${d.device_id}',true)">启用</button>`;
-    const delBtn = `<button class="ghost" title="从网络移除该设备" onclick="removeDevice('${currentNet}','${d.device_id}')">删除</button>`;
+      ? `<button class="danger sm" onclick="setEnabled('${currentNet}','${d.device_id}',false)">禁用</button>`
+      : `<button class="green sm" onclick="setEnabled('${currentNet}','${d.device_id}',true)">启用</button>`;
     html+=`<tr>
-      <td><div class="dev-name">🖥 ${esc(d.name||'(未命名)')}</div><div class="muted small">${esc(osTxt)}</div></td>
-      <td><code class="uid" title="设备唯一标识（硬件指纹优先）">${esc(uid)}</code></td>
-      <td>${esc(d.lan_group)||'-'}</td>
-      <td class="muted">${esc(d.ext_file_ep)||'-'}</td>
-      <td>${status}</td>
-      <td>${btn} ${delBtn}</td>
+      <td data-label="设备"><div><div class="dev-name">🖥 ${esc(d.name||'(未命名)')}</div><div class="dev-os">${esc(osTxt)}</div></div></td>
+      <td data-label="设备ID"><code class="uid" title="${esc(uid)}">${esc(uid)}</code></td>
+      <td data-label="LAN 分组"><span class="mono">${esc(d.lan_group)||'-'}</span></td>
+      <td data-label="文件地址"><span class="mono">${esc(d.ext_file_ep)||'-'}</span></td>
+      <td data-label="状态">${status}</td>
+      <td data-label="操作"><div class="ops">${btn}<button class="ghost sm" onclick="removeDevice('${currentNet}','${d.device_id}')">删除</button></div></td>
     </tr>`;
   }
   html+='</tbody></table>';
   box.innerHTML=html;
 }
 
-// 初载：先 HTTP 拉一次（WS 建立前即有内容），随后由 WS 推送实时刷新
 async function loadDevicesHttp(netId){
   try{
     const {nodes} = await api('/api/admin/networks/'+netId+'/devices');
-    renderDevices(nodes);
+    if(currentNet===netId) renderDevices(nodes);
   }catch(e){ /* 401 已在 api() 内统一处理 */ }
 }
 
-// 打开实时刷新 WebSocket：服务端在节点状态变化（连接/启用/禁用/移除）时主动推送完整列表
+function closeDevWs(){
+  if(_devWs){ try{ _devWs.close(); }catch(e){} _devWs=null; }
+}
+
 function openDevWs(netId){
   closeDevWs();
   const proto = location.protocol==='https:' ? 'wss' : 'ws';
@@ -255,40 +456,32 @@ function openDevWs(netId){
     ws.onmessage = (ev)=>{
       try{
         const msg = JSON.parse(ev.data);
-        if(msg && msg.type==='nodes' && Array.isArray(msg.nodes)){ renderDevices(msg.nodes); }
+        if(msg && msg.type==='nodes' && Array.isArray(msg.nodes) && currentNet===netId){ renderDevices(msg.nodes); }
       }catch(_){}
     };
-    ws.onclose = ()=>{ /* 切换网络/登出时由 closeDevWs 主动关闭；此处不自动重连以免堆积 */ };
     _devWs = ws;
   }catch(e){ /* 浏览器不支持 WS：仅保留 HTTP 初始加载 */ }
 }
 
-async function showDevices(netId, name){
-  currentNet = netId;
-  $('#devPanel').style.display='block';
-  $('#devTitle').textContent='设备 · '+name;
-  await loadDevicesHttp(netId);
-  openDevWs(netId);
-  $('#removedPanel').style.display='block';
-  loadRemoved(netId);
-}
-
-// 加载并渲染当前网络的黑名单（已移除设备）
+/* ================= 黑名单 ================= */
 async function loadRemoved(netId){
   const box=$('#removedList');
   try{
     const {removed} = await api(`/api/admin/networks/${netId}/removed`);
-    if(!removed || !removed.length){ box.innerHTML='<span class="muted">（无）</span>'; return; }
-    let html='<table><thead><tr><th>设备名</th><th>设备 ID</th><th></th></tr></thead><tbody>';
+    $('#removedCount').textContent = removed && removed.length ? '['+removed.length+']' : '[0]';
+    if(!removed || !removed.length){ box.innerHTML='<div class="empty">（无）</div>'; return; }
+    let html='<table class="resp"><thead><tr><th>设备名</th><th>设备 ID</th><th>操作</th></tr></thead><tbody>';
     for(const r of removed){
-      html+=`<tr><td>${esc(r.name||'(未知)')}</td><td><code class="uid">${esc(r.device_id)}</code></td>`+
-        `<td><button class="ghost" onclick="restoreDevice('${netId}','${r.device_id}')">恢复</button></td></tr>`;
+      html+=`<tr><td data-label="设备名">${esc(r.name||'(未知)')}</td>`+
+        `<td data-label="设备 ID"><code class="uid">${esc(r.device_id)}</code></td>`+
+        `<td data-label="操作"><div class="ops"><button class="ghost sm" onclick="restoreDevice('${netId}','${r.device_id}')">恢复</button></div></td></tr>`;
     }
     html+='</tbody></table>';
     box.innerHTML=html;
-  }catch(e){ box.innerHTML='<span class="muted">加载失败: '+esc(e.message)+'</span>'; }
+  }catch(e){ box.innerHTML='<div class="empty">加载失败: '+esc(e.message)+'</div>'; }
 }
 
+/* ================= 操作 ================= */
 async function restoreDevice(netId, devId){
   if(!confirm('确定恢复该设备？恢复后该设备可重新配对并入网。')) return;
   try{
@@ -305,7 +498,7 @@ async function removeDevice(netId, devId){
     const r = await api(`/api/admin/networks/${netId}/devices/${devId}/remove`, {method:'POST'});
     if(r && r.error){ toast('移除失败: '+r.error); return; }
     toast('已移除设备');
-    await loadDevicesHttp(netId); // WS 推送到达后会再次刷新；此处兜底确保立即反映
+    await loadDevicesHttp(netId);
   }catch(e){ toast('移除失败: '+e.message); }
 }
 
@@ -313,20 +506,69 @@ async function setEnabled(netId, devId, enabled){
   const action = enabled?'enable':'disable';
   await api(`/api/admin/networks/${netId}/devices/${devId}/${action}`, {method:'POST'});
   toast(enabled?'已启用':'已禁用');
-  await loadDevicesHttp(netId); // WS 推送到达后会再次刷新；此处兜底确保立即反映
+  await loadDevicesHttp(netId);
+  loadNetworks().catch(()=>{}); // 同步主页「已启用」计数
 }
 
-$('#newNet').onclick=()=>{ $('#newNetPanel').classList.toggle('hidden'); };
+/* ================= 重命名 ================= */
+$('#renameBtn').onclick = async ()=>{
+  if(!currentNet) return;
+  const n = _netCache.find(x=>x.id===currentNet);
+  const cur = n ? n.name : '';
+  const v = prompt('新的网络名称：', cur);
+  if(v===null) return;
+  const name = v.trim();
+  if(!name){ toast('名称不能为空'); return; }
+  try{
+    const r = await api(`/api/admin/networks/${currentNet}/rename`, {method:'POST', body: JSON.stringify({name})});
+    if(r && r.error){ toast('失败: '+r.error); return; }
+    toast('已重命名');
+    await loadNetworks();
+  }catch(e){ toast('失败: '+e.message); }
+};
+
+/* ================= Token 查看 / 复制 ================= */
+$('#tokEye').onclick = ()=>{
+  const el=$('#tok-val'), copy=$('#tokCopy');
+  if(el.dataset.shown==='1'){
+    el.textContent='••••••••••••••••'; el.dataset.shown='0';
+    copy.classList.add('hidden'); $('#tokEye').textContent='显示';
+  }else{
+    el.textContent=el.dataset.token||el.textContent; el.dataset.shown='1';
+    copy.classList.remove('hidden'); $('#tokEye').textContent='隐藏';
+  }
+};
+$('#tokCopy').onclick = ()=>copyText($('#tok-val').dataset.token||'');
+
+async function copyText(t){
+  try{
+    await navigator.clipboard.writeText(t);
+    toast('Token 已复制到剪贴板');
+  }catch(e){
+    try{
+      const ta=document.createElement('textarea'); ta.value=t; document.body.appendChild(ta); ta.select();
+      document.execCommand('copy'); ta.remove(); toast('Token 已复制到剪贴板');
+    }catch(_){ toast('复制失败，请手动选择复制'); }
+  }
+}
+
+/* ================= 创建网络 ================= */
+$('#newNet').onclick=()=>{ $('#newNetPanel').classList.toggle('hidden'); $('#netName').focus(); };
 $('#createNet').onclick=async()=>{
   const name=$('#netName').value.trim();
   if(!name){ toast('请输入名称'); return; }
   const r = await api('/api/admin/networks',{method:'POST',body:JSON.stringify({name, description:$('#netDesc').value})});
-  $('#newToken').classList.remove('hidden');
-  $('#newToken').innerHTML = `<div class="tok"><code id="newtok" class="tok-val" data-token="${esc(r.token)}">${esc(r.token)}</code><button class="ghost tokbtn" onclick="copyFrom('newtok')">📋 复制</button></div>`;
+  const box=$('#newToken');
+  box.classList.remove('hidden');
+  box.innerHTML = `<div class="tok"><code class="tok-val" style="flex:1">${esc(r.token)}</code><button class="ghost sm" onclick="copyText('${esc(r.token)}')">复制</button></div>`;
   $('#netName').value=''; $('#netDesc').value='';
+  toast('网络已创建');
   await loadNetworks();
 };
-$('#loginBtn').onclick=async()=>{
+
+/* ================= 登录 / 登出 ================= */
+$('#loginForm').onsubmit=async(e)=>{
+  e.preventDefault();
   try{
     const r = await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({user:$('#u').value,pass:$('#p').value})});
@@ -336,9 +578,17 @@ $('#loginBtn').onclick=async()=>{
   }catch(e){ $('#loginErr').textContent='网络错误'; }
 };
 $('#logout').onclick=()=>{ logout(); };
+$('#backBtn').onclick=()=>{ location.hash='#/'; };
 
-function logout(){ token=''; closeDevWs(); localStorage.removeItem('cs_admin_token'); $('#app').style.display='none'; $('#login').style.display='block'; }
-function enterApp(){ $('#login').style.display='none'; $('#app').style.display='block'; loadNetworks(); }
+function logout(){
+  token=''; closeDevWs(); localStorage.removeItem('cs_admin_token');
+  $('#app').style.display='none'; $('#login').style.display='block';
+}
+function enterApp(){
+  $('#login').style.display='none'; $('#app').style.display='block';
+  if(!location.hash) location.hash='#/';
+  route();
+}
 
 (async()=>{
   if(!token){ $('#login').style.display='block'; return; }
