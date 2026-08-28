@@ -419,16 +419,20 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         />
       </div>
       <div className="row">
-        <label>对外文件地址 (ip:port)</label>
+        <label>对外文件地址（ip:{cfg.listen_port}[动态获取]）</label>
         <input
           type="text"
           style={{ width: '200px' }}
-          placeholder="例如 1.2.3.4:24684"
+          placeholder="例如 1.2.3.4"
           value={cfg.ext_file_ep ?? ''}
           onChange={(e) => update('ext_file_ep', e.target.value)}
           {...textSave('ext_file_ep')}
         />
       </div>
+      <p className="hint">
+        只需填写本机对外可达的 IP（域名亦可），端口自动取上方监听端口 {cfg.listen_port}，无需填写；
+        对端将按「ip:{cfg.listen_port}」拉取文件。
+      </p>
       <div className="row">
         <label>局域网分组 (lanGroup，可选)</label>
         <input
