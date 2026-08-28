@@ -419,7 +419,7 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         />
       </div>
       <div className="row">
-        <label>对外文件地址（ip:{cfg.listen_port}[动态获取]）</label>
+        <label>对外文件地址</label>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flex: '0 0 auto' }}>
           <input
             type="text"
