@@ -23,8 +23,9 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
   // 以「弹出式 toast」替代底部静态文字，确保保存结果等反馈一定可见（底部 msg 容易看不到）。
   const [toast, setToast] = useState<{ text: string; type: 'ok' | 'err' } | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const setMsg = (text: string) => {
-    const type: 'ok' | 'err' = /失败|错误|无效|不正确|未授权/.test(text) ? 'err' : 'ok';
+  const setMsg = (text: string, forceType?: 'ok' | 'err') => {
+    const type: 'ok' | 'err' =
+      forceType ?? (/失败|错误|无效|不正确|未授权/.test(text) ? 'err' : 'ok');
     if (toastTimer.current) clearTimeout(toastTimer.current);
     setToast({ text, type });
     toastTimer.current = setTimeout(() => setToast(null), 1800);
@@ -104,8 +105,8 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
   const commitExtEp = () => {
     const v = cfg.ext_file_ep ?? '';
     if (!isValidExtEp(v)) {
-      // 不合法：阻止落盘，并通过统一的 toast 弹出错误提示（自动识别为 err 红框）
-      setMsg('请输入有效的 IPv4 地址（如 1.2.3.4）');
+      // 不合法：阻止落盘，并通过统一的 toast 弹出错误提示（显式 err 红框，避免文案误判为成功）
+      setMsg('请输入有效的 IPv4 地址（如 1.2.3.4）', 'err');
       return;
     }
     const cur = persistedRef.current?.ext_file_ep ?? '';
