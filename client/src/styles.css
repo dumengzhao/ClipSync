@@ -606,6 +606,8 @@ body {
 
 .titlebar-status {
   color: #94a3b8;
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .titlebar-status.active {
@@ -627,10 +629,16 @@ body {
 
 .titlebar-sep {
   opacity: 0.5;
+  flex: 0 0 auto;
 }
 
 .titlebar-device {
   color: #cbd5e1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  max-width: 45%;
 }
 
 .tb-btn {

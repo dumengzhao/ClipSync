@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { getServerStatus } from './api/tauri';
+import { getServerStatus, getConfig } from './api/tauri';
 
 /**
  * 完全自定义窗口标题栏（decorations:false 时启用）。
@@ -14,6 +14,8 @@ import { getServerStatus } from './api/tauri';
 export default function TitleBar() {
   // 跨局域网服务端连接状态：0 未连接 / 1 待启用 / 2 已启用
   const [serverStatus, setServerStatus] = useState(0);
+  // 本机设备名称（设置中可改，挂载时回填一次）
+  const [deviceName, setDeviceName] = useState('');
   // 重开瞬间抑制 hover：窗口出现时指针若停在按钮上会触发 mouseenter，
   // 必须忽略，直到用户真正移动鼠标，否则关闭按钮红底「闪一下」。
   const suppressHoverRef = useRef(false);
@@ -21,6 +23,8 @@ export default function TitleBar() {
   useEffect(() => {
     // 挂载时回填初始连接状态（之后由 server-status 事件实时更新）
     getServerStatus().then(setServerStatus).catch(() => setServerStatus(0));
+    // 挂载时回填本机设备名称（设置中可改，这里只取一次）
+    getConfig().then((c) => setDeviceName(c.device_name)).catch(() => {});
 
     // 窗口再次显示时：
     // 1) 兜底清除残留 hover 底色；
@@ -94,6 +98,12 @@ export default function TitleBar() {
   return (
     <div className="titlebar" onMouseDown={onTitleMouseDown}>
       <div className="titlebar-info" title="跨局域网服务端连接状态">
+        {deviceName && (
+          <>
+            <span className="titlebar-device">{deviceName}</span>
+            <span className="titlebar-sep">·</span>
+          </>
+        )}
         <span
           className={
             'titlebar-status ' +
