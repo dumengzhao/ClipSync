@@ -101,7 +101,7 @@ export default function TitleBar() {
         {deviceName && (
           <>
             <span className="titlebar-device">{deviceName}</span>
-            <span className="titlebar-sep">·</span>
+            <span className="titlebar-sep">{'\u00a0\u00a0\u00a0\u00a0'}</span>
           </>
         )}
         <span
