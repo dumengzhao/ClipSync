@@ -315,13 +315,13 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let quit_i = MenuItem::with_id(app, "quit", "退出 ClipSync", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show_i, &hide_i, &settings_i, &sep_i, &quit_i])?;
 
-    let tray_icon = app.default_window_icon().cloned().unwrap_or_else(|| {
-        tauri::image::Image::from_path("icons/tray-icon.png").expect("tray-icon.png must exist")
-    });
+    // 托盘专用图标：内嵌编译进二进制，dev/build 均可靠；与窗口应用图标解耦。
+    let tray_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon.png"))
+        .expect("tray-icon.png decode failed");
 
     TrayIconBuilder::with_id("main")
         .icon(tray_icon)
-        .icon_as_template(true)
+        .icon_as_template(false)
         .tooltip("ClipSync")
         .menu(&menu)
         .show_menu_on_left_click(false)
