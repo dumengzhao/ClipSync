@@ -5,6 +5,8 @@
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
+use tauri_plugin_autostart::ManagerExt;
+
 // `open_settings` 在 dev 构建里用 `app.emit`（需 Emitter trait）；release 构建该分支被
 // `#[cfg(debug_assertions)]` 剔除，故 Emitter 仅 debug 下需要，避免 release 报 unused。
 #[cfg(debug_assertions)]
@@ -66,6 +68,14 @@ pub fn set_config(
 
     crate::config::save_config(&app, &cfg).map_err(|e| e.to_string())?;
     *state.config.lock() = cfg.clone();
+
+    // 开机自启：配置切换立即注册/移除系统自启条目（与启动时对齐逻辑一致）
+    {
+        let mgr = app.autolaunch();
+        if let Err(e) = if cfg.auto_start { mgr.enable() } else { mgr.disable() } {
+            tracing::warn!("autostart 切换失败: {e}");
+        }
+    }
 
     // 同步「配对码」到连接中枢（应答方首配对的常驻口令）
     state.hub.set_pairing_code(cfg.pairing_code.clone());

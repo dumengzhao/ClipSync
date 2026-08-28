@@ -114,6 +114,8 @@ export async function getClipboardText(): Promise<string | null> {
 export interface AppConfig {
   device_name: string;
   auto_start: boolean;
+  /** 开机自启后是否显示主窗口（仅 auto_start 为真时生效）；默认 true */
+  show_main_window_on_launch?: boolean;
   sync_text: boolean;
   sync_image: boolean;
   sync_file: boolean;
