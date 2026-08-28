@@ -3,6 +3,13 @@ import { getConfig, setConfig, pairManual, regeneratePairingCode, type AppConfig
 import { open } from '@tauri-apps/plugin-dialog';
 import { applyTheme } from './theme';
 
+// 校验文本是否为合法 IPv4 地址（四段、每段 0-255、仅数字与点）
+function isIpv4(s: string): boolean {
+  const parts = s.split('.');
+  if (parts.length !== 4) return false;
+  return parts.every((o) => /^\d{1,3}$/.test(o) && Number(o) <= 255);
+}
+
 /**
  * 设置窗口页面。
  *
@@ -23,6 +30,8 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
     toastTimer.current = setTimeout(() => setToast(null), 1800);
   };
   const [thresholdWarn, setThresholdWarn] = useState('');
+  // 对外文件地址（ext_file_ep）的 IPv4 校验错误提示
+  const [extEpErr, setExtEpErr] = useState('');
   // 手动连接地址（mDNS 被防火墙拦截时的兜底直连）
   const [maLabel, setMaLabel] = useState('');
   const [maAddr, setMaAddr] = useState('');
@@ -87,6 +96,26 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         commit((e.target as HTMLInputElement).value);
       },
     };
+  };
+
+  // 对外文件地址仅允许 IPv4：校验并在不合法时阻止落盘
+  const validateExtEp = (v: string): boolean => {
+    if (v === '') {
+      setExtEpErr('');
+      return true;
+    }
+    if (isIpv4(v)) {
+      setExtEpErr('');
+      return true;
+    }
+    setExtEpErr('请输入有效的 IPv4 地址（如 1.2.3.4）');
+    return false;
+  };
+  const commitExtEp = () => {
+    if (!validateExtEp(cfg.ext_file_ep ?? '')) return; // 不合法：不保存
+    const cur = persistedRef.current?.ext_file_ep ?? '';
+    if ((cfg.ext_file_ep ?? '') === cur) return; // 无变化不写盘
+    persist({ ext_file_ep: cfg.ext_file_ep ?? '' });
   };
 
   const pickSyncDir = async () => {
@@ -423,25 +452,33 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flex: '0 0 auto' }}>
           <input
             type="text"
-            style={{ width: '200px' }}
+            style={{ width: '200px', borderColor: extEpErr ? '#ef4444' : undefined }}
             placeholder="例如 1.2.3.4"
             value={cfg.ext_file_ep ?? ''}
             onChange={(e) => {
-              // 仅允许 IP/域名字符：遇到端口分隔符、空格或路径立即截断，确保输入框只填 IP
-              const ip = e.target.value
-                .split(/[:\s/]/)[0]
-                .replace(/[^0-9a-zA-Z.\-]/g, '');
+              // 输入框只允许 IPv4 字符（数字与点），端口/字母/空格等一律剔除
+              const ip = e.target.value.replace(/[^0-9.]/g, '');
               update('ext_file_ep', ip);
+              validateExtEp(ip);
             }}
-            {...textSave('ext_file_ep')}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+            }}
+            onBlur={() => commitExtEp()}
           />
           <span className="ext-ep-port">:{cfg.listen_port}</span>
         </div>
       </div>
-      <p className="hint">
-        输入框只填本机对外可达的 IP（域名亦可），右侧端口自动取监听端口，无需填写；
-        对端将按「ip:{cfg.listen_port}」拉取文件。
-      </p>
+      {extEpErr ? (
+        <p className="hint" style={{ color: '#ef4444' }}>
+          {extEpErr}
+        </p>
+      ) : (
+        <p className="hint">
+          输入框只填本机对外可达的 IPv4 地址，右侧端口自动取监听端口，无需填写；
+          对端将按「ip:{cfg.listen_port}」拉取文件。
+        </p>
+      )}
       <div className="row">
         <label>局域网分组 (lanGroup，可选)</label>
         <input
