@@ -11,6 +11,30 @@ function isIpv4(s: string): boolean {
 }
 
 /**
+ * 拆分服务端地址：把完整 `ws(s)://host:port/ws` 拆成「协议 + 主机:端口」两部分。
+ * 兼容用户直接粘贴完整 URL 或省略协议/路径的写法。
+ */
+function parseServerUrl(url: string): { scheme: 'ws' | 'wss'; host: string } {
+  const s = (url ?? '').trim();
+  let scheme: 'ws' | 'wss' = 'ws';
+  let rest = s;
+  const m = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\//.exec(s);
+  if (m) {
+    if (m[1].toLowerCase() === 'wss') scheme = 'wss';
+    rest = s.slice(m[0].length);
+  }
+  const slash = rest.indexOf('/'); // 去掉路径（含固定的 /ws）
+  if (slash >= 0) rest = rest.slice(0, slash);
+  return { scheme, host: rest };
+}
+
+/** 拼装服务端地址：协议下拉 + 主机:端口 输入框 + 固定 /ws 路径。主机为空则不设置。 */
+function buildServerUrl(scheme: 'ws' | 'wss', host: string): string {
+  const cleaned = parseServerUrl(host).host;
+  return cleaned ? `${scheme}://${cleaned}/ws` : '';
+}
+
+/**
  * 设置窗口页面。
  *
  * 复用 `AppConfig` 单一配置结构；后续新增配置项只需：
@@ -31,6 +55,9 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
     toastTimer.current = setTimeout(() => setToast(null), 1800);
   };
   const [thresholdWarn, setThresholdWarn] = useState('');
+  // 服务端地址拆分为：ws/wss 协议下拉 + 主机:端口 输入框（/ws 路径固定，不显示、不可编辑）
+  const [srvScheme, setSrvScheme] = useState<'ws' | 'wss'>('ws');
+  const [srvHost, setSrvHost] = useState('');
   // 手动连接地址（mDNS 被防火墙拦截时的兜底直连）
   const [maLabel, setMaLabel] = useState('');
   const [maAddr, setMaAddr] = useState('');
@@ -46,6 +73,9 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
       .then((c) => {
         setCfg(c);
         persistedRef.current = c;
+        const p = parseServerUrl(c.server_url ?? '');
+        setSrvScheme(p.scheme);
+        setSrvHost(p.host);
         applyTheme(c.theme);
       })
       .catch((e) => setMsg('加载配置失败: ' + String(e)));
@@ -112,6 +142,13 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
     const cur = persistedRef.current?.ext_file_ep ?? '';
     if (v === cur) return; // 无变化不写盘
     persist({ ext_file_ep: v });
+  };
+
+  // 服务端地址：失焦即把「协议 + 主机:端口」拼回完整 ws(s)://host:port/ws 落盘
+  const commitServerUrl = () => {
+    const next = buildServerUrl(srvScheme, srvHost);
+    if ((cfg.server_url ?? '') === next) return; // 无变化不写盘
+    persist({ server_url: next });
   };
 
   const pickSyncDir = async () => {
@@ -422,15 +459,35 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
 
       <div className="section">跨局域网中转（服务端）</div>
       <div className="row">
-        <label>服务端地址 (ws://host:port/ws)</label>
-        <input
-          type="text"
-          style={{ width: '260px' }}
-          placeholder="例如 ws://clipsync.example.com:20070/ws"
-          value={cfg.server_url ?? ''}
-          onChange={(e) => update('server_url', e.target.value)}
-          {...textSave('server_url')}
-        />
+        <label>服务端地址</label>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flex: '0 0 auto' }}>
+          <select
+            style={{ width: 'auto', padding: '0.35rem 0.4rem' }}
+            value={srvScheme}
+            onChange={(e) => {
+              // 切换 ws/wss 立即生效：拼回完整地址落盘并触发重连
+              const sc = e.target.value as 'ws' | 'wss';
+              setSrvScheme(sc);
+              const next = buildServerUrl(sc, srvHost);
+              if ((cfg.server_url ?? '') !== next) persist({ server_url: next });
+            }}
+          >
+            <option value="ws">ws://</option>
+            <option value="wss">wss://</option>
+          </select>
+          <input
+            type="text"
+            style={{ width: '200px' }}
+            placeholder="例如 clipsync.example.com:20070"
+            value={srvHost}
+            onChange={(e) => setSrvHost(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+            }}
+            onBlur={() => commitServerUrl()}
+          />
+          <span className="ext-ep-port">/ws</span>
+        </div>
       </div>
       <div className="row">
         <label>Network Token（共享密钥）</label>
