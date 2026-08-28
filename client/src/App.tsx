@@ -227,6 +227,11 @@ export default function App() {
     const unlistenServerStatus = listen<number>('server-status', (e) => {
       setServerStatus(e.payload);
       if (e.payload === 1 || e.payload === 2) setServerRemoved(false);
+      // 连接状态变为已连接/已启用时主动重新拉取节点列表，兜底广播事件偶发丢失，
+      // 确保（重）连后设备信息（如对外文件地址）为最新，无需重启。
+      if (e.payload === 1 || e.payload === 2) {
+        getServerNodes().then(setServerNodes).catch(() => {});
+      }
     });
     const unlistenServerRemoved = listen('server-removed', () =>
       setServerRemoved(true),
