@@ -53,6 +53,9 @@ pub fn set_config(
         return Err("listen_port 不能为 0（有效范围 1..=65535）".to_string());
     }
 
+    // 记录旧 ext_file_ep，用于判断「对外文件地址」是否变更（变更需重启本机文件服务）
+    let old_ext_ep = state.config.lock().ext_file_ep.clone();
+
     crate::config::save_config(&app, &cfg).map_err(|e| e.to_string())?;
     *state.config.lock() = cfg.clone();
 
@@ -87,6 +90,17 @@ pub fn set_config(
         if let Some(sc) = sc.as_ref() {
             sc.reconnect();
         }
+    }
+
+    // 对外文件地址（ext_file_ep）变更：重启本机内嵌文件服务，使其监听新端口，
+    // 否则服务端虽已收到新地址、本机仍监听旧端口，对端按新地址拉取会失败。
+    if old_ext_ep != cfg.ext_file_ep {
+        let fs = state.file_share.clone();
+        let nk = state.network_key.clone();
+        let ep = cfg.ext_file_ep.clone();
+        std::thread::spawn(move || {
+            crate::file_server::start_file_server(fs, nk, ep);
+        });
     }
 
     Ok(())
