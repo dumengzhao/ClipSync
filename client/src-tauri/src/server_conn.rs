@@ -387,8 +387,17 @@ impl ServerConn {
 
     /// 配置变更后由 set_config 调用，立即唤醒连接循环重连（无需重启应用）。
     /// 同时清除「已被移除」标记，使被拉黑后管理员恢复的设备可重新尝试入网。
+    ///
+    /// 注意：已建立连接时，连接循环正阻塞在 `connect_once` 内读服务端消息，并不在
+    /// `reconnect_notify` 上等待，仅靠 `notify_one` 会被丢弃。因此这里先丢弃 WS 发送端，
+    /// 使 `connect_once` 的 mpsc `rx.recv()` 返回 `None` 而退出，连接循环随即用最新配置
+    /// 重连（Auth 携带更新后的 ext_file_ep 等），服务端 handle_auth 据此刷新节点信息。
     pub fn reconnect(&self) {
         self.removed.store(false, Ordering::SeqCst);
+        {
+            let mut tx = self.ws_tx.lock().unwrap();
+            *tx = None;
+        }
         self.reconnect_notify.notify_one();
     }
 

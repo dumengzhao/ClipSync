@@ -116,6 +116,9 @@ impl AppState {
         self.hub.register(&dev_id, &net_id, tx.clone());
         self.save().ok();
         self.push_admin_nodes(&net_id);
+        // 设备信息（含 ext_file_ep 等）变更后向同网其它在线节点广播 NodesUpdate，
+        // 使其实时刷新（如对外文件地址修改后无需等待对端重连即可看到）。
+        self.broadcast_nodes_update(&net_id);
         Ok((net_id, dev_id))
     }
 

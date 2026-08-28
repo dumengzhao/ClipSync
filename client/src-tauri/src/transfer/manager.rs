@@ -1979,8 +1979,8 @@ mod tests {
         let mut b = a.clone();
         b.relative_path = "nested/sub/doc.txt".into(); // 不同 relative_path
         assert_eq!(
-            ConnectionHub::offer_fingerprint(&[a.clone()]),
-            ConnectionHub::offer_fingerprint(&[b])
+            ConnectionHub::offer_fingerprint(std::slice::from_ref(&a)),
+            ConnectionHub::offer_fingerprint(std::slice::from_ref(&b))
         );
 
         let mut c = a.clone();
