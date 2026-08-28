@@ -696,10 +696,22 @@ impl ServerConn {
                 .clone()
                 .unwrap_or_else(|| std::env::temp_dir().join("clipsync").to_string_lossy().to_string())
         };
+        // ext_file_ep 仅为「对端对外可达 IP」通告，端口恒为对端 listen_port：
+        // 去掉误填的 :port 后拼成 http://{ip}:{listen_port}/file/{hash}。
+        let pull_host = ext_file_ep.split(':').next().unwrap_or("").trim();
+        if pull_host.is_empty() {
+            return Err(anyhow::anyhow!(
+                "对端未配置对外文件地址（ext_file_ep），无法拉取跨 LAN 文件"
+            ));
+        }
+        let pull_port = {
+            let cfg = state.config.lock();
+            cfg.listen_port
+        };
         let mut saved = Vec::new();
         for f in &files {
             let hash = f.hash.clone().unwrap_or_default();
-            let url = format!("http://{ext_file_ep}/file/{hash}");
+            let url = format!("http://{pull_host}:{pull_port}/file/{hash}");
             let raw = reqwest::get(&url).await?.bytes().await?;
             // 跨 LAN 文件字节在传输层加密（nonce 12B 前置，复用 network_key）：
             // 下载后解密写盘；密钥未就绪（本机未连服务端）则按明文写盘（降级）。

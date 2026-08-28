@@ -985,9 +985,13 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
             });
         }
 
-        // 2) 监听入站 WebSocket 连接（作为 SPAKE2 应答方）
+        // 2) 监听入站连接（作为 SPAKE2 应答方）。
+        //    同一端口同时承载跨 LAN 文件 HTTP 拉取：accept 后先嗅探请求行，
+        //    `GET /file/` 走文件服务，其余按 WebSocket 握手处理。
         {
             let hub = self.clone();
+            let file_share = app.state::<crate::AppState>().file_share.clone();
+            let network_key = app.state::<crate::AppState>().network_key.clone();
             tauri::async_runtime::spawn(async move {
                 match TcpListener::bind(("0.0.0.0", listen_port)).await {
                     Ok(listener) => {
@@ -999,6 +1003,29 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
                                         .peer_addr()
                                         .map(|a| a.to_string())
                                         .unwrap_or_default();
+                                    // 嗅探请求行：文件拉取走 HTTP 文件服务，其余升级为 WS
+                                    let mut peek_buf = [0u8; 512];
+                                    let n = sock.peek(&mut peek_buf).await.unwrap_or(0);
+                                    let is_file = {
+                                        let slice = &peek_buf[..n];
+                                        if let Some(lf) =
+                                            slice.windows(2).position(|w| w == b"\r\n")
+                                        {
+                                            String::from_utf8_lossy(&slice[..lf])
+                                                .starts_with("GET /file/")
+                                        } else {
+                                            false
+                                        }
+                                    };
+                                    if is_file {
+                                        let fs = file_share.clone();
+                                        let nk = network_key.clone();
+                                        tauri::async_runtime::spawn(async move {
+                                            crate::file_server::handle_file_stream(sock, fs, nk)
+                                                .await;
+                                        });
+                                        continue;
+                                    }
                                     match tokio_tungstenite::accept_async(sock).await {
                                         Ok(ws) => {
                                             let hub = hub.clone();

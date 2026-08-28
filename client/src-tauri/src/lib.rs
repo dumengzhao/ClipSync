@@ -225,15 +225,8 @@ pub fn run() {
                 *app.state::<AppState>().server_conn.lock() = Some(sc);
             }
 
-            // 启动跨 LAN 文件内嵌 HTTP 服务（供对端经 ext_file_ep 直取）
-            {
-                let ep = app.state::<AppState>().config.lock().ext_file_ep.clone();
-                crate::file_server::start_file_server(
-                    app.state::<AppState>().file_share.clone(),
-                    app.state::<AppState>().network_key.clone(),
-                    ep,
-                );
-            }
+            // 跨 LAN 文件直取复用上面的 listen_port（由 transfer/manager.rs 的 accept
+            // 循环在收到 GET /file/ 时分流），无需在此另起服务。
 
             // 把跨 LAN 待复制通知同时缓冲进状态，供前端初始化快照
             {

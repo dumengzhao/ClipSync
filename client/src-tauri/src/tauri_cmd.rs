@@ -53,8 +53,16 @@ pub fn set_config(
         return Err("listen_port 不能为 0（有效范围 1..=65535）".to_string());
     }
 
-    // 记录旧 ext_file_ep，用于判断「对外文件地址」是否变更（变更需重启本机文件服务）
-    let old_ext_ep = state.config.lock().ext_file_ep.clone();
+    // ext_file_ep 仅作「本机对外可达 IP」通告，端口恒为 listen_port、不另起服务：
+    // 存库时只保留 host（去掉用户可能误填的 :port），避免拉取端拼出错误端口。
+    let mut cfg = cfg;
+    cfg.ext_file_ep = cfg
+        .ext_file_ep
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
 
     crate::config::save_config(&app, &cfg).map_err(|e| e.to_string())?;
     *state.config.lock() = cfg.clone();
@@ -84,23 +92,13 @@ pub fn set_config(
         }
     }
 
-    // 跨局域网服务端配置可能已变更：唤醒连接循环立即重连（无需重启应用）
+    // 跨局域网服务端配置可能已变更：唤醒连接循环立即重连（无需重启应用）。
+    // 重连会让服务端刷新本机 ext_file_ep（对外可达 IP）等节点信息，其它在线设备实时可见。
     {
         let sc = state.server_conn.lock();
         if let Some(sc) = sc.as_ref() {
             sc.reconnect();
         }
-    }
-
-    // 对外文件地址（ext_file_ep）变更：重启本机内嵌文件服务，使其监听新端口，
-    // 否则服务端虽已收到新地址、本机仍监听旧端口，对端按新地址拉取会失败。
-    if old_ext_ep != cfg.ext_file_ep {
-        let fs = state.file_share.clone();
-        let nk = state.network_key.clone();
-        let ep = cfg.ext_file_ep.clone();
-        std::thread::spawn(move || {
-            crate::file_server::start_file_server(fs, nk, ep);
-        });
     }
 
     Ok(())
