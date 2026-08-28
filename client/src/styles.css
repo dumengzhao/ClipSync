@@ -277,6 +277,19 @@ body {
   flex: 0 1 auto;
 }
 
+/* 计算机名一行：状态圆点 + 名称 */
+.peer-name-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.peer-name-row .peer-name {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .peer-main {
   display: flex;
   flex-direction: column;
@@ -320,7 +333,8 @@ body {
   margin-left: 0.5rem;
 }
 
-/* 设备类型图标（右上角）：局域网=wifi，其它=云朵 */
+/* 设备类型图标（右上角）：局域网=wifi，其它=云朵。
+   在线时按类型着色（wifi 绿 / 云朵 青），离线时统一灰色并叠加斜杠 */
 .peer-type-icon {
   position: absolute;
   top: 8px;
@@ -329,12 +343,29 @@ body {
   color: #94a3b8;
 }
 
-.peer-type-icon.wifi {
+.peer-type-icon.online.wifi {
   color: #22c55e;
 }
 
-.peer-type-icon.cloud {
+.peer-type-icon.online.cloud {
   color: #38bdf8;
+}
+
+.peer-type-icon.offline {
+  color: #94a3b8;
+}
+
+/* 离线设备的类型图标上加斜杠：跨过图标中心的对角短线 */
+.icon-slash {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 19px;
+  height: 2px;
+  background: currentColor;
+  border-radius: 1px;
+  transform: translate(-50%, -50%) rotate(-45deg);
+  pointer-events: none;
 }
 
 .pair-input-row {
