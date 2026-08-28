@@ -20,7 +20,7 @@ pub mod update;
 
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
-    tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Listener, Manager, WindowEvent,
 };
 
@@ -336,10 +336,29 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
             "quit" => app.exit(0),
             _ => {}
         })
-        .on_tray_icon_event(|tray, event| {
-            // 双击托盘图标：打开（或聚焦）主窗口；单击不处理，避免误触隐藏/切换窗口
-            if let TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } = event {
-                show_main_window(tray.app_handle());
+        .on_tray_icon_event({
+            // 跨平台双击检测：tray-icon 的 `DoubleClick` 仅在 Windows 派发（源码注释
+            // "Windows Only"），macOS / Linux 只发 `Click`。故统一从 `Click` 手动判定
+            // 双击。单次物理点击会发 Down+Up 两个 Click，因此只数 `Left + Up` 避免重复计数。
+            let last_left_click = std::sync::Arc::new(std::sync::Mutex::new(None::<std::time::Instant>));
+            move |tray, event| {
+                if let TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } = event
+                {
+                    let now = std::time::Instant::now();
+                    let mut guard = last_left_click.lock().unwrap();
+                    let is_double = guard
+                        .map_or(false, |t| now.duration_since(t) <= std::time::Duration::from_millis(500));
+                    if is_double {
+                        *guard = None;
+                        show_main_window(tray.app_handle());
+                    } else {
+                        *guard = Some(now);
+                    }
+                }
             }
         })
         .build(app)?;
