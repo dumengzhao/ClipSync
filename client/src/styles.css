@@ -521,6 +521,14 @@ body {
   height: 18px;
 }
 
+/* 对外文件地址输入框右侧动态显示的端口后缀（只读感） */
+.ext-ep-port {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: #94a3b8;
+  font-size: 0.85rem;
+  user-select: none;
+}
+
 .settings .actions {
   margin-top: 1.5rem;
   display: flex;
