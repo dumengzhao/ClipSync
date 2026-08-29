@@ -11,6 +11,9 @@ target/
 **/src-tauri/target/
 **/src-tauri/gen/
 
+# Generated app icon source (tools/gen-app-icon.py regenerates each run)
+client/app-icon.png
+
 # Tauri
 **/WixTools/
 **/.cargo/
