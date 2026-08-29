@@ -11,6 +11,9 @@ use tauri_plugin_autostart::ManagerExt;
 // `#[cfg(debug_assertions)]` 剔除，故 Emitter 仅 debug 下需要，避免 release 报 unused。
 #[cfg(debug_assertions)]
 use tauri::Emitter;
+// `debug_simulate_offer` 用到 `Manager::state` / `get_webview_window`，仅 debug 下存在。
+#[cfg(debug_assertions)]
+use tauri::Manager;
 
 use crate::clipboard::types::ClipboardContent;
 use crate::clipboard::ClipboardProvider;
@@ -19,6 +22,17 @@ use crate::device::registry::{PairedDevice, TrustLevel};
 use crate::discovery::DiscoveredPeer;
 use crate::discovery::manual::ManualAddressBook;
 use crate::AppState;
+
+#[cfg(debug_assertions)]
+use crate::transfer::websocket::FileFrame;
+#[cfg(debug_assertions)]
+use crate::transfer::manager::Outgoing;
+#[cfg(debug_assertions)]
+use crate::clipboard::types::FileMeta;
+#[cfg(debug_assertions)]
+use tokio::sync::mpsc;
+#[cfg(debug_assertions)]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[tauri::command]
 pub fn get_version() -> &'static str {
@@ -271,6 +285,54 @@ pub fn list_pending_offers(state: State<AppState>) -> Vec<serde_json::Value> {
 #[tauri::command]
 pub fn show_pull_toast(app: AppHandle) {
     crate::transfer::manager::ConnectionHub::show_pull_toast(&app);
+}
+
+/// [DEBUG] 手动模拟一次对端文件 Offer：走与真实对端完全相同的接收链路
+/// （写 pending_offers → emit file-offer → show_pull_toast），用于在无对端时验证
+/// 「待拉取小窗」是否真的弹出、定位是否正确。需在前端 / DevTools 主动调用，不会自动触发。
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn simulate_incoming_offer(app: AppHandle) {
+    debug_simulate_offer(app).await;
+}
+
+#[cfg(debug_assertions)]
+pub(crate) async fn debug_simulate_offer(app: AppHandle) {
+    let (tx, _rx) = mpsc::unbounded_channel::<Outgoing>();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let frame = FileFrame::Offer {
+        transfer_id: format!("sim-{now}"),
+        device_id: "sim-device-0000".to_string(),
+        device_name: "模拟设备A".to_string(),
+        files: vec![FileMeta {
+            file_name: "演示文件.txt".to_string(),
+            file_size: 512 * 1024, // 500KB，便于在 toast 里看到内容
+            is_dir: false,
+            relative_path: "演示文件.txt".to_string(),
+            modified_at: 0,
+            mime_type: "text/plain".to_string(),
+            hash: None,
+        }],
+        top_names: vec!["演示文件.txt".to_string()],
+        has_folder: false,
+    };
+    let hub = app.state::<AppState>().hub.clone();
+    hub.handle_file_frame(frame, &tx, "sim").await;
+    // 延迟检查 pull-toast 真实可见/聚焦状态，做实证
+    let app2 = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        if let Some(w) = app2.get_webview_window("pull-toast") {
+            let vis = w.is_visible().unwrap_or(false);
+            let foc = w.is_focused().unwrap_or(false);
+            tracing::info!("SIM-OFFER pull-toast 状态: visible={vis} focused={foc}");
+        } else {
+            tracing::warn!("SIM-OFFER pull-toast 窗口不存在，无法验证");
+        }
+    });
 }
 
 // 注意：以下两个命令必须复用引擎持有的常驻剪贴板句柄，不能自建临时实例。

@@ -724,14 +724,30 @@ impl ConnectionHub {
         const MARGIN: i32 = 16;
         const TOP: i32 = 28; // 顶栏高度 + 间距，避免被菜单栏遮挡
         if let Ok(Some(mon)) = app.primary_monitor() {
-            let s = mon.size();
-            let x = (s.width as i32) - WIN_W - MARGIN; // 屏幕右侧
-            let y = TOP; // 顶部
-            let _ = w.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x, y }));
+            // 关键：Monitor::size() 返回「物理像素」，而窗口尺寸/坐标用的是「逻辑像素」。
+            // 必须用 scale_factor 换算，否则在 Retina 等高 DPI 屏上窗口会被推出屏幕外
+            // （此前一直不弹的根因：物理宽 3840 减去逻辑宽 340 得到的坐标远超逻辑屏宽 1920）。
+            let scale = mon.scale_factor();
+            let screen_w = ((mon.size().width as f64) / scale) as i32; // 逻辑屏宽
+            let x = screen_w - WIN_W - MARGIN; // 屏幕右侧
+            let y = TOP; // 顶部（逻辑坐标）
+            let _ = w.set_position(tauri::Position::Logical(tauri::LogicalPosition {
+                x: x as f64,
+                y: y as f64,
+            }));
+            tracing::info!(
+                "show_pull_toast(macos): 定位 x={x} y={y}（逻辑屏宽 {screen_w}, scale {scale}）"
+            );
+        } else {
+            tracing::warn!("show_pull_toast(macos): 取不到主显示器，使用默认位置");
         }
         tracing::info!("show_pull_toast: 弹出待拉取小窗 (macos, 右上角)");
         let _ = w.show();
         let _ = w.set_focus();
+        if let Ok(vis) = w.is_visible() {
+            let foc = w.is_focused().unwrap_or(false);
+            tracing::info!("show_pull_toast(macos): 弹出后 visible={vis} focused={foc}");
+        }
     }
 
     pub async fn pull_files(self: Arc<Self>, transfer_id: String) {
