@@ -608,6 +608,10 @@ impl ServerConn {
             ext_file_ep: ext_file_ep.to_string(),
         };
         let _ = self.app.emit("cross-lan-file", offer);
+        // 跨 LAN 文件到达同样要弹出「待拉取小窗」。
+        // 此前这里只 emit 给主窗口，小窗(PullToast)既没监听 cross-lan-file、
+        // 也没被通知 show，于是表现为「主窗口能看到待拉取文件，小窗却不弹」。
+        crate::transfer::manager::ConnectionHub::show_pull_toast(&self.app);
     }
 
     /// 本机文字变化 → 对跨 LAN 已启用节点做中继。

@@ -25,10 +25,16 @@ if (import.meta.env.DEV) {
     .catch(() => {});
 }
 
-// [DEBUG] 开发期便于在无对端时手动验证「待拉取小窗」：在 DevTools Console 输入
-//   __simulateOffer()
-// 即可走与真实对端完全相同的接收链路触发一次模拟 Offer（不会自动弹出，不会常驻）。
+// [DEBUG] 开发期便于在无对端时手动验证「待拉取小窗」。DevTools Console 输入：
+//   __simulateOffer()      → 模拟局域网内对端发文件（本地 P2P 路径）
+//   __simulateCrossLan()   → 模拟跨 LAN 对端发文件（跨 LAN 路径）
+// 两者都走与真实链路相同的代码，不会自动弹出、不会常驻。
 if (import.meta.env.DEV) {
-  (window as unknown as { __simulateOffer?: () => Promise<unknown> }).__simulateOffer = () =>
-    import('@tauri-apps/api/core').then((m) => m.invoke('simulate_incoming_offer'));
+  const w = window as unknown as {
+    __simulateOffer?: () => Promise<unknown>;
+    __simulateCrossLan?: () => Promise<unknown>;
+  };
+  const core = () => import('@tauri-apps/api/core');
+  w.__simulateOffer = () => core().then((m) => m.invoke('simulate_incoming_offer'));
+  w.__simulateCrossLan = () => core().then((m) => m.invoke('simulate_cross_lan_offer'));
 }

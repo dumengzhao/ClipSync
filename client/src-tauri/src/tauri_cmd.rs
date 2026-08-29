@@ -7,9 +7,8 @@ use tauri::{AppHandle, State};
 
 use tauri_plugin_autostart::ManagerExt;
 
-// `open_settings` 在 dev 构建里用 `app.emit`（需 Emitter trait）；release 构建该分支被
-// `#[cfg(debug_assertions)]` 剔除，故 Emitter 仅 debug 下需要，避免 release 报 unused。
-#[cfg(debug_assertions)]
+// `pull_cross_lan` 需要 emit 拉取结果给「待拉取小窗」（release 同样需要），
+// 故 Emitter 不再限定 debug 构建。
 use tauri::Emitter;
 // `debug_simulate_offer` 用到 `Manager::state` / `get_webview_window`，仅 debug 下存在。
 #[cfg(debug_assertions)]
@@ -300,6 +299,26 @@ pub fn debug_report_mount(label: String, is_toast: bool) {
     );
 }
 
+/// [DEBUG] 模拟一次**跨 LAN** 文件通知：走与真实跨 LAN 完全相同的链路
+/// （emit cross-lan-file → show_pull_toast），用于验证小窗对跨 LAN 条目是否弹出。
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub fn simulate_cross_lan_offer(app: AppHandle) {
+    let manifest = serde_json::json!([
+        { "file_name": "跨LAN演示文件.zip", "file_size": 3 * 1024 * 1024, "is_dir": false }
+    ]);
+    let offer = crate::server_conn::CrossLanOffer {
+        from: "cross-lan-sim-0001".to_string(),
+        from_name: "跨LAN模拟设备".to_string(),
+        manifest,
+        ext_file_ep: "127.0.0.1:65500".to_string(),
+    };
+    let _ = app.emit("cross-lan-file", offer);
+    // 与真实跨 LAN 路径保持一致：通知后弹出待拉取小窗
+    crate::transfer::manager::ConnectionHub::show_pull_toast(&app);
+    tracing::info!("SIM-CROSS-LAN 已发出模拟跨 LAN 文件通知");
+}
+
 /// [DEBUG] 手动模拟一次对端文件 Offer：走与真实对端完全相同的接收链路
 /// （写 pending_offers → emit file-offer → show_pull_toast），用于在无对端时验证
 /// 「待拉取小窗」是否真的弹出、定位是否正确。需在前端 / DevTools 主动调用，不会自动触发。
@@ -474,13 +493,25 @@ pub fn list_cross_lan_offers(state: State<AppState>) -> Vec<crate::server_conn::
 /// 拉取某条跨 LAN 文件通知：从对端 ext_file_ep 下载并写本机剪贴板。
 #[tauri::command]
 pub async fn pull_cross_lan(
+    app: AppHandle,
     state: State<'_, AppState>,
     ext_file_ep: String,
     manifest: serde_json::Value,
 ) -> Result<(), String> {
     let sc = state.server_conn.lock().clone();
     let sc = sc.ok_or_else(|| "服务端未连接".to_string())?;
-    sc.pull_cross_lan(&ext_file_ep, manifest)
+    let r = sc
+        .pull_cross_lan(&ext_file_ep, manifest)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+    // 通知「待拉取小窗」拉取结果，便于清理该条目并给出成功/失败反馈
+    let _ = app.emit(
+        "cross-lan-pull-complete",
+        serde_json::json!({
+            "ext_file_ep": ext_file_ep,
+            "ok": r.is_ok(),
+            "error": r.as_ref().err().cloned(),
+        }),
+    );
+    r
 }
