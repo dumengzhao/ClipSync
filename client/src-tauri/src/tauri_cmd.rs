@@ -299,6 +299,14 @@ pub fn debug_report_mount(label: String, is_toast: bool) {
     );
 }
 
+/// [DEBUG] 小窗诊断日志：前端把关键节点上报到 Rust 日志。
+/// 用于排查「窗口弹了但内容为空」「点关闭没反应」这类只看截图/日志查不出的前端问题。
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub fn debug_toast_log(msg: String) {
+    tracing::info!("[TOAST] {msg}");
+}
+
 /// [DEBUG] 模拟一次**跨 LAN** 文件通知：走与真实跨 LAN 完全相同的链路
 /// （emit cross-lan-file → show_pull_toast），用于验证小窗对跨 LAN 条目是否弹出。
 #[cfg(debug_assertions)]

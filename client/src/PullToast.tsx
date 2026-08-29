@@ -55,8 +55,18 @@ export default function PullToast() {
   const [ready, setReady] = useState(false);
   const hideTimer = useRef<number | null>(null);
 
+  // [DEBUG] 诊断上报：把前端关键节点写进 Rust 日志，便于排查
+  // 「窗口弹了但内容为空 / 点关闭没反应」这类只看截图查不出的问题。
+  const log = (m: string) => {
+    if (import.meta.env.DEV) void invoke('debug_toast_log', { msg: m });
+  };
+
   const hideSelf = () => {
-    void getCurrentWindow().hide();
+    log('hideSelf 被调用（关闭按钮/自动收起）');
+    void getCurrentWindow()
+      .hide()
+      .then(() => log('getCurrentWindow().hide() 成功'))
+      .catch((e: unknown) => log(`hide() 失败: ${String(e)}`));
   };
 
   // 显隐统一收归 Rust：挂载时若有遗留条目、或收到新事件，
@@ -67,27 +77,32 @@ export default function PullToast() {
   };
 
   useEffect(() => {
+    log(`useEffect 挂载（label=${getCurrentWindow().label}）`);
+
     listPendingOffers()
       .then((list) => {
+        log(`挂载 listPendingOffers -> ${list.length} 条`);
         setOffers((prev) => {
           const have = new Set(prev.map((o) => o.transfer_id));
           return [...prev, ...list.filter((o) => !have.has(o.transfer_id))];
         });
         if (list.length > 0) showSelf();
       })
-      .catch(() => {});
+      .catch((e: unknown) => log(`listPendingOffers 失败: ${String(e)}`));
 
     // 跨 LAN 遗留条目：启动时若有，同样要弹出小窗
     listCrossLanOffers()
       .then((list) => {
+        log(`挂载 listCrossLanOffers -> ${list.length} 条`);
         setCrossLan(list);
         if (list.length > 0) showSelf();
       })
-      .catch(() => {})
+      .catch((e: unknown) => log(`listCrossLanOffers 失败: ${String(e)}`))
       .finally(() => setReady(true));
 
     const un = [
       listen<PendingOffer>('file-offer', (e) => {
+        log(`收到 file-offer: ${e.payload.transfer_id}`);
         setOffers((prev) =>
           prev.some((o) => o.transfer_id === e.payload.transfer_id)
             ? prev
@@ -122,6 +137,11 @@ export default function PullToast() {
       // 跨 LAN 新文件到达（Rust 侧同时会调 show_pull_toast）
       listen<CrossLanOffer>('cross-lan-file', (e) => {
         const o = e.payload;
+        log(
+          `收到 cross-lan-file: from=${o.from_name || o.from} files=${
+            (o.manifest || []).length
+          }`,
+        );
         setCrossLan((prev) =>
           prev.some((x) => crossKey(x) === crossKey(o)) ? prev : [...prev, o],
         );
