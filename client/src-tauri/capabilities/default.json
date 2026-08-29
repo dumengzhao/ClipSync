@@ -1,11 +1,14 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window and settings window",
-  "windows": ["main", "settings"],
+  "description": "Capability for main / settings / pull-toast windows. 注意：pull-toast 必须在 windows 列表内，否则该窗口没有任何权限 —— 前端 window.hide() 会被拒（表现为点关闭没反应），事件监听也会失效（收不到 cross-lan-file / file-offer，表现为弹窗内没有待拉取文件）。",
+  "windows": ["main", "settings", "pull-toast"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
+    "core:window:allow-hide",
+    "core:window:allow-show",
+    "core:window:allow-set-focus",
     "updater:default",
     "autostart:default",
     "shell:allow-open",
