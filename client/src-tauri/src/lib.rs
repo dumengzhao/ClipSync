@@ -304,6 +304,8 @@ pub fn run() {
             tauri_cmd::show_pull_toast,
             #[cfg(debug_assertions)]
             tauri_cmd::simulate_incoming_offer,
+            #[cfg(debug_assertions)]
+            tauri_cmd::debug_report_mount,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

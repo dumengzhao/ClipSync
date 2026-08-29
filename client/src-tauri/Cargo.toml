@@ -88,7 +88,9 @@ windows = { version = "0.58", features = [
 # macOS-specific
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.2"
-objc2-app-kit = { version = "0.2", features = ["NSPasteboard", "NSPasteboardItem", "NSApplication"] }
+# NSWindow 类本身需要同时启用 NSResponder（NSWindow 继承自 NSResponder），
+# 否则 objc2-app-kit 不会导出 NSWindow，只有 NSWindow* 相关常量可用。
+objc2-app-kit = { version = "0.2", features = ["NSPasteboard", "NSPasteboardItem", "NSApplication", "NSWindow", "NSResponder"] }
 objc2-foundation = { version = "0.2", features = ["NSString", "NSData", "NSArray"] }
 security-framework = "3"
 

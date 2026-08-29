@@ -775,6 +775,39 @@ body {
   }
 }
 
+/* 拉取完成 / 失败的结果反馈 */
+.pt-result {
+  background: transparent;
+  border-style: dashed;
+}
+
+.pt-ok {
+  color: #16a34a;
+  font-weight: 500;
+}
+
+.pt-err {
+  color: #dc2626;
+  font-weight: 500;
+}
+
+:root[data-theme='dark'] .pt-ok {
+  color: #4ade80;
+}
+
+:root[data-theme='dark'] .pt-err {
+  color: #f87171;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme='system'] .pt-ok {
+    color: #4ade80;
+  }
+  :root[data-theme='system'] .pt-err {
+    color: #f87171;
+  }
+}
+
 .pt-item-top {
   display: flex;
   align-items: baseline;
