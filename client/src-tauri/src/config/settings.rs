@@ -54,6 +54,13 @@ pub struct AppConfig {
     /// 为空时按本机网段自动推断。
     #[serde(default)]
     pub lan_group: String,
+    /// 待拉取小窗「未操作自动关闭」时长（毫秒）。
+    ///
+    /// 规则：小窗弹出后，若用户在这段时间内**没有点击「拉取」**，则自动收起；
+    /// 一旦点击了拉取，就取消该倒计时，改为**等拉取完成并写入本机剪贴板之后**才关闭
+    /// （拉取中绝不关闭）。默认 15000（15 秒）。设为 0 表示「不自动关闭」。
+    #[serde(default = "default_toast_auto_hide_ms")]
+    pub toast_auto_hide_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +87,11 @@ fn default_auto_pull_threshold_mb() -> u64 {
 
 fn default_max_folder_files() -> usize {
     100
+}
+
+/// 待拉取小窗未操作自动关闭时长（毫秒），默认 15 秒。
+fn default_toast_auto_hide_ms() -> u64 {
+    15_000
 }
 
 fn default_true() -> bool {
@@ -125,6 +137,7 @@ impl Default for AppConfig {
             ext_file_ep: String::new(),
             lan_group: String::new(),
             show_main_window_on_launch: true,
+            toast_auto_hide_ms: default_toast_auto_hide_ms(),
         }
     }
 }

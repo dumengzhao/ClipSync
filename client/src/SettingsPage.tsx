@@ -571,6 +571,25 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         />
       </div>
 
+      <div className="section">待拉取小窗</div>
+      <div className="row">
+        <label>未操作自动关闭 (秒)</label>
+        <input
+          type="number"
+          min={0}
+          value={Math.round((cfg.toast_auto_hide_ms ?? 15000) / 1000)}
+          onChange={(e) =>
+            update('toast_auto_hide_ms', Math.max(0, Number(e.target.value)) * 1000)
+          }
+          {...textSave('toast_auto_hide_ms', (s) => Math.max(0, Number(s)) * 1000)}
+        />
+      </div>
+      <p className="hint">
+        小窗弹出后，若在该时长内<b>未点击「拉取」</b>则自动关闭；一旦点击了拉取，就取消倒计时，
+        改为<b>等拉取完成并写入本机剪贴板之后</b>才关闭（拉取中绝不会自动关闭）。
+        填 0 表示从不自动关闭，需手动处理。
+      </p>
+
       <div className="section">外观</div>
       <div className="row">
         <label>主题</label>
