@@ -138,11 +138,31 @@ impl ClipboardProvider for LinuxClipboard {
             };
             // 以当前内容作为基线，避免启动时把已有剪贴板误报为「一次变化」。
             let mut last_text = watcher.get_text().unwrap_or_default();
+            // 文件态基线：arboard 只轮询文本，复制文件走 X11 CLIPBOARD selection
+            //（text/uri-list / gnome-copied-files），文本轮询检测不到，必须单独探测。
+            let mut last_files: Vec<PathBuf> = read_clipboard_files_x11().unwrap_or_default();
             while !stop_clone.load(Ordering::SeqCst) {
+                // 1) 文本/图片变化（原有逻辑）
                 if let Ok(t) = watcher.get_text() {
                     if t != last_text {
                         last_text = t.clone();
                         cb();
+                    }
+                }
+                // 2) 文件复制检测：X11 CLIPBOARD 含文件时，文本不变，需直接读 selection。
+                //    文件态从空变非空（或内容变化）即视为一次复制，触发回调让 engine 广播 Offer。
+                match read_clipboard_files_x11() {
+                    Ok(files) => {
+                        if files != last_files {
+                            last_files = files;
+                            if !last_files.is_empty() {
+                                tracing::debug!("Linux watch 探测到文件复制，触发广播");
+                                cb();
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        last_files.clear();
                     }
                 }
                 thread::sleep(Duration::from_millis(250));

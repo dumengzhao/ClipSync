@@ -673,9 +673,9 @@ impl ConnectionHub {
     fn show_pull_toast(app: &AppHandle) {
         use windows::Win32::UI::WindowsAndMessaging::{
             GetSystemMetrics, SetWindowPos, ShowWindow, HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN,
-            SWP_NOACTIVATE, SWP_NOSIZE, SW_SHOWNOACTIVATE,
+            SWP_NOACTIVATE, SWP_NOSIZE, SW_SHOWNOACTIVATE, GetWindowRect, IsWindowVisible, IsIconic,
         };
-        use windows::Win32::Foundation::HWND;
+        use windows::Win32::Foundation::{HWND, RECT};
         const WIN_W: i32 = 340;
         const WIN_H: i32 = 200;
         const MARGIN: i32 = 16;
@@ -697,6 +697,16 @@ impl ConnectionHub {
             unsafe {
                 let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                // 诊断：确认窗口是否真的被显示、定位到了哪里（RDP 下坐标可能落到不可见区域）
+                let mut rect: RECT = std::mem::zeroed();
+                let _ = GetWindowRect(hwnd, &mut rect);
+                let vis = IsWindowVisible(hwnd).as_bool();
+                let ico = IsIconic(hwnd).as_bool();
+                let screen = format!("screen={sw}x{sh}");
+                tracing::info!(
+                    "show_pull_toast: 目标=({x},{y}) 实际rect=({},{})-({},{}) visible={vis} iconic={ico} {screen}",
+                    rect.left, rect.top, rect.right, rect.bottom
+                );
             }
         }
     }
