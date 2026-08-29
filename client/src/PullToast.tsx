@@ -24,6 +24,9 @@ export default function PullToast() {
   const [offers, setOffers] = useState<PendingOffer[]>([]);
   const [pulling, setPulling] = useState<Set<string>>(new Set());
   const [progress, setProgress] = useState<Record<string, number>>({});
+  // 拉取完成/失败的结果反馈：完成后必须让用户明确看到"已保存到本地"，
+  // 否则小窗一闪而过，用户会以为根本没弹出过。
+  const [results, setResults] = useState<Record<string, { ok: boolean; msg: string }>>({});
   const [ready, setReady] = useState(false);
   const hideTimer = useRef<number | null>(null);
 
@@ -77,6 +80,8 @@ export default function PullToast() {
           n.delete(tid);
           return n;
         });
+        // 完成后给出明确成功反馈并停留一段时间（此前 1.5s 就收起，用户来不及看到）
+        setResults((prev) => ({ ...prev, [tid]: { ok: true, msg: '已保存到本地' } }));
         // 完成后短暂保持 100% 显示，再移除进度条
         setTimeout(() => {
           setProgress((prev) => {
@@ -102,7 +107,9 @@ export default function PullToast() {
       }
       return;
     }
-    hideTimer.current = window.setTimeout(hideSelf, 1500);
+    // 停留 6 秒：给足时间看清"已保存到本地 / 拉取失败"的结果反馈。
+    // 此前是 1.5 秒，自动拉取瞬间完成后小窗一闪而过，用户根本看不到 → 误判为"没弹"。
+    hideTimer.current = window.setTimeout(hideSelf, 6000);
     return () => {
       if (hideTimer.current) clearTimeout(hideTimer.current);
     };
@@ -111,6 +118,11 @@ export default function PullToast() {
   const onPull = (tid: string) => {
     setPulling((prev) => new Set(prev).add(tid));
     setProgress((prev) => ({ ...prev, [tid]: 0 }));
+    setResults((prev) => {
+      const n = { ...prev };
+      delete n[tid];
+      return n;
+    });
     pullFiles(tid).catch(() => {
       // 拉取失败时退回待拉取态，让用户可重试
       setPulling((prev) => {
@@ -123,6 +135,8 @@ export default function PullToast() {
         delete n[tid];
         return n;
       });
+      // 失败必须可见：否则小窗静默消失，用户不知道文件没拉到
+      setResults((prev) => ({ ...prev, [tid]: { ok: false, msg: '拉取失败，可重试' } }));
     });
   };
 
@@ -135,7 +149,7 @@ export default function PullToast() {
         </button>
       </div>
       <div className="pt-list">
-        {offers.length === 0 && pulling.size === 0 && (
+        {offers.length === 0 && pulling.size === 0 && Object.keys(results).length === 0 && (
           <div className="pt-empty">暂无待拉取文件</div>
         )}
         {offers.map((o) => {
@@ -165,6 +179,14 @@ export default function PullToast() {
             </div>
           );
         })}
+        {Object.entries(results).map(([tid, r]) => (
+          <div className="pt-item pt-result" key={tid}>
+            <span className={r.ok ? 'pt-ok' : 'pt-err'}>
+              {r.ok ? '✓ ' : '✗ '}
+              {r.msg}
+            </span>
+          </div>
+        ))}
       </div>
       <div className="pt-foot">拉取完成后自动收起，也可手动关闭</div>
     </div>

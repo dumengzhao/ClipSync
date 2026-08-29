@@ -287,6 +287,19 @@ pub fn show_pull_toast(app: AppHandle) {
     crate::transfer::manager::ConnectionHub::show_pull_toast(&app);
 }
 
+/// [DEBUG] 前端挂载上报：确认每个窗口实际渲染了哪个分支。
+/// pull-toast 窗口必须渲染 PullToast；若渲染成 App，说明 `main.tsx` 的 `isToast`
+/// 判断失效 —— 这类问题只看 Rust 日志永远发现不了，因为窗口照样 `is_visible()==true`，
+/// 只是内容不对，用户自然认为"没弹"。
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub fn debug_report_mount(label: String, is_toast: bool) {
+    tracing::info!(
+        "[MOUNT] 窗口 {label} 挂载, is_toast={is_toast}, 渲染={}",
+        if is_toast { "PullToast" } else { "App" }
+    );
+}
+
 /// [DEBUG] 手动模拟一次对端文件 Offer：走与真实对端完全相同的接收链路
 /// （写 pending_offers → emit file-offer → show_pull_toast），用于在无对端时验证
 /// 「待拉取小窗」是否真的弹出、定位是否正确。需在前端 / DevTools 主动调用，不会自动触发。
@@ -309,7 +322,10 @@ pub(crate) async fn debug_simulate_offer(app: AppHandle) {
         device_name: "模拟设备A".to_string(),
         files: vec![FileMeta {
             file_name: "演示文件.txt".to_string(),
-            file_size: 512 * 1024, // 500KB，便于在 toast 里看到内容
+            // 5MB：刻意超过 auto_pull 阈值（默认 1MB），这样不会走自动拉取，
+            // 小窗会常驻显示「拉取」按钮，便于人工确认窗口是否弹出、位置是否正确。
+            // （若小于阈值会自动拉取 → 因模拟对端不存在而失败，小窗一闪而过不好判断）
+            file_size: 5 * 1024 * 1024,
             is_dir: false,
             relative_path: "演示文件.txt".to_string(),
             modified_at: 0,

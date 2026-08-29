@@ -711,6 +711,37 @@ impl ConnectionHub {
         }
     }
 
+    /// macOS：把待拉取小窗提升到「所有桌面(Space)都可见 + 浮于全屏应用之上」。
+    ///
+    /// 关键背景：Tauri 的 `alwaysOnTop` 只是普通 floating level，**默认不会加入所有 Space**。
+    /// macOS 上全屏 App 独占一个 Space，其他 Space 的窗口不会显示——于是窗口
+    /// `is_visible()==true`，用户却**完全看不到**（这正是反复"不弹"的元凶之一）。
+    /// 这里用原生 API 补上 `CanJoinAllSpaces` + `FullScreenAuxiliary`，并提到
+    /// `NSStatusWindowLevel`，确保任何桌面/全屏场景下都能看见。
+    #[cfg(target_os = "macos")]
+    unsafe fn raise_ns_window(w: &tauri::WebviewWindow) {
+        use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior};
+
+        let Ok(raw) = w.ns_window() else {
+            tracing::warn!("show_pull_toast(macos): 取不到 NSWindow，跳过原生提升");
+            return;
+        };
+        let ptr = raw as *mut NSWindow;
+        if ptr.is_null() {
+            tracing::warn!("show_pull_toast(macos): NSWindow 指针为空，跳过原生提升");
+            return;
+        }
+        let win = &*ptr;
+        win.setCollectionBehavior(
+            NSWindowCollectionBehavior::CanJoinAllSpaces
+                | NSWindowCollectionBehavior::FullScreenAuxiliary
+                | NSWindowCollectionBehavior::Stationary,
+        );
+        win.setLevel(objc2_app_kit::NSStatusWindowLevel);
+        win.orderFrontRegardless();
+        tracing::info!("show_pull_toast(macos): 已原生提升（全 Space + NSStatusWindowLevel）");
+    }
+
     #[cfg(not(windows))]
     pub fn show_pull_toast(app: &AppHandle) {
         let Some(w) = app.get_webview_window("pull-toast") else {
@@ -743,6 +774,19 @@ impl ConnectionHub {
         }
         tracing::info!("show_pull_toast: 弹出待拉取小窗 (macos, 右上角)");
         let _ = w.show();
+        // 原生提升：加入所有 Space + 浮于全屏应用之上，解决「is_visible()==true 却看不到」。
+        //
+        // 必须派发到主线程执行！AppKit 严禁在非主线程操作 NSWindow，而本函数是从 tokio
+        // 工作线程（handle_file_frame）调用的 —— 之前直接在子线程调用会让**整个进程崩溃**
+        // （实测现象：日志打到 "弹出待拉取小窗" 后进程直接消失，无任何 panic 信息）。
+        #[cfg(target_os = "macos")]
+        {
+            let w2 = w.clone();
+            let app2 = app.clone();
+            let _ = app2.run_on_main_thread(move || unsafe {
+                Self::raise_ns_window(&w2);
+            });
+        }
         let _ = w.set_focus();
         if let Ok(vis) = w.is_visible() {
             let foc = w.is_focused().unwrap_or(false);
