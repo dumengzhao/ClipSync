@@ -113,7 +113,7 @@ export default function PullToast() {
       }
       return;
     }
-    idleTimer.current = window.setTimeout(hideSelf, 10000);
+    idleTimer.current = window.setTimeout(hideSelf, 6000);
     return () => {
       if (idleTimer.current) clearTimeout(idleTimer.current);
     };
@@ -175,7 +175,7 @@ export default function PullToast() {
           );
         })}
       </div>
-      <div className="pt-foot">10 秒无操作将自动收起，待拉取文件可在主界面处理</div>
+      <div className="pt-foot">6 秒后自动收起，待拉取文件可在主界面处理</div>
     </div>
   );
 }
