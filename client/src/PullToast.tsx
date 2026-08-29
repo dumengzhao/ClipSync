@@ -19,10 +19,13 @@ function summary(o: PendingOffer): string {
   return names.join('、');
 }
 
+type SentInfo = { names: string[]; count: number };
+
 export default function PullToast() {
   const [offers, setOffers] = useState<PendingOffer[]>([]);
   const [pulling, setPulling] = useState<Set<string>>(new Set());
   const [progress, setProgress] = useState<Record<string, number>>({});
+  const [sent, setSent] = useState<SentInfo | null>(null);
   const [ready, setReady] = useState(false);
   const hideTimer = useRef<number | null>(null);
   const idleTimer = useRef<number | null>(null);
@@ -48,11 +51,15 @@ export default function PullToast() {
 
     const un = [
       listen<PendingOffer>('file-offer', (e) => {
+        setSent(null);
         setOffers((prev) =>
           prev.some((o) => o.transfer_id === e.payload.transfer_id)
             ? prev
             : [...prev, e.payload],
         );
+      }),
+      listen<SentInfo>('file-sent', (e) => {
+        setSent(e.payload);
       }),
       listen<{ transfer_id: string }>('file-pull-start', (e) => {
         setPulling((prev) => new Set(prev).add(e.payload.transfer_id));
@@ -119,6 +126,16 @@ export default function PullToast() {
     };
   }, [ready, offers, pulling]);
 
+  // 发送端「已复制并同步到对端」提示：6 秒后自动收起（仅清自身，不影响接收端 offers）。
+  useEffect(() => {
+    if (!ready || !sent) return;
+    const t = window.setTimeout(() => {
+      setSent(null);
+      if (offers.length === 0 && pulling.size === 0) void getCurrentWindow().hide();
+    }, 6000);
+    return () => clearTimeout(t);
+  }, [ready, sent, offers, pulling]);
+
   const onPull = (tid: string) => {
     setPulling((prev) => new Set(prev).add(tid));
     setProgress((prev) => ({ ...prev, [tid]: 0 }));
@@ -140,13 +157,27 @@ export default function PullToast() {
   return (
     <div className="pull-toast">
       <div className="pt-head">
-        <span className="pt-title">待拉取文件</span>
+        <span className="pt-title">
+          {sent && offers.length === 0 ? '已同步到对端' : '待拉取文件'}
+        </span>
         <button className="pt-close" onClick={hideSelf} title="关闭">
           ×
         </button>
       </div>
       <div className="pt-list">
-        {offers.length === 0 && pulling.size === 0 && (
+        {sent && (
+          <div className="pt-item pt-sent">
+            <div className="pt-item-top">
+              <span className="pt-name" title={sent.names.join('、')}>
+                {sent.count > 1
+                  ? `${sent.names[0]} 等 ${sent.count} 项`
+                  : (sent.names[0] ?? '文件')}
+              </span>
+            </div>
+            <div className="pt-sub">已复制到剪贴板，正在同步到对端</div>
+          </div>
+        )}
+        {offers.length === 0 && pulling.size === 0 && !sent && (
           <div className="pt-empty">暂无待拉取文件</div>
         )}
         {offers.map((o) => {
