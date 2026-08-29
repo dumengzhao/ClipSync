@@ -657,24 +657,48 @@ impl ConnectionHub {
     }
 
     /// 接收方点击「拉取」：建立落盘任务、发拉取请求，分片到位后写入 `sync_dir`，
-    /// 完成后自动把下载路径写进本机剪贴板（用户直接 Ctrl+V 即可粘贴）。
     /// 收到需手动拉取的 Offer 时，把预声明的 pull-toast 小窗口定位到屏幕右下角并弹出。
-    /// 不抢焦点（conf 中 focus=false），由 alwaysOnTop 保证置顶可见。
+    /// Windows 上直接用 Win32 ShowWindow 强制显示：Tauri 的 show()/set_focus() 在 RDP
+    /// 会话下不可靠（前台权限被系统拒绝）。用 SW_SHOWNOACTIVATE + TOPMOST 既弹出置顶、
+    /// 又不抢输入焦点（不打断打字）。非 Windows 回退到 Tauri 原生 show。
+    #[cfg(windows)]
     fn show_pull_toast(app: &AppHandle) {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetSystemMetrics, SetWindowPos, ShowWindow, HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN,
+            SWP_NOMOVE, SWP_NOACTIVATE, SWP_NOSIZE, SW_SHOWNOACTIVATE,
+        };
+        use windows::Win32::Foundation::HWND;
         const WIN_W: i32 = 340;
         const WIN_H: i32 = 200;
         const MARGIN: i32 = 16;
         const TASKBAR: i32 = 48;
         let Some(w) = app.get_webview_window("pull-toast") else {
+            tracing::warn!("pull-toast 窗口未找到，无法弹出待拉取小窗");
             return;
         };
-        if let Ok(Some(mon)) = app.primary_monitor() {
-            let s = mon.size();
-            let x = (s.width as i32) - WIN_W - MARGIN;
-            let y = (s.height as i32) - WIN_H - MARGIN - TASKBAR;
-            let _ = w.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x, y }));
+        tracing::info!("show_pull_toast: 准备弹出待拉取小窗 (win32)");
+        // 用 Win32 直接定位（右下角）+ 显示，绕过 Tauri set_position/show 在 RDP 下失效
+        let sw = unsafe { GetSystemMetrics(SM_CXSCREEN) };
+        let sh = unsafe { GetSystemMetrics(SM_CYSCREEN) };
+        let x = (sw - WIN_W - MARGIN) as i32;
+        let y = (sh - WIN_H - MARGIN - TASKBAR) as i32;
+        if let Ok(h) = w.hwnd() {
+            // Tauri hwnd() 返回的 HWND 与 windows 0.58 的 HWND 未必是同一 crate 别名，
+            // 统一转成 *mut c_void 再包成 windows 0.58 的 HWND，确保 ShowWindow 类型匹配。
+            let hwnd = HWND(h.0 as *mut std::ffi::c_void);
+            unsafe {
+                SetWindowPos(hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+                ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            }
         }
-        let _ = w.show();
+    }
+
+    #[cfg(not(windows))]
+    fn show_pull_toast(app: &AppHandle) {
+        if let Some(w) = app.get_webview_window("pull-toast") {
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
     }
 
     pub async fn pull_files(self: Arc<Self>, transfer_id: String) {
