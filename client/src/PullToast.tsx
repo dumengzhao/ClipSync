@@ -25,8 +25,13 @@ export default function PullToast() {
   const [progress, setProgress] = useState<Record<string, number>>({});
   const [ready, setReady] = useState(false);
   const hideTimer = useRef<number | null>(null);
+  const idleTimer = useRef<number | null>(null);
 
   const hideSelf = () => {
+    if (idleTimer.current) {
+      clearTimeout(idleTimer.current);
+      idleTimer.current = null;
+    }
     void getCurrentWindow().hide();
   };
 
@@ -97,6 +102,23 @@ export default function PullToast() {
     };
   }, [ready, offers, pulling]);
 
+  // 纯待拉取态且长时间无操作：自动收起小窗（toast 行为，避免一直常驻遮挡右下角）。
+  // 拉取中（pulling 非空）或列表已清空时不启用该计时。
+  useEffect(() => {
+    if (!ready) return;
+    if (offers.length === 0 || pulling.size > 0) {
+      if (idleTimer.current) {
+        clearTimeout(idleTimer.current);
+        idleTimer.current = null;
+      }
+      return;
+    }
+    idleTimer.current = window.setTimeout(hideSelf, 10000);
+    return () => {
+      if (idleTimer.current) clearTimeout(idleTimer.current);
+    };
+  }, [ready, offers, pulling]);
+
   const onPull = (tid: string) => {
     setPulling((prev) => new Set(prev).add(tid));
     setProgress((prev) => ({ ...prev, [tid]: 0 }));
@@ -153,7 +175,7 @@ export default function PullToast() {
           );
         })}
       </div>
-      <div className="pt-foot">双击托盘图标可再次打开</div>
+      <div className="pt-foot">10 秒无操作将自动收起，待拉取文件可在主界面处理</div>
     </div>
   );
 }
