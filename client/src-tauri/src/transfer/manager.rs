@@ -665,7 +665,7 @@ impl ConnectionHub {
     fn show_pull_toast(app: &AppHandle) {
         use windows::Win32::UI::WindowsAndMessaging::{
             GetSystemMetrics, SetWindowPos, ShowWindow, HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN,
-            SWP_NOMOVE, SWP_NOACTIVATE, SWP_NOSIZE, SW_SHOWNOACTIVATE,
+            SWP_NOACTIVATE, SWP_NOSIZE, SW_SHOWNOACTIVATE,
         };
         use windows::Win32::Foundation::HWND;
         const WIN_W: i32 = 340;
@@ -687,8 +687,8 @@ impl ConnectionHub {
             // 统一转成 *mut c_void 再包成 windows 0.58 的 HWND，确保 ShowWindow 类型匹配。
             let hwnd = HWND(h.0 as *mut std::ffi::c_void);
             unsafe {
-                SetWindowPos(hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
-                ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             }
         }
     }
