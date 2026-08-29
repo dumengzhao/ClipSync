@@ -143,6 +143,9 @@ export interface AppConfig {
   ext_file_ep?: string;
   /** 局域网分组标识：相同值视为同一局域网（走直连），不同值走服务端；为空按网段自动推断 */
   lan_group?: string;
+  /** 待拉取小窗「未操作自动关闭」时长（毫秒）。未点击「拉取」则此时长后自动收起；
+   *  一旦点击拉取，改为等拉取完成并写入本机剪贴板后再关闭。0 表示不自动关闭。默认 15000 */
+  toast_auto_hide_ms?: number;
 }
 
 export async function getConfig(): Promise<AppConfig> {

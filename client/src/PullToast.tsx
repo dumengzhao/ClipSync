@@ -9,7 +9,13 @@ import {
   listCrossLanOffers,
   pullCrossLan,
   CrossLanOffer,
+  getConfig,
 } from './api/tauri';
+
+/** 未操作自动关闭的默认时长（毫秒），仅作为读取配置失败时的兜底 */
+const DEFAULT_AUTO_HIDE_MS = 15_000;
+/** 用户已点击拉取、操作完成（或失败）后，结果反馈停留时长（毫秒） */
+const RESULT_HOLD_MS = 3_000;
 
 function fmtSize(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -53,6 +59,10 @@ export default function PullToast() {
   // 否则小窗一闪而过，用户会以为根本没弹出过。
   const [results, setResults] = useState<Record<string, { ok: boolean; msg: string }>>({});
   const [ready, setReady] = useState(false);
+  // 用户是否已点击过「拉取」。点了就取消未操作倒计时，改为等拉取写完剪贴板再关闭。
+  const [userActed, setUserActed] = useState(false);
+  // 「未操作自动关闭」时长，来自配置项 toast_auto_hide_ms（动态可调），默认 15s
+  const [autoHideMs, setAutoHideMs] = useState(DEFAULT_AUTO_HIDE_MS);
   const hideTimer = useRef<number | null>(null);
 
   // [DEBUG] 诊断上报：把前端关键节点写进 Rust 日志，便于排查
@@ -65,7 +75,11 @@ export default function PullToast() {
     log('hideSelf 被调用（关闭按钮/自动收起）');
     void getCurrentWindow()
       .hide()
-      .then(() => log('getCurrentWindow().hide() 成功'))
+      .then(() => {
+        log('getCurrentWindow().hide() 成功');
+        // 关闭后重置「是否已点击拉取」，下次弹出时重新计时
+        setUserActed(false);
+      })
       .catch((e: unknown) => log(`hide() 失败: ${String(e)}`));
   };
 
@@ -78,6 +92,17 @@ export default function PullToast() {
 
   useEffect(() => {
     log(`useEffect 挂载（label=${getCurrentWindow().label}）`);
+
+    // 「未操作自动关闭」时长走配置项，可在设置里动态调整
+    getConfig()
+      .then((c) => {
+        const ms = c.toast_auto_hide_ms ?? DEFAULT_AUTO_HIDE_MS;
+        setAutoHideMs(ms);
+        log(`读到配置 toast_auto_hide_ms=${ms}`);
+      })
+      .catch((e: unknown) =>
+        log(`读取配置失败，回落默认 ${DEFAULT_AUTO_HIDE_MS}ms: ${String(e)}`),
+      );
 
     listPendingOffers()
       .then((list) => {
@@ -175,30 +200,58 @@ export default function PullToast() {
     };
   }, []);
 
-  // 全部清空且无进行中任务时，延迟自动关闭窗口
+  // 关闭策略（三条规则）：
+  //   1) 拉取进行中 → **绝不关闭**，必须等拉取完成并写入本机剪贴板
+  //   2) 有待拉取条目、但用户还没点「拉取」→ 未操作倒计时（配置项，默认 15s）后自动关闭
+  //   3) 用户已点过拉取（完成或失败）、或条目已清空 → 结果反馈停留片刻后关闭
   useEffect(() => {
     if (!ready) return;
-    if (
-      offers.length > 0 ||
-      pulling.size > 0 ||
-      crossLan.length > 0 ||
-      crossPulling.size > 0
-    ) {
+
+    const clear = () => {
       if (hideTimer.current) {
         clearTimeout(hideTimer.current);
         hideTimer.current = null;
       }
+    };
+
+    const busy = pulling.size > 0 || crossPulling.size > 0;
+    const hasItems = offers.length > 0 || crossLan.length > 0;
+
+    // 1) 拉取中：保持显示
+    if (busy) {
+      log('拉取进行中 → 保持显示，不自动关闭');
+      clear();
       return;
     }
-    // 停留 6 秒：给足时间看清"已保存到本地 / 拉取失败"的结果反馈。
-    // 此前是 1.5 秒，自动拉取瞬间完成后小窗一闪而过，用户根本看不到 → 误判为"没弹"。
-    hideTimer.current = window.setTimeout(hideSelf, 6000);
-    return () => {
-      if (hideTimer.current) clearTimeout(hideTimer.current);
-    };
-  }, [ready, offers, pulling, crossLan, crossPulling]);
+
+    // 2) 有待拉取但用户尚未点拉取 → 未操作倒计时
+    if (hasItems && !userActed) {
+      clear();
+      if (autoHideMs <= 0) {
+        log('配置 toast_auto_hide_ms=0 → 不自动关闭，等用户操作');
+        return;
+      }
+      log(`有待拉取条目，启动未操作倒计时 ${autoHideMs}ms`);
+      hideTimer.current = window.setTimeout(() => {
+        log(`未操作超时（${autoHideMs}ms 内未点击拉取）→ 自动关闭`);
+        hideSelf();
+      }, autoHideMs);
+      return;
+    }
+
+    // 3) 用户已点击拉取（完成/失败）或已无条目 → 结果反馈停留后关闭
+    clear();
+    hideTimer.current = window.setTimeout(() => {
+      log(`结果反馈停留 ${RESULT_HOLD_MS}ms 结束 → 关闭`);
+      hideSelf();
+    }, RESULT_HOLD_MS);
+
+    return clear;
+  }, [ready, offers, pulling, crossLan, crossPulling, userActed, autoHideMs]);
 
   const onPull = (tid: string) => {
+    // 已操作：取消未操作倒计时，改为「等拉取完成写入剪贴板后再关闭」
+    setUserActed(true);
     setPulling((prev) => new Set(prev).add(tid));
     setProgress((prev) => ({ ...prev, [tid]: 0 }));
     setResults((prev) => {
@@ -225,6 +278,8 @@ export default function PullToast() {
 
   const onCrossPull = (o: CrossLanOffer) => {
     const ep = o.ext_file_ep;
+    // 已操作：取消未操作倒计时，改为「等拉取完成写入剪贴板后再关闭」
+    setUserActed(true);
     setCrossPulling((prev) => new Set(prev).add(ep));
     setResults((prev) => {
       const n = { ...prev };
@@ -323,7 +378,11 @@ export default function PullToast() {
           </div>
         ))}
       </div>
-      <div className="pt-foot">拉取完成后自动收起，也可手动关闭</div>
+      <div className="pt-foot">
+        {autoHideMs > 0
+          ? `${Math.round(autoHideMs / 1000)} 秒内未点击拉取将自动关闭；点击后等拉取完成再关闭`
+          : '不会自动关闭，需手动处理'}
+      </div>
     </div>
   );
 }
