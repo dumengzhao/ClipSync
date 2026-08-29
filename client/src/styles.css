@@ -775,6 +775,34 @@ body {
   }
 }
 
+/* 底部状态：未操作倒计时 / 等待任务完成 */
+.pt-foot-count {
+  color: #b45309;
+  font-weight: 600;
+}
+
+.pt-foot-wait {
+  color: #1d4ed8;
+  font-weight: 600;
+}
+
+:root[data-theme='dark'] .pt-foot-count {
+  color: #fbbf24;
+}
+
+:root[data-theme='dark'] .pt-foot-wait {
+  color: #93c5fd;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme='system'] .pt-foot-count {
+    color: #fbbf24;
+  }
+  :root[data-theme='system'] .pt-foot-wait {
+    color: #93c5fd;
+  }
+}
+
 /* 拉取完成 / 失败的结果反馈 */
 .pt-result {
   background: transparent;

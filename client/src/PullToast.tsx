@@ -16,6 +16,8 @@ import {
 const DEFAULT_AUTO_HIDE_MS = 15_000;
 /** 用户已点击拉取、操作完成（或失败）后，结果反馈停留时长（毫秒） */
 const RESULT_HOLD_MS = 3_000;
+/** 窗口内「同时展示」的条目总数上限（正在拉取的也占位） */
+const MAX_TOTAL = 3;
 
 function fmtSize(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -31,11 +33,6 @@ function summary(o: PendingOffer): string {
   return names.join('、');
 }
 
-/** 跨 LAN 条目的稳定 key（与主窗口 App.tsx 保持一致） */
-function crossKey(o: CrossLanOffer): string {
-  return `${o.from}-${o.ext_file_ep}`;
-}
-
 function crossNames(o: CrossLanOffer): string {
   return (o.manifest || []).map((f) => f.file_name).join('、');
 }
@@ -47,53 +44,105 @@ function crossTotal(o: CrossLanOffer): number {
   );
 }
 
-export default function PullToast() {
-  const [offers, setOffers] = useState<PendingOffer[]>([]);
-  const [pulling, setPulling] = useState<Set<string>>(new Set());
-  const [progress, setProgress] = useState<Record<string, number>>({});
-  // 跨 LAN「待复制」条目。此前小窗完全不感知这套数据（只听本地 P2P 的 file-offer），
-  // 而主窗口 App.tsx 会显示它 —— 这正是「主窗口能看到待拉取文件，小窗却不弹」的原因。
-  const [crossLan, setCrossLan] = useState<CrossLanOffer[]>([]);
-  const [crossPulling, setCrossPulling] = useState<Set<string>>(new Set());
-  // 拉取完成/失败的结果反馈：完成后必须让用户明确看到结果，
-  // 否则小窗一闪而过，用户会以为根本没弹出过。
-  const [results, setResults] = useState<Record<string, { ok: boolean; msg: string }>>({});
-  const [ready, setReady] = useState(false);
-  // 用户是否已点击过「拉取」。点了就取消未操作倒计时，改为等拉取写完剪贴板再关闭。
-  const [userActed, setUserActed] = useState(false);
-  // 「未操作自动关闭」时长，来自配置项 toast_auto_hide_ms（动态可调），默认 15s
-  const [autoHideMs, setAutoHideMs] = useState(DEFAULT_AUTO_HIDE_MS);
-  const hideTimer = useRef<number | null>(null);
+/** 小窗内的条目：本地 P2P 与跨 LAN 统一抽象，便于统一排序与数量裁剪 */
+type Item =
+  | { id: string; kind: 'local'; ts: number; offer: PendingOffer }
+  | { id: string; kind: 'cross'; ts: number; offer: CrossLanOffer };
 
-  // [DEBUG] 诊断上报：把前端关键节点写进 Rust 日志，便于排查
-  // 「窗口弹了但内容为空 / 点关闭没反应」这类只看截图查不出的问题。
+function itemNames(it: Item): string {
+  return it.kind === 'local' ? summary(it.offer) : crossNames(it.offer) || '未知文件';
+}
+
+function itemSize(it: Item): number {
+  return it.kind === 'local' ? it.offer.total_size : crossTotal(it.offer);
+}
+
+function itemFrom(it: Item): string {
+  return it.kind === 'local' ? it.offer.device_name : `来自 ${it.offer.from_name || it.offer.from}（跨 LAN）`;
+}
+
+/**
+ * 跨 LAN 条目的唯一 id。
+ * 注意：不能只用 `from + ext_file_ep` —— 同一台设备（同一端口）连续发多个文件时
+ * 该组合恒定，会把后续文件误判为重复而丢弃（表现为"第二次起不再自动关闭/不显示新文件"）。
+ * 因此把文件名与总大小也纳入。
+ */
+function crossItemId(o: CrossLanOffer): string {
+  return `cross:${o.from}:${o.ext_file_ep}:${crossNames(o)}:${crossTotal(o)}`;
+}
+
+export default function PullToast() {
+  /** 待拉取（尚未开始拉取） */
+  const [items, setItems] = useState<Item[]>([]);
+  /** 正在拉取的条目 */
+  const [pulling, setPulling] = useState<Item[]>([]);
+  /** 拉取进行期间到达的新文件：先暂存，等拉取完成再补进待拉取列表 */
+  const [queued, setQueued] = useState<Item[]>([]);
+  /** 已完成/失败的结果反馈 */
+  const [results, setResults] = useState<Record<string, { ok: boolean; msg: string }>>({});
+  const [progress, setProgress] = useState<Record<string, number>>({});
+  const [ready, setReady] = useState(false);
+  /** 用户是否已点击过「拉取」：点了就取消未操作倒计时，改为等任务完成 */
+  const [userActed, setUserActed] = useState(false);
+  /** 「未操作自动关闭」时长，来自配置项 toast_auto_hide_ms */
+  const [autoHideMs, setAutoHideMs] = useState(DEFAULT_AUTO_HIDE_MS);
+  /** 剩余自动关闭秒数（0 表示未启用倒计时） */
+  const [countdown, setCountdown] = useState(0);
+  /**
+   * 每次「弹出/收到新文件」都自增。用于强制刷新倒计时：
+   * 仅靠列表变化不够——同一设备重复通知可能不产生新的列表项，
+   * 导致倒计时不重启（历史 bug：只有第一次会超时关闭）。
+   */
+  const [session, setSession] = useState(0);
+  const pullingRef = useRef<Item[]>([]);
+  pullingRef.current = pulling;
+
+  // [DEBUG] 诊断上报：把前端关键节点写进 Rust 日志，便于排查前端黑盒问题。
   const log = (m: string) => {
     if (import.meta.env.DEV) void invoke('debug_toast_log', { msg: m });
   };
 
   const hideSelf = () => {
     log('hideSelf 被调用（关闭按钮/自动收起）');
-    void getCurrentWindow()
-      .hide()
+    // 走 Rust 命令而不是直接 window.hide()：macOS 上小窗曾是 key window，
+    // 隐藏后系统会把主窗口顶上来，需要在 Rust 侧做补偿重新隐藏主窗口。
+    void invoke('hide_pull_toast')
       .then(() => {
-        log('getCurrentWindow().hide() 成功');
-        // 关闭后重置「是否已点击拉取」，下次弹出时重新计时
+        log('hide_pull_toast 成功');
+        // 关闭后重置「是否已点击拉取」，下次弹出重新计时
         setUserActed(false);
       })
-      .catch((e: unknown) => log(`hide() 失败: ${String(e)}`));
+      .catch((e: unknown) => log(`hide_pull_toast 失败: ${String(e)}`));
   };
 
-  // 显隐统一收归 Rust：挂载时若有遗留条目、或收到新事件，
-  // 都通过 invoke('show_pull_toast') 让 Rust 负责 show + 定位（macOS 右上角 / Windows 右下角）。
-  // 窗口仅在有待拉取内容时显示；清空后或用户手动关闭时收起。
+  // 显隐统一收归 Rust：定位/置顶/提升都在 Rust 侧完成。
+  // 每次调用都自增 session，确保倒计时一定重启。
   const showSelf = () => {
     void invoke('show_pull_toast');
+    setSession((s) => s + 1);
+  };
+
+  /** 收到一个新条目：拉取进行中则暂存队列，否则直接显示 */
+  const onNewItem = (it: Item) => {
+    if (pullingRef.current.length > 0) {
+      log(`拉取进行中，新文件先暂存：${it.id}`);
+      setQueued((prev) =>
+        prev.some((x) => x.id === it.id) ? prev : [...prev, it],
+      );
+    } else {
+      log(`新条目入列：${it.id}`);
+      setItems((prev) =>
+        prev.some((x) => x.id === it.id)
+          ? prev
+          : [...prev, it].sort((a, b) => b.ts - a.ts),
+      );
+    }
+    showSelf();
   };
 
   useEffect(() => {
     log(`useEffect 挂载（label=${getCurrentWindow().label}）`);
 
-    // 「未操作自动关闭」时长走配置项，可在设置里动态调整
     getConfig()
       .then((c) => {
         const ms = c.toast_auto_hide_ms ?? DEFAULT_AUTO_HIDE_MS;
@@ -104,206 +153,246 @@ export default function PullToast() {
         log(`读取配置失败，回落默认 ${DEFAULT_AUTO_HIDE_MS}ms: ${String(e)}`),
       );
 
+    const now = () => Date.now();
+
     listPendingOffers()
       .then((list) => {
         log(`挂载 listPendingOffers -> ${list.length} 条`);
-        setOffers((prev) => {
-          const have = new Set(prev.map((o) => o.transfer_id));
-          return [...prev, ...list.filter((o) => !have.has(o.transfer_id))];
-        });
-        if (list.length > 0) showSelf();
+        const its: Item[] = list.map((o) => ({
+          id: `local:${o.transfer_id}`,
+          kind: 'local' as const,
+          ts: now(),
+          offer: o,
+        }));
+        if (its.length) {
+          setItems((prev) => {
+            const have = new Set(prev.map((x) => x.id));
+            return [...prev, ...its.filter((x) => !have.has(x.id))].sort(
+              (a, b) => b.ts - a.ts,
+            );
+          });
+          showSelf();
+        }
       })
       .catch((e: unknown) => log(`listPendingOffers 失败: ${String(e)}`));
 
-    // 跨 LAN 遗留条目：启动时若有，同样要弹出小窗
     listCrossLanOffers()
       .then((list) => {
         log(`挂载 listCrossLanOffers -> ${list.length} 条`);
-        setCrossLan(list);
-        if (list.length > 0) showSelf();
+        const its: Item[] = list.map((o) => ({
+          id: crossItemId(o),
+          kind: 'cross' as const,
+          ts: now(),
+          offer: o,
+        }));
+        if (its.length) {
+          setItems((prev) => {
+            const have = new Set(prev.map((x) => x.id));
+            return [...prev, ...its.filter((x) => !have.has(x.id))].sort(
+              (a, b) => b.ts - a.ts,
+            );
+          });
+          showSelf();
+        }
       })
       .catch((e: unknown) => log(`listCrossLanOffers 失败: ${String(e)}`))
       .finally(() => setReady(true));
 
     const un = [
       listen<PendingOffer>('file-offer', (e) => {
-        log(`收到 file-offer: ${e.payload.transfer_id}`);
-        setOffers((prev) =>
-          prev.some((o) => o.transfer_id === e.payload.transfer_id)
-            ? prev
-            : [...prev, e.payload],
-        );
-        showSelf();
-      }),
-      listen<{ transfer_id: string }>('file-pull-start', (e) => {
-        setPulling((prev) => new Set(prev).add(e.payload.transfer_id));
-      }),
-      listen<{ transfer_id: string; percent: number }>('file-pull-progress', (e) => {
-        setProgress((prev) => ({ ...prev, [e.payload.transfer_id]: e.payload.percent }));
-      }),
-      listen<{ transfer_id: string }>('file-pull-complete', (e) => {
-        const tid = e.payload.transfer_id;
-        setOffers((prev) => prev.filter((o) => o.transfer_id !== tid));
-        setPulling((prev) => {
-          const n = new Set(prev);
-          n.delete(tid);
-          return n;
+        const o = e.payload;
+        log(`收到 file-offer: ${o.transfer_id}`);
+        onNewItem({
+          id: `local:${o.transfer_id}`,
+          kind: 'local',
+          ts: now(),
+          offer: o,
         });
-        // 完成后给出明确成功反馈并停留一段时间（此前 1.5s 就收起，用户来不及看到）
-        setResults((prev) => ({ ...prev, [tid]: { ok: true, msg: '已保存到本地' } }));
+      }),
+
+      listen<CrossLanOffer>('cross-lan-file', (e) => {
+        const o = e.payload;
+        log(`收到 cross-lan-file: from=${o.from_name || o.from} files=${(o.manifest || []).length}`);
+        onNewItem({ id: crossItemId(o), kind: 'cross', ts: now(), offer: o });
+      }),
+
+      listen<{ transfer_id: string }>('file-pull-start', (e) => {
+        const id = `local:${e.payload.transfer_id}`;
+        log(`file-pull-start: ${id}`);
+        setItems((prev) => {
+          const it = prev.find((x) => x.id === id);
+          if (it) setPulling((p) => (p.some((x) => x.id === id) ? p : [...p, it]));
+          return prev.filter((x) => x.id !== id);
+        });
+      }),
+
+      listen<{ transfer_id: string; percent: number }>('file-pull-progress', (e) => {
+        setProgress((prev) => ({
+          ...prev,
+          [`local:${e.payload.transfer_id}`]: e.payload.percent,
+        }));
+      }),
+
+      listen<{ transfer_id: string }>('file-pull-complete', (e) => {
+        const id = `local:${e.payload.transfer_id}`;
+        log(`file-pull-complete: ${id}`);
+        setPulling((prev) => prev.filter((x) => x.id !== id));
+        setItems((prev) => prev.filter((x) => x.id !== id));
+        setResults((prev) => ({ ...prev, [id]: { ok: true, msg: '已保存到本地' } }));
         setTimeout(() => {
           setProgress((prev) => {
             const n = { ...prev };
-            delete n[tid];
+            delete n[id];
             return n;
           });
         }, 1200);
       }),
-      // 跨 LAN 新文件到达（Rust 侧同时会调 show_pull_toast）
-      listen<CrossLanOffer>('cross-lan-file', (e) => {
-        const o = e.payload;
-        log(
-          `收到 cross-lan-file: from=${o.from_name || o.from} files=${
-            (o.manifest || []).length
-          }`,
-        );
-        setCrossLan((prev) =>
-          prev.some((x) => crossKey(x) === crossKey(o)) ? prev : [...prev, o],
-        );
-        showSelf();
-      }),
-      // 跨 LAN 拉取完成 / 失败
+
       listen<{ ext_file_ep: string; ok: boolean; error?: string }>(
         'cross-lan-pull-complete',
         (e) => {
           const ep = e.payload.ext_file_ep;
-          setCrossLan((prev) => prev.filter((x) => x.ext_file_ep !== ep));
-          setCrossPulling((prev) => {
-            const n = new Set(prev);
-            n.delete(ep);
-            return n;
-          });
+          log(`cross-lan-pull-complete: ep=${ep} ok=${e.payload.ok}`);
+          setPulling((prev) => prev.filter((x) => !(x.kind === 'cross' && x.offer.ext_file_ep === ep)));
+          setItems((prev) => prev.filter((x) => !(x.kind === 'cross' && x.offer.ext_file_ep === ep)));
           setResults((prev) => ({
             ...prev,
-            [`cross-${ep}`]: {
+            [`cross-ep:${ep}`]: {
               ok: e.payload.ok,
-              msg: e.payload.ok
-                ? '已保存到本地'
-                : `拉取失败：${e.payload.error || '未知错误'}`,
+              msg: e.payload.ok ? '已保存到本地' : `拉取失败：${e.payload.error || '未知错误'}`,
             },
           }));
         },
       ),
     ];
+
     return () => {
       un.forEach((p) => void p.then((f) => f()));
     };
   }, []);
 
+  // 数量上限：窗口内总数不超过 MAX_TOTAL（正在拉取的也占位），
+  // 即「有 1 个正在拉取时，待拉取只保留最新 2 个」。items 已按时间倒序，取前面即最新。
+  useEffect(() => {
+    const limit = Math.max(0, MAX_TOTAL - pulling.length);
+    if (items.length > limit) {
+      log(`条目超限，裁剪 ${items.length} -> ${limit}`);
+      setItems((prev) => prev.slice(0, Math.max(0, MAX_TOTAL - pulling.length)));
+    }
+  }, [items, pulling]);
+
+  // 拉取结束后，把暂存队列里的新文件补进待拉取列表（同样受上限约束）
+  useEffect(() => {
+    if (pulling.length > 0 || queued.length === 0) return;
+    log(`拉取已结束，把 ${queued.length} 个暂存文件补入列表`);
+    const incoming = queued;
+    setQueued([]);
+    setItems((prev) => {
+      const have = new Set(prev.map((x) => x.id));
+      return [...prev, ...incoming.filter((x) => !have.has(x.id))].sort(
+        (a, b) => b.ts - a.ts,
+      );
+    });
+  }, [pulling, queued]);
+
   // 关闭策略（三条规则）：
-  //   1) 拉取进行中 → **绝不关闭**，必须等拉取完成并写入本机剪贴板
-  //   2) 有待拉取条目、但用户还没点「拉取」→ 未操作倒计时（配置项，默认 15s）后自动关闭
-  //   3) 用户已点过拉取（完成或失败）、或条目已清空 → 结果反馈停留片刻后关闭
+  //   1) 拉取进行中 → **绝不自动关闭**，等拉取完成并写入本机剪贴板
+  //   2) 有待拉取条目、但用户未点「拉取」→ 未操作倒计时（配置项）后自动关闭
+  //   3) 已点过拉取（完成/失败）或条目已清空 → 结果反馈停留片刻后关闭
   useEffect(() => {
     if (!ready) return;
 
-    const clear = () => {
-      if (hideTimer.current) {
-        clearTimeout(hideTimer.current);
-        hideTimer.current = null;
-      }
-    };
+    const busy = pulling.length > 0;
+    const hasItems = items.length > 0;
 
-    const busy = pulling.size > 0 || crossPulling.size > 0;
-    const hasItems = offers.length > 0 || crossLan.length > 0;
-
-    // 1) 拉取中：保持显示
+    // 1) 拉取中：保持显示，不倒计时
     if (busy) {
-      log('拉取进行中 → 保持显示，不自动关闭');
-      clear();
+      log('拉取进行中 → 保持显示，等待任务完成');
+      setCountdown(0);
       return;
     }
 
     // 2) 有待拉取但用户尚未点拉取 → 未操作倒计时
     if (hasItems && !userActed) {
-      clear();
       if (autoHideMs <= 0) {
         log('配置 toast_auto_hide_ms=0 → 不自动关闭，等用户操作');
+        setCountdown(0);
         return;
       }
-      log(`有待拉取条目，启动未操作倒计时 ${autoHideMs}ms`);
-      hideTimer.current = window.setTimeout(() => {
-        log(`未操作超时（${autoHideMs}ms 内未点击拉取）→ 自动关闭`);
-        hideSelf();
-      }, autoHideMs);
-      return;
+      const total = Math.max(1, Math.round(autoHideMs / 1000));
+      log(`有待拉取条目，启动未操作倒计时 ${autoHideMs}ms（session=${session}）`);
+      setCountdown(total);
+      let left = total;
+      const iv = window.setInterval(() => {
+        left -= 1;
+        setCountdown(left);
+        if (left <= 0) {
+          window.clearInterval(iv);
+          log(`未操作超时（${autoHideMs}ms 内未点击拉取）→ 自动关闭`);
+          hideSelf();
+        }
+      }, 1000);
+      return () => window.clearInterval(iv);
     }
 
-    // 3) 用户已点击拉取（完成/失败）或已无条目 → 结果反馈停留后关闭
-    clear();
-    hideTimer.current = window.setTimeout(() => {
+    // 3) 已点击拉取（完成/失败）或已无条目 → 结果反馈停留后关闭
+    setCountdown(0);
+    const t = window.setTimeout(() => {
       log(`结果反馈停留 ${RESULT_HOLD_MS}ms 结束 → 关闭`);
       hideSelf();
     }, RESULT_HOLD_MS);
+    return () => window.clearTimeout(t);
+  }, [ready, items, pulling, userActed, autoHideMs, session]);
 
-    return clear;
-  }, [ready, offers, pulling, crossLan, crossPulling, userActed, autoHideMs]);
-
-  const onPull = (tid: string) => {
+  const onPull = (it: Item) => {
     // 已操作：取消未操作倒计时，改为「等拉取完成写入剪贴板后再关闭」
     setUserActed(true);
-    setPulling((prev) => new Set(prev).add(tid));
-    setProgress((prev) => ({ ...prev, [tid]: 0 }));
-    setResults((prev) => {
-      const n = { ...prev };
-      delete n[tid];
-      return n;
-    });
-    pullFiles(tid).catch(() => {
-      // 拉取失败时退回待拉取态，让用户可重试
-      setPulling((prev) => {
-        const n = new Set(prev);
-        n.delete(tid);
-        return n;
-      });
-      setProgress((prev) => {
+    if (it.kind === 'local') {
+      const tid = it.offer.transfer_id;
+      setPulling((prev) => (prev.some((x) => x.id === it.id) ? prev : [...prev, it]));
+      setItems((prev) => prev.filter((x) => x.id !== it.id));
+      setProgress((prev) => ({ ...prev, [it.id]: 0 }));
+      setResults((prev) => {
         const n = { ...prev };
-        delete n[tid];
+        delete n[it.id];
         return n;
       });
-      // 失败必须可见：否则小窗静默消失，用户不知道文件没拉到
-      setResults((prev) => ({ ...prev, [tid]: { ok: false, msg: '拉取失败，可重试' } }));
-    });
-  };
-
-  const onCrossPull = (o: CrossLanOffer) => {
-    const ep = o.ext_file_ep;
-    // 已操作：取消未操作倒计时，改为「等拉取完成写入剪贴板后再关闭」
-    setUserActed(true);
-    setCrossPulling((prev) => new Set(prev).add(ep));
-    setResults((prev) => {
-      const n = { ...prev };
-      delete n[`cross-${ep}`];
-      return n;
-    });
-    pullCrossLan(ep, o.manifest).catch(() => {
-      setCrossPulling((prev) => {
-        const n = new Set(prev);
-        n.delete(ep);
+      pullFiles(tid).catch(() => {
+        setPulling((prev) => prev.filter((x) => x.id !== it.id));
+        setItems((prev) => (prev.some((x) => x.id === it.id) ? prev : [it, ...prev]));
+        setProgress((prev) => {
+          const n = { ...prev };
+          delete n[it.id];
+          return n;
+        });
+        setResults((prev) => ({
+          ...prev,
+          [it.id]: { ok: false, msg: '拉取失败，可重试' },
+        }));
+      });
+    } else {
+      const o = it.offer;
+      setPulling((prev) => (prev.some((x) => x.id === it.id) ? prev : [...prev, it]));
+      setItems((prev) => prev.filter((x) => x.id !== it.id));
+      setResults((prev) => {
+        const n = { ...prev };
+        delete n[it.id];
         return n;
       });
-      setResults((prev) => ({
-        ...prev,
-        [`cross-${ep}`]: { ok: false, msg: '拉取失败，可重试' },
-      }));
-    });
+      pullCrossLan(o.ext_file_ep, o.manifest).catch(() => {
+        setPulling((prev) => prev.filter((x) => x.id !== it.id));
+        setItems((prev) => (prev.some((x) => x.id === it.id) ? prev : [it, ...prev]));
+        setResults((prev) => ({
+          ...prev,
+          [it.id]: { ok: false, msg: '拉取失败，可重试' },
+        }));
+      });
+    }
   };
 
-  const isEmpty =
-    offers.length === 0 &&
-    pulling.size === 0 &&
-    crossLan.length === 0 &&
-    crossPulling.size === 0 &&
+  const empty =
+    items.length === 0 &&
+    pulling.length === 0 &&
     Object.keys(results).length === 0;
 
   return (
@@ -315,59 +404,45 @@ export default function PullToast() {
         </button>
       </div>
       <div className="pt-list">
-        {isEmpty && <div className="pt-empty">暂无待拉取文件</div>}
+        {empty && <div className="pt-empty">暂无待拉取文件</div>}
 
-        {offers.map((o) => {
-          const isPulling = pulling.has(o.transfer_id);
-          const pct = progress[o.transfer_id] ?? 0;
+        {pulling.map((it) => {
+          const pct = progress[it.id] ?? 0;
           return (
-            <div className="pt-item" key={o.transfer_id}>
+            <div className="pt-item" key={it.id}>
               <div className="pt-item-top">
-                <span className="pt-name" title={summary(o)}>
-                  {summary(o)}
+                <span className="pt-name" title={itemNames(it)}>
+                  {itemNames(it)}
                 </span>
-                <span className="pt-size">{fmtSize(o.total_size)}</span>
+                <span className="pt-size">{fmtSize(itemSize(it))}</span>
               </div>
-              <div className="pt-sub">{o.device_name}</div>
-              {isPulling ? (
-                <div className="pt-bar">
-                  <div className="pt-bar-fill" style={{ width: `${pct}%` }} />
-                  <span className="pt-pct">{pct}%</span>
-                </div>
-              ) : o.auto_pull ? (
-                <span className="pt-auto">自动拉取中…</span>
-              ) : (
-                <button className="pt-pull" onClick={() => onPull(o.transfer_id)}>
-                  拉取
-                </button>
-              )}
+              <div className="pt-sub">{itemFrom(it)}</div>
+              <div className="pt-bar">
+                <div className="pt-bar-fill" style={{ width: `${pct}%` }} />
+                <span className="pt-pct">{pct}%</span>
+              </div>
             </div>
           );
         })}
 
-        {crossLan.map((o) => {
-          const isPulling = crossPulling.has(o.ext_file_ep);
-          const names = crossNames(o);
-          const total = crossTotal(o);
-          return (
-            <div className="pt-item" key={crossKey(o)}>
-              <div className="pt-item-top">
-                <span className="pt-name" title={names}>
-                  {names || '未知文件'}
-                </span>
-                <span className="pt-size">{total > 0 ? fmtSize(total) : ''}</span>
-              </div>
-              <div className="pt-sub">来自 {o.from_name || o.from}（跨 LAN）</div>
-              {isPulling ? (
-                <span className="pt-auto">拉取中…</span>
-              ) : (
-                <button className="pt-pull" onClick={() => onCrossPull(o)}>
-                  拉取
-                </button>
-              )}
+        {items.map((it) => (
+          <div className="pt-item" key={it.id}>
+            <div className="pt-item-top">
+              <span className="pt-name" title={itemNames(it)}>
+                {itemNames(it)}
+              </span>
+              <span className="pt-size">{fmtSize(itemSize(it))}</span>
             </div>
-          );
-        })}
+            <div className="pt-sub">{itemFrom(it)}</div>
+            {it.kind === 'local' && it.offer.auto_pull ? (
+              <span className="pt-auto">自动拉取中…</span>
+            ) : (
+              <button className="pt-pull" onClick={() => onPull(it)}>
+                拉取
+              </button>
+            )}
+          </div>
+        ))}
 
         {Object.entries(results).map(([k, r]) => (
           <div className="pt-item pt-result" key={k}>
@@ -379,9 +454,15 @@ export default function PullToast() {
         ))}
       </div>
       <div className="pt-foot">
-        {autoHideMs > 0
-          ? `${Math.round(autoHideMs / 1000)} 秒内未点击拉取将自动关闭；点击后等拉取完成再关闭`
-          : '不会自动关闭，需手动处理'}
+        {pulling.length > 0 ? (
+          <span className="pt-foot-wait">等待任务完成后关闭窗口…</span>
+        ) : countdown > 0 ? (
+          <span className="pt-foot-count">{countdown} 秒后自动关闭</span>
+        ) : autoHideMs > 0 ? (
+          <span>{Math.round(autoHideMs / 1000)} 秒内未点击拉取将自动关闭；点击后等拉取完成再关闭</span>
+        ) : (
+          <span>不会自动关闭，需手动处理</span>
+        )}
       </div>
     </div>
   );
