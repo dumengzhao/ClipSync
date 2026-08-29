@@ -265,6 +265,14 @@ pub fn list_pending_offers(state: State<AppState>) -> Vec<serde_json::Value> {
     state.hub.pending_offers_snapshot()
 }
 
+/// 弹出「待拉取文件」小窗，定位统一由 Rust 负责：
+/// macOS 落在屏幕右上角（跟随菜单栏托盘），Windows 落在右下角（跟随任务栏）。
+/// 前端只在待拉取清空时主动 hide()，避免各端坐标错位。
+#[tauri::command]
+pub fn show_pull_toast(app: AppHandle) {
+    crate::transfer::manager::ConnectionHub::show_pull_toast(&app);
+}
+
 // 注意：以下两个命令必须复用引擎持有的常驻剪贴板句柄，不能自建临时实例。
 // X11/Wayland 下临时实例一旦 Drop 就会失去 selection 所有权，写入等于白写。
 

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { invoke } from '@tauri-apps/api/core';
 import { listPendingOffers, pullFiles, PendingOffer } from './api/tauri';
 
 function fmtSize(n: number): string {
@@ -25,14 +26,17 @@ export default function PullToast() {
   const [progress, setProgress] = useState<Record<string, number>>({});
   const [ready, setReady] = useState(false);
   const hideTimer = useRef<number | null>(null);
-  const idleTimer = useRef<number | null>(null);
 
   const hideSelf = () => {
-    if (idleTimer.current) {
-      clearTimeout(idleTimer.current);
-      idleTimer.current = null;
-    }
     void getCurrentWindow().hide();
+  };
+
+  // 待拉取小窗的显示统一收归 Rust：挂载时若有遗留待拉取、或收到新的 file-offer，
+  // 都通过 invoke('show_pull_toast') 让 Rust 负责 show + 定位（macOS 右上角 / Windows 右下角），
+  // 不再由前端自行定位（此前「主窗口有、小窗不弹」的根因是定位/聚焦没在 Rust 侧完成）。
+  // 窗口仅在有待拉取文件时才显示；待拉取清空（全部拉取完成）或用户手动关闭时收起。
+  const showSelf = () => {
+    void invoke('show_pull_toast');
   };
 
   useEffect(() => {
@@ -42,6 +46,7 @@ export default function PullToast() {
           const have = new Set(prev.map((o) => o.transfer_id));
           return [...prev, ...list.filter((o) => !have.has(o.transfer_id))];
         });
+        if (list.length > 0) showSelf();
       })
       .catch(() => {})
       .finally(() => setReady(true));
@@ -53,6 +58,7 @@ export default function PullToast() {
             ? prev
             : [...prev, e.payload],
         );
+        showSelf();
       }),
       listen<{ transfer_id: string }>('file-pull-start', (e) => {
         setPulling((prev) => new Set(prev).add(e.payload.transfer_id));
@@ -99,23 +105,6 @@ export default function PullToast() {
     hideTimer.current = window.setTimeout(hideSelf, 1500);
     return () => {
       if (hideTimer.current) clearTimeout(hideTimer.current);
-    };
-  }, [ready, offers, pulling]);
-
-  // 纯待拉取态且长时间无操作：自动收起小窗（toast 行为，避免一直常驻遮挡右下角）。
-  // 拉取中（pulling 非空）或列表已清空时不启用该计时。
-  useEffect(() => {
-    if (!ready) return;
-    if (offers.length === 0 || pulling.size > 0) {
-      if (idleTimer.current) {
-        clearTimeout(idleTimer.current);
-        idleTimer.current = null;
-      }
-      return;
-    }
-    idleTimer.current = window.setTimeout(hideSelf, 6000);
-    return () => {
-      if (idleTimer.current) clearTimeout(idleTimer.current);
     };
   }, [ready, offers, pulling]);
 
@@ -177,7 +166,7 @@ export default function PullToast() {
           );
         })}
       </div>
-      <div className="pt-foot">6 秒后自动收起，待拉取文件可在主界面处理</div>
+      <div className="pt-foot">拉取完成后自动收起，也可手动关闭</div>
     </div>
   );
 }

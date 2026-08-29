@@ -670,7 +670,7 @@ impl ConnectionHub {
     /// 会话下不可靠（前台权限被系统拒绝）。用 SW_SHOWNOACTIVATE + TOPMOST 既弹出置顶、
     /// 又不抢输入焦点（不打断打字）。非 Windows 回退到 Tauri 原生 show。
     #[cfg(windows)]
-    fn show_pull_toast(app: &AppHandle) {
+    pub fn show_pull_toast(app: &AppHandle) {
         use windows::Win32::UI::WindowsAndMessaging::{
             GetSystemMetrics, SetWindowPos, ShowWindow, HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN,
             SWP_NOACTIVATE, SWP_NOSIZE, SW_SHOWNOACTIVATE, GetWindowRect, IsWindowVisible, IsIconic,
@@ -712,11 +712,26 @@ impl ConnectionHub {
     }
 
     #[cfg(not(windows))]
-    fn show_pull_toast(app: &AppHandle) {
-        if let Some(w) = app.get_webview_window("pull-toast") {
-            let _ = w.show();
-            let _ = w.set_focus();
+    pub fn show_pull_toast(app: &AppHandle) {
+        let Some(w) = app.get_webview_window("pull-toast") else {
+            tracing::warn!("pull-toast 窗口未找到，无法弹出待拉取小窗");
+            return;
+        };
+        // macOS 菜单栏在屏幕顶部、托盘菜单在右上角：小窗定位到「屏幕右上角」并跟随托盘，
+        // 而非右下角。show() 之后必须 set_focus() 才能把窗口真正提到最前（历史可用版本
+        // 8de16b1 即 show()+set_focus()，去掉后 macOS 上小窗落不到前台）。
+        const WIN_W: i32 = 340;
+        const MARGIN: i32 = 16;
+        const TOP: i32 = 28; // 顶栏高度 + 间距，避免被菜单栏遮挡
+        if let Ok(Some(mon)) = app.primary_monitor() {
+            let s = mon.size();
+            let x = (s.width as i32) - WIN_W - MARGIN; // 屏幕右侧
+            let y = TOP; // 顶部
+            let _ = w.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x, y }));
         }
+        tracing::info!("show_pull_toast: 弹出待拉取小窗 (macos, 右上角)");
+        let _ = w.show();
+        let _ = w.set_focus();
     }
 
     pub async fn pull_files(self: Arc<Self>, transfer_id: String) {

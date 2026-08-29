@@ -301,6 +301,7 @@ pub fn run() {
             tauri_cmd::get_server_nodes,
             tauri_cmd::list_cross_lan_offers,
             tauri_cmd::pull_cross_lan,
+            tauri_cmd::show_pull_toast,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
