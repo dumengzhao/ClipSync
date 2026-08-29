@@ -137,6 +137,8 @@ struct PendingOffer {
     top_names: Vec<String>,
     /// 顶层是否含目录（文件夹传输），用于前端折叠/隐藏大小
     has_folder: bool,
+    /// 是否走自动拉取（总大小低于阈值，无需手动点击）
+    auto_pull: bool,
 }
 
 /// 本端正在拉取的传输：写入任务通过 `chunk_tx` 接收分片，最终自动写本机剪贴板。
@@ -360,8 +362,7 @@ impl ConnectionHub {
                         "relative_path": f.relative_path,
                     })).collect::<Vec<_>>(),
                     "total_size": o.files.iter().map(|f| f.file_size).sum::<u64>(),
-                    "auto_pull": o.files.iter().map(|f| f.file_size).sum::<u64>()
-                        < self.auto_pull_threshold_bytes(),
+                    "auto_pull": o.auto_pull,
                 })
             })
             .collect()
@@ -530,6 +531,7 @@ impl ConnectionHub {
                         files: files.clone(),
                         top_names: top_names.clone(),
                         has_folder,
+                        auto_pull,
                     },
                 );
                 if let Some(app) = self.app.lock().unwrap().clone() {
@@ -552,11 +554,17 @@ impl ConnectionHub {
                         }),
                     );
                 }
-                // 需手动拉取的传输：弹出托盘小窗口供一键拉取（不抢焦点，置顶显示）
-                if !auto_pull {
-                    if let Some(app) = self.app.lock().unwrap().clone() {
-                        Self::show_pull_toast(&app);
-                    }
+                // 收到任何远端文件 Offer 都弹出托盘小窗（不抢焦点、置顶），
+                // 无论自动拉取还是手动拉取都给出「有文件到达」的可见反馈。
+                tracing::info!(
+                    "收到来自 {} 的文件 Offer: {} 项, 总大小 {} B, auto_pull={}",
+                    device_name,
+                    files.len(),
+                    total,
+                    auto_pull
+                );
+                if let Some(app) = self.app.lock().unwrap().clone() {
+                    Self::show_pull_toast(&app);
                 }
                 // 小于阈值的传输自动拉取：直接走与手动拉取相同的链路（写盘 + 写本机剪贴板）。
                 if auto_pull {

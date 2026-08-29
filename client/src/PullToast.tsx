@@ -166,6 +166,8 @@ export default function PullToast() {
                   <div className="pt-bar-fill" style={{ width: `${pct}%` }} />
                   <span className="pt-pct">{pct}%</span>
                 </div>
+              ) : o.auto_pull ? (
+                <span className="pt-auto">自动拉取中…</span>
               ) : (
                 <button className="pt-pull" onClick={() => onPull(o.transfer_id)}>
                   拉取
