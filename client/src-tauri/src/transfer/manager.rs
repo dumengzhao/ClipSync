@@ -787,6 +787,10 @@ impl ConnectionHub {
                 Self::raise_ns_window(&w2);
             });
         }
+        // set_focus() 对可见性是**必需**的：实测去掉后小窗虽然 is_visible()==true，
+        // 但屏幕上根本看不到（截图近白占比 0.004 vs 正常 0.549）。
+        // 副作用是 App 会被激活，小窗 hide 后 macOS 会把主窗口顶上来 ——
+        // 该副作用由 `hide_pull_toast` 命令做补偿（必要时重新隐藏主窗口）。
         let _ = w.set_focus();
         if let Ok(vis) = w.is_visible() {
             let foc = w.is_focused().unwrap_or(false);

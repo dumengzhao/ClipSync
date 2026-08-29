@@ -286,6 +286,41 @@ pub fn show_pull_toast(app: AppHandle) {
     crate::transfer::manager::ConnectionHub::show_pull_toast(&app);
 }
 
+/// 收起待拉取小窗。
+///
+/// macOS 补偿逻辑：小窗 show 时用了 `set_focus()`（可见性必需），这会让整个 App 被激活；
+/// 等小窗 hide 之后，系统会自动把该 App 的下一个窗口顶上来 —— 表现为
+/// 「关掉小窗却弹出主窗口」。这里在隐藏前记下主窗口原本的可见性，若它原本不可见
+/// 却被系统带出来了，就延迟一小段再把它重新隐藏。
+#[tauri::command]
+pub fn hide_pull_toast(app: AppHandle) {
+    let main_was_visible = app
+        .get_webview_window("main")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false);
+
+    if let Some(w) = app.get_webview_window("pull-toast") {
+        let _ = w.hide();
+    }
+
+    #[cfg(target_os = "macos")]
+    if !main_was_visible {
+        let app2 = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let app3 = app2.clone();
+            let _ = app2.run_on_main_thread(move || {
+                if let Some(m) = app3.get_webview_window("main") {
+                    if m.is_visible().unwrap_or(false) {
+                        let _ = m.hide();
+                        tracing::info!("hide_pull_toast: 主窗口被系统带出，已重新隐藏");
+                    }
+                }
+            });
+        });
+    }
+}
+
 /// [DEBUG] 前端挂载上报：确认每个窗口实际渲染了哪个分支。
 /// pull-toast 窗口必须渲染 PullToast；若渲染成 App，说明 `main.tsx` 的 `isToast`
 /// 判断失效 —— 这类问题只看 Rust 日志永远发现不了，因为窗口照样 `is_visible()==true`，
@@ -312,14 +347,20 @@ pub fn debug_toast_log(msg: String) {
 #[cfg(debug_assertions)]
 #[tauri::command]
 pub fn simulate_cross_lan_offer(app: AppHandle) {
+    // 每次生成不同的 key：真实场景下不同文件/不同时刻的通知 key 也不同，
+    // 若固定 key 会被前端去重逻辑挡掉，测不出"第二次弹窗"的真实行为。
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
     let manifest = serde_json::json!([
-        { "file_name": "跨LAN演示文件.zip", "file_size": 3 * 1024 * 1024, "is_dir": false }
+        { "file_name": format!("跨LAN演示文件-{now}.zip"), "file_size": 3 * 1024 * 1024, "is_dir": false }
     ]);
     let offer = crate::server_conn::CrossLanOffer {
-        from: "cross-lan-sim-0001".to_string(),
+        from: format!("cross-lan-sim-{now}"),
         from_name: "跨LAN模拟设备".to_string(),
         manifest,
-        ext_file_ep: "127.0.0.1:65500".to_string(),
+        ext_file_ep: format!("127.0.0.1:{}", 50000 + (now % 1000) as u16),
     };
     let _ = app.emit("cross-lan-file", offer);
     // 与真实跨 LAN 路径保持一致：通知后弹出待拉取小窗

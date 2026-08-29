@@ -125,6 +125,7 @@ pub fn run() {
         .setup(|app| {
             build_tray(app)?;
 
+
             // 加载持久化配置（覆盖默认），使改过的端口等设置重启后仍生效
             let handle = app.handle().clone();
             let persisted = {
@@ -302,6 +303,7 @@ pub fn run() {
             tauri_cmd::list_cross_lan_offers,
             tauri_cmd::pull_cross_lan,
             tauri_cmd::show_pull_toast,
+            tauri_cmd::hide_pull_toast,
             #[cfg(debug_assertions)]
             tauri_cmd::simulate_incoming_offer,
             #[cfg(debug_assertions)]
