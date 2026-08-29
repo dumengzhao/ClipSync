@@ -1052,7 +1052,28 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
                         SyncEvent::LocalFilesCopied { paths } => {
                             // 本地拷贝了文件/目录：广播「可拉取」清单给所有对端。
                             // 注意不把绝对路径外传——对端只拿到元数据，文件内容走拉取。
+                            let names: Vec<String> = paths
+                                .iter()
+                                .filter_map(|p| {
+                                    p.file_name().map(|n| n.to_string_lossy().to_string())
+                                })
+                                .collect();
                             hub.offer_local_files(paths);
+                            // 发送端本机反馈：复制后给本机弹「已复制并同步到对端」提示，
+                            // 避免用户在本机复制时完全无视觉反馈（弹窗设计在接收端，本机复制
+                            // 默认不弹，导致「有文件不显示」的错觉）。仅在有已连对端时提示。
+                            if hub.peers.lock().unwrap().len() > 0 {
+                                if let Some(app) = hub.app.lock().unwrap().clone() {
+                                    let _ = app.emit(
+                                        "file-sent",
+                                        serde_json::json!({
+                                            "names": names,
+                                            "count": names.len(),
+                                        }),
+                                    );
+                                    Self::show_pull_toast(&app);
+                                }
+                            }
                         }
                         SyncEvent::RemoteClipboardApplied { .. } => {
                             // 来自对端的剪贴板更新已在本机落盘/写剪贴板，无需再转发回去
