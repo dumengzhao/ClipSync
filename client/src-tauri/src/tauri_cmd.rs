@@ -301,6 +301,21 @@ pub fn hide_pull_toast(app: AppHandle) {
 
     if let Some(w) = app.get_webview_window("pull-toast") {
         let _ = w.hide();
+        // Windows：Tauri 的 hide() 在 RDP/受限会话下同样可能静默失效（与 show() 同一类问题），
+        // 这里用 Win32 ShowWindow(SW_HIDE) 兜底，确保「自动关闭」一定生效。
+        // 注意：前端日志里的「hide_pull_toast 成功」只代表 invoke 返回成功，不代表窗口真隐藏了。
+        #[cfg(windows)]
+        if let Ok(h) = w.hwnd() {
+            use windows::Win32::Foundation::HWND;
+            use windows::Win32::UI::WindowsAndMessaging::{IsWindowVisible, ShowWindow, SW_HIDE};
+            let hwnd = HWND(h.0 as *mut std::ffi::c_void);
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_HIDE);
+                if IsWindowVisible(hwnd).as_bool() {
+                    tracing::warn!("hide_pull_toast(win32): ShowWindow(SW_HIDE) 后窗口仍可见");
+                }
+            }
+        }
     }
 
     #[cfg(target_os = "macos")]

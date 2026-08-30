@@ -83,6 +83,8 @@ windows = { version = "0.58", features = [
     "Win32_System_DataExchange",
     "Win32_Security_Cryptography",
     "Win32_Security_Credentials",
+    # pull-toast 定位需要：MonitorFromWindow / GetMonitorInfoW / MONITORINFO（取显示器工作区）
+    "Win32_Graphics_Gdi",
 ] }
 
 # macOS-specific
