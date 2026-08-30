@@ -671,42 +671,70 @@ impl ConnectionHub {
     /// 又不抢输入焦点（不打断打字）。非 Windows 回退到 Tauri 原生 show。
     #[cfg(windows)]
     pub fn show_pull_toast(app: &AppHandle) {
-        use windows::Win32::UI::WindowsAndMessaging::{
-            GetSystemMetrics, SetWindowPos, ShowWindow, HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN,
-            SWP_NOACTIVATE, SWP_NOSIZE, SW_SHOWNOACTIVATE, GetWindowRect, IsWindowVisible, IsIconic,
-        };
         use windows::Win32::Foundation::{HWND, RECT};
-        const WIN_W: i32 = 340;
-        const WIN_H: i32 = 200;
+        use windows::Win32::Graphics::Gdi::{
+            GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowRect, IsIconic, IsWindowVisible, SetWindowPos, ShowWindow, HWND_TOPMOST,
+            SWP_NOACTIVATE, SWP_NOSIZE, SW_SHOWNOACTIVATE,
+        };
         const MARGIN: i32 = 16;
-        const TASKBAR: i32 = 48;
         let Some(w) = app.get_webview_window("pull-toast") else {
             tracing::warn!("pull-toast 窗口未找到，无法弹出待拉取小窗");
             return;
         };
-        tracing::info!("show_pull_toast: 准备弹出待拉取小窗 (win32)");
-        // 用 Win32 直接定位（右下角）+ 显示，绕过 Tauri set_position/show 在 RDP 下失效
-        let sw = unsafe { GetSystemMetrics(SM_CXSCREEN) };
-        let sh = unsafe { GetSystemMetrics(SM_CYSCREEN) };
-        let x = (sw - WIN_W - MARGIN) as i32;
-        let y = (sh - WIN_H - MARGIN - TASKBAR) as i32;
-        if let Ok(h) = w.hwnd() {
-            // Tauri hwnd() 返回的 HWND 与 windows 0.58 的 HWND 未必是同一 crate 别名，
-            // 统一转成 *mut c_void 再包成 windows 0.58 的 HWND，确保 ShowWindow 类型匹配。
-            let hwnd = HWND(h.0 as *mut std::ffi::c_void);
-            unsafe {
+        let Ok(h) = w.hwnd() else {
+            tracing::warn!("show_pull_toast: 取不到 pull-toast 的 HWND");
+            return;
+        };
+        // Tauri hwnd() 返回的 HWND 与 windows 0.58 的 HWND 未必是同一 crate 别名，
+        // 统一转成 *mut c_void 再包成 windows 0.58 的 HWND，确保 ShowWindow 类型匹配。
+        let hwnd = HWND(h.0 as *mut std::ffi::c_void);
+        unsafe {
+            // 先显示再定位：从未显示过的窗口 GetWindowRect 可能返回无效矩形。
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+
+            // 窗口实际尺寸（物理像素）。绝不硬编码 tauri.conf.json 里的 340x200 逻辑尺寸：
+            // 高 DPI 下逻辑尺寸会被放大（实测 1.5625 倍 → 532x311），写死会把窗口推出屏幕外
+            // （历史 bug：右边越界 176px、底部越界 47px，导致页脚倒计时和右上角 × 都被切掉）。
+            let mut rc: RECT = std::mem::zeroed();
+            let _ = GetWindowRect(hwnd, &mut rc);
+            let ww = (rc.right - rc.left).max(1);
+            let wh = (rc.bottom - rc.top).max(1);
+
+            // 取「窗口所在显示器」的工作区：rcWork 已排除任务栏（不管任务栏在上下左右），
+            // 且天然支持多显示器与负坐标；与主屏尺寸无关。与 SetWindowPos 同为物理坐标系。
+            let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            let mut mi: MONITORINFO = std::mem::zeroed();
+            mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+            if GetMonitorInfoW(mon, &mut mi).as_bool() {
+                let work = mi.rcWork;
+                let mut x = work.right - ww - MARGIN;
+                let mut y = work.bottom - wh - MARGIN;
+                // 兜底夹紧：窗口比工作区还大时，至少保证左上角可见
+                if x < work.left {
+                    x = work.left;
+                }
+                if y < work.top {
+                    y = work.top;
+                }
                 let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
-                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-                // 诊断：确认窗口是否真的被显示、定位到了哪里（RDP 下坐标可能落到不可见区域）
-                let mut rect: RECT = std::mem::zeroed();
-                let _ = GetWindowRect(hwnd, &mut rect);
+
+                let mut after: RECT = std::mem::zeroed();
+                let _ = GetWindowRect(hwnd, &mut after);
                 let vis = IsWindowVisible(hwnd).as_bool();
                 let ico = IsIconic(hwnd).as_bool();
-                let screen = format!("screen={sw}x{sh}");
+                let inside = after.right <= work.right && after.bottom <= work.bottom
+                    && after.left >= work.left && after.top >= work.top;
                 tracing::info!(
-                    "show_pull_toast: 目标=({x},{y}) 实际rect=({},{})-({},{}) visible={vis} iconic={ico} {screen}",
-                    rect.left, rect.top, rect.right, rect.bottom
+                    "show_pull_toast: 窗口 {}x{} 定位=({}, {}) 实际rect=({},{})-({},{}) work=({},{})-({},{}) 完全可见={inside} visible={vis} iconic={ico}",
+                    ww, wh, x, y,
+                    after.left, after.top, after.right, after.bottom,
+                    work.left, work.top, work.right, work.bottom
                 );
+            } else {
+                tracing::warn!("show_pull_toast: GetMonitorInfoW 失败，跳过定位（窗口已显示）");
             }
         }
     }
