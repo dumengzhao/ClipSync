@@ -711,42 +711,36 @@ body {
   }
 }
 
-.pt-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0.5rem 0.75rem;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.25);
-}
-
-.pt-title {
-  font-weight: 600;
-  font-size: 0.95rem;
-}
-
+/* 关闭按钮：位于页脚右侧 */
 .pt-close {
+  flex: none;
   border: none;
   background: transparent;
-  color: inherit;
-  font-size: 1.15rem;
+  color: #94a3b8;
+  font-size: 0.95rem;
   line-height: 1;
-  width: 24px;
-  height: 24px;
-  border-radius: 6px;
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
   cursor: pointer;
+  padding: 0;
 }
 
 .pt-close:hover {
   background: rgba(148, 163, 184, 0.20);
+  color: inherit;
 }
 
+/* 不设 flex-grow：列表按内容高度收缩，避免条目少时把页脚顶到最底部留出大片空白。
+   窗口高度由前端测量后自适应（见 PullToast.tsx 的高度自适应 effect）。 */
 .pt-list {
-  flex: 1;
+  flex: 0 1 auto;
+  min-height: 0;
   overflow-y: auto;
-  padding: 0.5rem 0.6rem;
+  padding: 0.45rem 0.55rem;
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 0.45rem;
 }
 
 .pt-empty {
@@ -906,10 +900,24 @@ body {
   text-shadow: 0 1px 1px rgba(0, 0, 0, 0.35);
 }
 
+/* 页脚：左侧状态文案 + 右侧关闭按钮 */
 .pt-foot {
-  padding: 0.4rem 0.75rem;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.3rem 0.45rem 0.3rem 0.6rem;
   border-top: 1px solid rgba(148, 163, 184, 0.25);
   color: #94a3b8;
   font-size: 0.72rem;
-  text-align: center;
+  text-align: left;
+}
+
+/* 状态文案过长时截断，保证关闭按钮始终贴在右下角 */
+.pt-foot-msg {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

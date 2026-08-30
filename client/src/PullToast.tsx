@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 import { invoke } from '@tauri-apps/api/core';
 import {
   listPendingOffers,
@@ -18,6 +18,13 @@ const DEFAULT_AUTO_HIDE_MS = 15_000;
 const RESULT_HOLD_MS = 3_000;
 /** 窗口内「同时展示」的条目总数上限（正在拉取的也占位） */
 const MAX_TOTAL = 3;
+/** 小窗宽度（逻辑像素），必须与 tauri.conf.json 中 pull-toast 的 width 一致 */
+const WIN_W = 340;
+/** 高度自适应区间：下限避免内容过少时窗口塌缩，上限避免撑满屏幕 */
+const MIN_H = 76;
+const MAX_H = 360;
+/** 上下边框合计（.pull-toast 的 1px border × 2） */
+const BORDER_H = 2;
 
 function fmtSize(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -96,6 +103,13 @@ export default function PullToast() {
   const [session, setSession] = useState(0);
   const pullingRef = useRef<Item[]>([]);
   pullingRef.current = pulling;
+
+  // 高度自适应：测量「列表内容 + 页脚」的真实高度，反向设置窗口高度，
+  // 消除固定 200px 造成的底部大片空白。
+  const listRef = useRef<HTMLDivElement>(null);
+  const footRef = useRef<HTMLDivElement>(null);
+  /** 上一次已设置的高度，避免每帧/每秒倒计时都重复调用 setSize */
+  const lastH = useRef(0);
 
   // [DEBUG] 诊断上报：把前端关键节点写进 Rust 日志，便于排查前端黑盒问题。
   const log = (m: string) => {
@@ -344,6 +358,25 @@ export default function PullToast() {
     return () => window.clearTimeout(t);
   }, [ready, items, pulling, userActed, autoHideMs, session]);
 
+  // 窗口高度自适应内容：固定 200px 时，条目少会在列表与页脚之间留下大片空白。
+  // 用 list.scrollHeight（内容超出时它仍是完整内容高度，而非被压缩后的可视高度）
+  // 加页脚高度反推目标高度。
+  // 关键：改完尺寸必须让 Rust 重新定位——它是按窗口「实际」尺寸贴右下角的，
+  // 不重新定位的话底边/右边会错位（历史 bug 的根源就是这个尺寸不一致）。
+  useEffect(() => {
+    const listH = listRef.current?.scrollHeight ?? 0;
+    const footH = footRef.current?.offsetHeight ?? 0;
+    if (listH === 0 && footH === 0) return;
+    const target = Math.min(MAX_H, Math.max(MIN_H, listH + footH + BORDER_H));
+    if (lastH.current === target) return;
+    lastH.current = target;
+    log(`高度自适应: ${target}px（列表 ${listH} + 页脚 ${footH} + 边框 ${BORDER_H}）`);
+    void getCurrentWindow()
+      .setSize(new LogicalSize(WIN_W, target))
+      .then(() => invoke('show_pull_toast'))
+      .catch((e: unknown) => log(`高度自适应失败: ${String(e)}`));
+  }, [items, pulling, results, countdown, ready]);
+
   const onPull = (it: Item) => {
     // 已操作：取消未操作倒计时，改为「等拉取完成写入剪贴板后再关闭」
     setUserActed(true);
@@ -397,13 +430,7 @@ export default function PullToast() {
 
   return (
     <div className="pull-toast">
-      <div className="pt-head">
-        <span className="pt-title">待拉取文件</span>
-        <button className="pt-close" onClick={hideSelf} title="关闭">
-          ×
-        </button>
-      </div>
-      <div className="pt-list">
+      <div className="pt-list" ref={listRef}>
         {empty && <div className="pt-empty">暂无待拉取文件</div>}
 
         {pulling.map((it) => {
@@ -453,16 +480,21 @@ export default function PullToast() {
           </div>
         ))}
       </div>
-      <div className="pt-foot">
-        {pulling.length > 0 ? (
-          <span className="pt-foot-wait">等待任务完成后关闭窗口…</span>
-        ) : countdown > 0 ? (
-          <span className="pt-foot-count">{countdown} 秒后自动关闭</span>
-        ) : autoHideMs > 0 ? (
-          <span>{Math.round(autoHideMs / 1000)} 秒内未点击拉取将自动关闭；点击后等拉取完成再关闭</span>
-        ) : (
-          <span>不会自动关闭，需手动处理</span>
-        )}
+      <div className="pt-foot" ref={footRef}>
+        <span className="pt-foot-msg">
+          {pulling.length > 0 ? (
+            <span className="pt-foot-wait">等待任务完成后关闭…</span>
+          ) : countdown > 0 ? (
+            <span className="pt-foot-count">{countdown} 秒后自动关闭</span>
+          ) : autoHideMs > 0 ? (
+            <span>{Math.round(autoHideMs / 1000)} 秒内未点击将自动关闭</span>
+          ) : (
+            <span>不会自动关闭，需手动处理</span>
+          )}
+        </span>
+        <button className="pt-close" onClick={hideSelf} title="关闭">
+          ×
+        </button>
       </div>
     </div>
   );
