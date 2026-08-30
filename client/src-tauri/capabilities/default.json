@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for main / settings / pull-toast windows. 注意：pull-toast 必须在 windows 列表内，否则该窗口没有任何权限 —— 前端 window.hide() 会被拒（表现为点关闭没反应），事件监听也会失效（收不到 cross-lan-file / file-offer，表现为弹窗内没有待拉取文件）。",
+  "description": "Capability for main / settings / pull-toast windows. 注意1：pull-toast 必须在 windows 列表内，否则该窗口没有任何权限 —— 前端 window.hide() 会被拒（表现为点关闭没反应），事件监听也会失效（收不到 cross-lan-file / file-offer，表现为弹窗内没有待拉取文件）。注意2：前端用到的每个 window API 都要在这里单独授权，漏一个就运行时报 \"xxx not allowed\"（例如高度自适应需要 core:window:allow-set-size）；失败只出现在前端 console/Rust 日志里，界面上表现为「功能静默不生效」。",
   "windows": ["main", "settings", "pull-toast"],
   "permissions": [
     "core:default",
@@ -9,6 +9,7 @@
     "core:window:allow-hide",
     "core:window:allow-show",
     "core:window:allow-set-focus",
+    "core:window:allow-set-size",
     "updater:default",
     "autostart:default",
     "shell:allow-open",
