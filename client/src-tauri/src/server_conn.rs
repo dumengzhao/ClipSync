@@ -687,8 +687,12 @@ impl ServerConn {
     }
 
     /// 跨 LAN 拉取：从对端 ext_file_ep 下载文件并写本机剪贴板。
+    /// `pull_id` 是前端「待拉取条目」的唯一 id（不含 `local:` 前缀），用于把
+    /// 进度事件(`file-pull-progress`/`file-pull-complete`)精准投递给对应条目，
+    /// 让小窗进度条能实时更新（历史 bug：跨 LAN 路径从不发进度事件，进度条卡 0%）。
     pub async fn pull_cross_lan(
         &self,
+        pull_id: &str,
         ext_file_ep: &str,
         manifest: serde_json::Value,
     ) -> anyhow::Result<()> {
@@ -712,13 +716,68 @@ impl ServerConn {
             let cfg = state.config.lock();
             cfg.listen_port
         };
+        let app = &self.app;
+        // 总大小（明文，与前端 itemSize 对齐）用于进度百分比
+        let total_plain: u64 = files.iter().map(|f| f.file_size as u64).sum();
+        let mut done_plain: u64 = 0u64;
         let mut saved = Vec::new();
+        // 通知前端「拉取已开始」（与 P2P 路径 file-pull-start 对齐）
+        let _ = app.emit(
+            "file-pull-start",
+            serde_json::json!({ "transfer_id": pull_id }),
+        );
         for f in &files {
             let hash = f.hash.clone().unwrap_or_default();
             let url = format!("http://{pull_host}:{pull_port}/file/{hash}");
-            let raw = reqwest::get(&url).await?.bytes().await?;
-            // 跨 LAN 文件字节在传输层加密（nonce 12B 前置，复用 network_key）：
-            // 下载后解密写盘；密钥未就绪（本机未连服务端）则按明文写盘（降级）。
+            let resp = reqwest::get(&url).await?;
+            let enc_len = resp.content_length().unwrap_or(0) as u64;
+            // 流式下载到临时文件，边下边上报进度——大文件也能看到中间进度，
+            // 不再「等很久一直 0%」。
+            let dest = std::path::Path::new(&sync_dir).join(&f.file_name);
+            let tmp = dest.with_extension(format!("{}.clipsync.tmp", std::process::id()));
+            {
+                use tokio::io::AsyncWriteExt;
+                let mut tmpf = tokio::fs::File::create(&tmp).await
+                    .map_err(|e| anyhow::anyhow!("创建临时文件失败: {e}"))?;
+                let mut stream = resp.bytes_stream();
+                let mut received: u64 = 0;
+                let mut last_pct: u32 = 0;
+                let mut last_at = std::time::Instant::now();
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.map_err(|e| anyhow::anyhow!("下载失败: {e}"))?;
+                    tmpf.write_all(&chunk).await
+                        .map_err(|e| anyhow::anyhow!("写临时文件失败: {e}"))?;
+                    received += chunk.len() as u64;
+                    // 按「密文已下比例」估算当前文件明文进度（密文 = nonce12 + 明文）
+                    let file_done = if enc_len > 0 {
+                        received * (f.file_size as u64) / enc_len
+                    } else {
+                        f.file_size as u64
+                    };
+                    let overall = done_plain + file_done;
+                    let pct = (overall * 100 / total_plain.max(1)) as u32;
+                    let now = std::time::Instant::now();
+                    if pct.saturating_sub(last_pct) >= 5
+                        || now.duration_since(last_at) >= std::time::Duration::from_millis(200)
+                    {
+                        last_pct = pct;
+                        last_at = now;
+                        let _ = app.emit(
+                            "file-pull-progress",
+                            serde_json::json!({
+                                "transfer_id": pull_id,
+                                "received": overall,
+                                "total": total_plain,
+                                "percent": pct,
+                            }),
+                        );
+                    }
+                }
+                tmpf.flush().await.ok();
+            }
+            // 读取密文并解密写盘；密钥未就绪则按明文写盘（降级）
+            let raw = tokio::fs::read(&tmp).await
+                .map_err(|e| anyhow::anyhow!("读取临时文件失败: {e}"))?;
             let key = *state.network_key.lock().unwrap();
             let bytes: Vec<u8> = match key {
                 Some(k) if raw.len() >= NONCE_SIZE => {
@@ -740,12 +799,24 @@ impl ServerConn {
                 }
                 _ => raw.to_vec(),
             };
-            let dest = std::path::Path::new(&sync_dir).join(&f.file_name);
+            tokio::fs::remove_file(&tmp).await.ok();
             if let Some(parent) = dest.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
             std::fs::write(&dest, &bytes)?;
-            saved.push(dest);
+            saved.push(dest.clone());
+            done_plain += f.file_size as u64;
+            // 文件边界补报一次精确百分比
+            let pct = (done_plain * 100 / total_plain.max(1)) as u32;
+            let _ = app.emit(
+                "file-pull-progress",
+                serde_json::json!({
+                    "transfer_id": pull_id,
+                    "received": done_plain,
+                    "total": total_plain,
+                    "percent": pct,
+                }),
+            );
         }
         if !saved.is_empty() {
             // 回声抑制：拉取完成后写本机剪贴板，若被本机监听误判为新的文件拷贝，
@@ -758,6 +829,39 @@ impl ServerConn {
                 .write_file_paths(&saved)
                 .await?;
         }
+        // 收尾：显式上报 100%，再发 complete（若失败由调用方补发 ok:false）
+        let _ = app.emit(
+            "file-pull-progress",
+            serde_json::json!({
+                "transfer_id": pull_id,
+                "received": total_plain,
+                "total": total_plain,
+                "percent": 100u32,
+            }),
+        );
+        let _ = app.emit(
+            "file-pull-complete",
+            serde_json::json!({
+                "transfer_id": pull_id,
+                "device_name": "",
+                "target_dir": sync_dir,
+                "file_count": saved.len(),
+                "files": files
+                    .iter()
+                    .map(|f| serde_json::json!({
+                        "name": f.file_name,
+                        "size": f.file_size,
+                        "is_dir": f.is_dir,
+                    }))
+                    .collect::<Vec<_>>(),
+                "pulled_at": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                "ok": true,
+            }),
+        );
+        tracing::info!("跨 LAN 拉取 {pull_id} 完成，共写入 {done_plain} 字节");
         Ok(())
     }
 }

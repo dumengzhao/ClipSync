@@ -196,12 +196,36 @@ export async function listCrossLanOffers(): Promise<CrossLanOffer[]> {
 
 /** 拉取某条跨 LAN 文件通知（从对端 ext_file_ep 下载并写本机剪贴板） */
 export async function pullCrossLan(
+  pullId: string,
   extFileEp: string,
   manifest: unknown,
 ): Promise<void> {
   return invoke<void>('pull_cross_lan', {
+    pullId,
     extFileEp,
     manifest,
   });
+}
+
+/**
+ * 跨 LAN 待拉取条目的稳定 base id（不含 `local:` 前缀）。
+ * 必须与 PullToast 用于 item.id 的 `crossItemId` 同源——后端据此把进度事件
+ * (transfer_id = 此 base) 经 `local:` 前缀拼接后精确投递到对应小窗条目。
+ * 不能只用 from+ext_file_ep（同一设备连续发多文件会误判重复，见 PullToast 注释）。
+ */
+export function crossItemBase(o: CrossLanOffer): string {
+  const names = (o.manifest || [])
+    .map((f: { file_name: string }) => f.file_name)
+    .join('、');
+  const total = (o.manifest || []).reduce(
+    (s: number, f: { file_size: number }) => s + (f.file_size || 0),
+    0,
+  );
+  return `${o.from}:${o.ext_file_ep}:${names}:${total}`;
+}
+
+/** 跨 LAN 条目在小窗中的完整 id（带 `local:` 前缀，与进度事件 key 对齐）。 */
+export function crossItemId(o: CrossLanOffer): string {
+  return `local:${crossItemBase(o)}`;
 }
 

@@ -8,6 +8,8 @@ import {
   PendingOffer,
   listCrossLanOffers,
   pullCrossLan,
+  crossItemBase,
+  crossItemId,
   CrossLanOffer,
   getConfig,
 } from './api/tauri';
@@ -69,14 +71,11 @@ function itemFrom(it: Item): string {
 }
 
 /**
- * 跨 LAN 条目的唯一 id。
- * 注意：不能只用 `from + ext_file_ep` —— 同一台设备（同一端口）连续发多个文件时
- * 该组合恒定，会把后续文件误判为重复而丢弃（表现为"第二次起不再自动关闭/不显示新文件"）。
- * 因此把文件名与总大小也纳入。
+ * 跨 LAN 条目的唯一 id 现由 `api/tauri.ts` 的 `crossItemId` 统一提供（带 `local:` 前缀），
+ * 与后端进度事件 key 对齐；`crossItemBase` 用作拉取时传给后端的 pull_id（不带前缀）。
+ * 不能只用 `from + ext_file_ep` —— 同一台设备（同一端口）连续发多个文件时该组合恒定，
+ * 会把后续文件误判为重复而丢弃。
  */
-function crossItemId(o: CrossLanOffer): string {
-  return `cross:${o.from}:${o.ext_file_ep}:${crossNames(o)}:${crossTotal(o)}`;
-}
 
 export default function PullToast() {
   /** 待拉取（尚未开始拉取） */
@@ -249,32 +248,42 @@ export default function PullToast() {
         }));
       }),
 
-      listen<{ transfer_id: string }>('file-pull-complete', (e) => {
-        const id = `local:${e.payload.transfer_id}`;
-        log(`file-pull-complete: ${id}`);
-        // 进度拉满到 100%，并把条目从 pulling 移到 completed：保留进度条可见 ~1.2s，
-        // 让用户确实看到「100%」再转结果，而不是瞬间关闭。
-        setProgress((prev) => ({ ...prev, [id]: 100 }));
-        setPulling((prev) => {
-          const it = prev.find((x) => x.id === id);
-          if (it) setCompleted((c) => ({ ...c, [id]: it }));
-          return prev.filter((x) => x.id !== id);
-        });
-        setItems((prev) => prev.filter((x) => x.id !== id));
-        window.setTimeout(() => {
-          setCompleted((c) => {
-            const n = { ...c };
-            delete n[id];
-            return n;
+      listen<{ transfer_id: string; ok?: boolean; error?: string }>(
+        'file-pull-complete',
+        (e) => {
+          const id = `local:${e.payload.transfer_id}`;
+          const ok = e.payload.ok !== false;
+          log(`file-pull-complete: ${id} ok=${ok}`);
+          // 进度拉满到 100%，并把条目从 pulling 移到 completed：保留进度条可见 ~1.2s，
+          // 让用户确实看到「100%」再转结果，而不是瞬间关闭。
+          setProgress((prev) => ({ ...prev, [id]: 100 }));
+          setPulling((prev) => {
+            const it = prev.find((x) => x.id === id);
+            if (it) setCompleted((c) => ({ ...c, [id]: it }));
+            return prev.filter((x) => x.id !== id);
           });
-          setResults((prev) => ({ ...prev, [id]: { ok: true, msg: '已保存到本地' } }));
-          setProgress((prev) => {
-            const n = { ...prev };
-            delete n[id];
-            return n;
-          });
-        }, 1200);
-      }),
+          setItems((prev) => prev.filter((x) => x.id !== id));
+          window.setTimeout(() => {
+            setCompleted((c) => {
+              const n = { ...c };
+              delete n[id];
+              return n;
+            });
+            setResults((prev) => ({
+              ...prev,
+              [id]: {
+                ok,
+                msg: ok ? '已保存到本地' : `拉取失败：${e.payload.error || '未知错误'}`,
+              },
+            }));
+            setProgress((prev) => {
+              const n = { ...prev };
+              delete n[id];
+              return n;
+            });
+          }, 1200);
+        },
+      ),
 
       listen<{ ext_file_ep: string; ok: boolean; error?: string }>(
         'cross-lan-pull-complete',
@@ -421,12 +430,14 @@ export default function PullToast() {
       const o = it.offer;
       setPulling((prev) => (prev.some((x) => x.id === it.id) ? prev : [...prev, it]));
       setItems((prev) => prev.filter((x) => x.id !== it.id));
+      // 跨 LAN 拉取现在会实时上报进度；先把进度条初始化为 0，避免一上来就空白
+      setProgress((prev) => ({ ...prev, [it.id]: 0 }));
       setResults((prev) => {
         const n = { ...prev };
         delete n[it.id];
         return n;
       });
-      pullCrossLan(o.ext_file_ep, o.manifest).catch(() => {
+      pullCrossLan(crossItemBase(o), o.ext_file_ep, o.manifest).catch(() => {
         setPulling((prev) => prev.filter((x) => x.id !== it.id));
         setItems((prev) => (prev.some((x) => x.id === it.id) ? prev : [it, ...prev]));
         setResults((prev) => ({

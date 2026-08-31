@@ -53,7 +53,7 @@ uuid = { version = "1", features = ["v4"] }
 tokio-tungstenite = "0.23"
 mdns-sd = "0.11"
 futures-util = "0.3"
-reqwest = "0.12"
+reqwest = { version = "0.12", features = ["stream"] }
 
 # Platform clipboard (will be replaced by native impl in phase 3)
 arboard = "3"

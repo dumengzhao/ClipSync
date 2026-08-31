@@ -15,6 +15,7 @@ import {
   getServerStatus,
   listCrossLanOffers,
   pullCrossLan,
+  crossItemBase,
   type DiscoveredPeer,
   type PairedDeviceInfo,
   type PendingOffer,
@@ -349,12 +350,12 @@ export default function App() {
   };
 
   /// 跨 LAN 拉取：从对端 ext_file_ep 下载文件并写本机剪贴板。
-  const doCrossPull = async (extEp: string, manifest: unknown) => {
-    const key = extEp;
+  const doCrossPull = async (o: CrossLanOffer) => {
+    const key = o.ext_file_ep;
     setCrossPulling((prev) => new Set(prev).add(key));
     try {
-      await pullCrossLan(extEp, manifest);
-      setCrossLanOffers((prev) => prev.filter((o) => o.ext_file_ep !== extEp));
+      await pullCrossLan(crossItemBase(o), o.ext_file_ep, o.manifest);
+      setCrossLanOffers((prev) => prev.filter((x) => x.ext_file_ep !== o.ext_file_ep));
       flash('已拉取跨 LAN 文件');
     } catch (e) {
       flash('跨 LAN 拉取失败: ' + String(e));
@@ -639,7 +640,7 @@ export default function App() {
                         ) : (
                           <button
                             className="btn btn-sm"
-                            onClick={() => doCrossPull(o.ext_file_ep, o.manifest)}
+                            onClick={() => doCrossPull(o)}
                           >
                             拉取
                           </button>
