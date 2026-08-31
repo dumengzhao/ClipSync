@@ -379,7 +379,7 @@ export default function PullToast() {
       hideSelf();
     }, RESULT_HOLD_MS);
     return () => window.clearTimeout(t);
-  }, [ready, items, pulling, userActed, autoHideMs, session]);
+  }, [ready, items, pulling, completed, results, userActed, autoHideMs, session]);
 
   // 窗口高度自适应内容：固定 200px 时，条目少会在列表与页脚之间留下大片空白。
   // 用 list.scrollHeight（内容超出时它仍是完整内容高度，而非被压缩后的可视高度）
