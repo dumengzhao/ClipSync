@@ -85,7 +85,7 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  margin-right: -1rem;
+  margin-right: -2rem;
 }
 
 /* 右栏滚动区域：在「打开设置」按钮之上独立滚动 */
@@ -685,9 +685,7 @@ body {
   gap: 6px;
   font-size: 12px;
   color: #94a3b8;
-  overflow: hidden;
   white-space: nowrap;
-  text-overflow: ellipsis;
   min-width: 0;
 }
 
@@ -721,11 +719,7 @@ body {
 
 .titlebar-device {
   color: #cbd5e1;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
-  min-width: 0;
-  max-width: 45%;
 }
 
 .tb-btn {

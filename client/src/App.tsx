@@ -708,11 +708,22 @@ export default function App() {
             {msg && <span className="status-msg">{msg}</span>}
           </div>
           <div className="status-bar-right">
-            {serverStatus === 2
-              ? '跨 LAN 同步 · 已启用'
-              : serverStatus === 1
-                ? '跨 LAN 同步 · 待启用'
-                : '跨 LAN 同步 · 未连接'}
+            <span
+              className={
+                'titlebar-status ' +
+                (serverStatus === 2
+                  ? 'active'
+                  : serverStatus === 1
+                    ? 'pending'
+                    : 'disconnected')
+              }
+            >
+              {serverStatus === 2
+                ? '跨 LAN 同步 · 已启用'
+                : serverStatus === 1
+                  ? '跨 LAN 同步 · 待启用'
+                  : '跨 LAN 同步 · 未连接'}
+            </span>
           </div>
         </div>
       </main>
