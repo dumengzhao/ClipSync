@@ -16,6 +16,8 @@
         "title": "ClipSync",
         "width": 800,
         "height": 600,
+        "minWidth": 640,
+        "minHeight": 440,
         "resizable": true,
         "decorations": false,
         "visible": false
@@ -25,6 +27,8 @@
         "title": "ClipSync",
         "width": 340,
         "height": 200,
+        "minWidth": 300,
+        "minHeight": 140,
         "resizable": false,
         "decorations": false,
         "alwaysOnTop": true,
