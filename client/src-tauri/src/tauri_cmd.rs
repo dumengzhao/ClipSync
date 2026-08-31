@@ -10,8 +10,9 @@ use tauri_plugin_autostart::ManagerExt;
 // `pull_cross_lan` 需要 emit 拉取结果给「待拉取小窗」（release 同样需要），
 // 故 Emitter 不再限定 debug 构建。
 use tauri::Emitter;
-// `debug_simulate_offer` 用到 `Manager::state` / `get_webview_window`，仅 debug 下存在。
-#[cfg(debug_assertions)]
+// `get_webview_window` 在 `show/hide_pull_toast`（Windows 小窗显隐，release 同样需要）
+// 与 `debug_simulate_offer`（仅 debug）中均使用，故 `Manager` 必须在 release 也导入，
+// 不能限定 debug——否则 release 构建会报 `get_webview_window` 找不到。
 use tauri::Manager;
 
 use crate::clipboard::types::ClipboardContent;
@@ -294,7 +295,9 @@ pub fn show_pull_toast(app: AppHandle) {
 /// 却被系统带出来了，就延迟一小段再把它重新隐藏。
 #[tauri::command]
 pub fn hide_pull_toast(app: AppHandle) {
-    let main_was_visible = app
+    // 仅在 macOS 分支使用；Windows/Linux 构建该 cfg 块被排除，故用 `_` 前缀静默
+    // 「unused variable」警告（macOS 下仍正常读取，不影响补偿逻辑）。
+    let _main_was_visible = app
         .get_webview_window("main")
         .and_then(|w| w.is_visible().ok())
         .unwrap_or(false);
@@ -319,7 +322,7 @@ pub fn hide_pull_toast(app: AppHandle) {
     }
 
     #[cfg(target_os = "macos")]
-    if !main_was_visible {
+    if !_main_was_visible {
         let app2 = app.clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
