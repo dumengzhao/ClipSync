@@ -44,7 +44,7 @@ body {
   min-height: 0;
   max-width: 1000px;
   margin: 0;
-  padding: 1rem 2rem 2rem;
+  padding: 0.75rem 2rem;
   text-align: left;
   display: flex;
   flex-direction: column;
@@ -94,16 +94,48 @@ body {
   padding-bottom: 0.5rem;
 }
 
-/* 「打开设置」按钮固定在右栏底部（不随内容滚动），与上方滚动区域分隔 */
-.app-right-footer {
+/* 底部固定状态栏：横跨内容区，不参与滚动；左提示 + 右计算机名 */
+.status-bar {
   flex: 0 0 auto;
-  text-align: right;
-  padding-top: 0.6rem;
-  border-top: 1px solid rgba(148, 163, 184, 0.18);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  min-height: 28px;
+  padding: 0 2rem;
+  border-top: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(148, 163, 184, 0.10);
+  font-size: 0.8rem;
+  color: #64748b;
 }
 
-.app-right-footer .btn {
-  margin: 0;
+.status-bar-left {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.status-bar-right {
+  flex: 0 0 auto;
+  color: #94a3b8;
+  font-size: 0.78rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40%;
+  text-align: right;
+}
+
+.status-msg {
+  color: #16a34a;
+}
+
+.status-warn {
+  color: #ff6b6b;
 }
 
 /* 剪贴板文字展示框 */
@@ -414,22 +446,7 @@ body {
   font-size: 0.875rem;
 }
 
-.folder-warn {
-  position: fixed;
-  left: 12px;
-  bottom: 12px;
-  max-width: 360px;
-  padding: 0.6rem 0.9rem;
-  background: rgba(40, 28, 28, 0.96);
-  color: #ffb4b4;
-  border: 1px solid #5a2a2a;
-  border-left: 3px solid #ff6b6b;
-  border-radius: 8px;
-  font-size: 0.85rem;
-  line-height: 1.4;
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
-  z-index: 50;
-}
+/* folder-warn 已合并到底部状态栏（.status-warn），保留注释以便检索 */
 
 .btn-danger {
   background: transparent;
@@ -621,7 +638,43 @@ body {
 .titlebar-actions {
   display: flex;
   align-items: center;
+}
+
+/* 功能按钮组（设置等，未来可加更多）：与右侧窗口控制组间隔 20px */
+.tb-func {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: 20px;
+}
+
+/* 窗口控制组（最小化 / 最大化 / 关闭）：紧凑排列 */
+.tb-window {
+  display: flex;
+  align-items: center;
   gap: 2px;
+}
+
+/* 标题栏内的「打开设置」文字按钮 */
+.tb-settings {
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  background: transparent;
+  color: #cbd5e1;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.tb-settings:hover {
+  background: rgba(148, 163, 184, 0.20);
+  color: #f1f5f9;
+  border-color: rgba(148, 163, 184, 0.6);
 }
 
 .titlebar-info {

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { getServerStatus, getConfig } from './api/tauri';
+import { getServerStatus } from './api/tauri';
 
 /**
  * 完全自定义窗口标题栏（decorations:false 时启用）。
@@ -11,11 +11,10 @@ import { getServerStatus, getConfig } from './api/tauri';
  * - 按钮 hover 底色用 JS 控制的 .is-hover 类（而非 CSS :hover），关闭点击时立即移除，
  *   窗口重开（main-shown）时再兜底清除，避免红/灰底残留与「闪一下」。
  */
-export default function TitleBar() {
+export default function TitleBar({ onOpenSettings }: { onOpenSettings: () => void }) {
   // 跨局域网服务端连接状态：0 未连接 / 1 待启用 / 2 已启用
   const [serverStatus, setServerStatus] = useState(0);
-  // 本机设备名称（设置中可改，挂载时回填一次）
-  const [deviceName, setDeviceName] = useState('');
+  // 本机设备名称改由底部状态栏展示（App.tsx 获取并渲染）
   // 重开瞬间抑制 hover：窗口出现时指针若停在按钮上会触发 mouseenter，
   // 必须忽略，直到用户真正移动鼠标，否则关闭按钮红底「闪一下」。
   const suppressHoverRef = useRef(false);
@@ -24,7 +23,7 @@ export default function TitleBar() {
     // 挂载时回填初始连接状态（之后由 server-status 事件实时更新）
     getServerStatus().then(setServerStatus).catch(() => setServerStatus(0));
     // 挂载时回填本机设备名称（设置中可改，这里只取一次）
-    getConfig().then((c) => setDeviceName(c.device_name)).catch(() => {});
+    // 设备名由 App 在底部状态栏获取并展示，这里不再获取
 
     // 窗口再次显示时：
     // 1) 兜底清除残留 hover 底色；
@@ -90,7 +89,7 @@ export default function TitleBar() {
   // 必须在 mousedown 同步上下文内发起，不可先 await 其它 IPC。
   const onTitleMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0) return;
-    if ((e.target as HTMLElement).closest('.tb-btn')) return; // 按钮区不拖动
+    if ((e.target as HTMLElement).closest('.titlebar-actions')) return; // 按钮区（功能 + 窗口控制）不拖动
     const win = getCurrentWindow();
     win.startDragging().catch((err) => console.error('startDragging failed', err));
   };
@@ -98,12 +97,6 @@ export default function TitleBar() {
   return (
     <div className="titlebar" onMouseDown={onTitleMouseDown}>
       <div className="titlebar-info" title="跨局域网服务端连接状态">
-        {deviceName && (
-          <>
-            <span className="titlebar-device">{deviceName}</span>
-            <span className="titlebar-sep">{'\u00a0\u00a0\u00a0\u00a0'}</span>
-          </>
-        )}
         <span
           className={
             'titlebar-status ' +
@@ -123,6 +116,12 @@ export default function TitleBar() {
       </div>
       <div className="titlebar-spacer" />
       <div className="titlebar-actions">
+        <div className="tb-func">
+          <button className="tb-settings" onClick={onOpenSettings} title="打开设置">
+            打开设置
+          </button>
+        </div>
+        <div className="tb-window">
         <button
           className="tb-btn"
           onClick={minimize}
@@ -160,6 +159,7 @@ export default function TitleBar() {
             <line x1="8" y1="2" x2="2" y2="8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
           </svg>
         </button>
+        </div>
       </div>
     </div>
   );
