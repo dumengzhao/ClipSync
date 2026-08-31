@@ -385,7 +385,7 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <TitleBar onOpenSettings={() => setView('settings')} />
+      <TitleBar onOpenSettings={() => setView('settings')} deviceName={deviceName} />
       {view === 'settings' ? (
         <SettingsPage onBack={() => setView('main')} />
       ) : (
@@ -707,7 +707,13 @@ export default function App() {
             {folderWarn && <span className="status-warn">{folderWarn}</span>}
             {msg && <span className="status-msg">{msg}</span>}
           </div>
-          <div className="status-bar-right">{deviceName}</div>
+          <div className="status-bar-right">
+            {serverStatus === 2
+              ? '跨 LAN 同步 · 已启用'
+              : serverStatus === 1
+                ? '跨 LAN 同步 · 待启用'
+                : '跨 LAN 同步 · 未连接'}
+          </div>
         </div>
       </main>
       </div>

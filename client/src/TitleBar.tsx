@@ -1,9 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { getServerStatus } from './api/tauri';
-
 /**
  * 完全自定义窗口标题栏（decorations:false 时启用）。
  * - 左侧信息区显示跨局域网服务端连接状态（订阅 server-status 事件）；按钮区不触发拖动。
@@ -11,19 +9,14 @@ import { getServerStatus } from './api/tauri';
  * - 按钮 hover 底色用 JS 控制的 .is-hover 类（而非 CSS :hover），关闭点击时立即移除，
  *   窗口重开（main-shown）时再兜底清除，避免红/灰底残留与「闪一下」。
  */
-export default function TitleBar({ onOpenSettings }: { onOpenSettings: () => void }) {
-  // 跨局域网服务端连接状态：0 未连接 / 1 待启用 / 2 已启用
-  const [serverStatus, setServerStatus] = useState(0);
-  // 本机设备名称改由底部状态栏展示（App.tsx 获取并渲染）
+export default function TitleBar({ onOpenSettings, deviceName }: { onOpenSettings: () => void; deviceName: string }) {
+  // 本机设备名称由 App 通过 prop 传入，在标题栏左上展示
   // 重开瞬间抑制 hover：窗口出现时指针若停在按钮上会触发 mouseenter，
   // 必须忽略，直到用户真正移动鼠标，否则关闭按钮红底「闪一下」。
   const suppressHoverRef = useRef(false);
 
   useEffect(() => {
-    // 挂载时回填初始连接状态（之后由 server-status 事件实时更新）
-    getServerStatus().then(setServerStatus).catch(() => setServerStatus(0));
-    // 挂载时回填本机设备名称（设置中可改，这里只取一次）
-    // 设备名由 App 在底部状态栏获取并展示，这里不再获取
+    // 挂载时回填本机设备名称（设置中可改，App 通过 prop 传入，这里只消费）
 
     // 窗口再次显示时：
     // 1) 兜底清除残留 hover 底色；
@@ -48,14 +41,8 @@ export default function TitleBar({ onOpenSettings }: { onOpenSettings: () => voi
     };
     window.addEventListener('mousemove', onFirstMove);
 
-    // 跨局域网服务端连接状态：实时更新左侧状态文案
-    const unlistenStatus = listen<number>('server-status', (e) =>
-      setServerStatus(e.payload),
-    );
-
     return () => {
       unlisten.then((u) => u());
-      unlistenStatus.then((u) => u());
       window.removeEventListener('mousemove', onFirstMove);
     };
   }, []);
@@ -96,23 +83,8 @@ export default function TitleBar({ onOpenSettings }: { onOpenSettings: () => voi
 
   return (
     <div className="titlebar" onMouseDown={onTitleMouseDown}>
-      <div className="titlebar-info" title="跨局域网服务端连接状态">
-        <span
-          className={
-            'titlebar-status ' +
-            (serverStatus === 2
-              ? 'active'
-              : serverStatus === 1
-                ? 'pending'
-                : 'disconnected')
-          }
-        >
-          {serverStatus === 2
-            ? '跨 LAN 同步 · 已启用'
-            : serverStatus === 1
-              ? '跨 LAN 同步 · 待启用'
-              : '跨 LAN 同步 · 未连接'}
-        </span>
+      <div className="titlebar-info" title="本机设备名称">
+        <span className="titlebar-device">{deviceName}</span>
       </div>
       <div className="titlebar-spacer" />
       <div className="titlebar-actions">
