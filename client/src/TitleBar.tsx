@@ -11,7 +11,7 @@ import { getServerStatus } from './api/tauri';
  * - 按钮 hover 底色用 JS 控制的 .is-hover 类（而非 CSS :hover），关闭点击时立即移除，
  *   窗口重开（main-shown）时再兜底清除，避免红/灰底残留与「闪一下」。
  */
-export default function TitleBar() {
+export default function TitleBar({ onOpenSettings }: { onOpenSettings: () => void }) {
   // 跨局域网服务端连接状态：0 未连接 / 1 待启用 / 2 已启用
   const [serverStatus, setServerStatus] = useState(0);
   // 本机设备名称改由底部状态栏展示（App.tsx 获取并渲染）
@@ -116,6 +116,11 @@ export default function TitleBar() {
       </div>
       <div className="titlebar-spacer" />
       <div className="titlebar-actions">
+        <div className="tb-func">
+          <button className="tb-settings" onClick={onOpenSettings} title="打开设置">
+            打开设置
+          </button>
+        </div>
         <div className="tb-window">
         <button
           className="tb-btn"
