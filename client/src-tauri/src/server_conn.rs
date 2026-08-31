@@ -748,6 +748,11 @@ impl ServerConn {
             saved.push(dest);
         }
         if !saved.is_empty() {
+            // 回声抑制：拉取完成后写本机剪贴板，若被本机监听误判为新的文件拷贝，
+            // 会经 relay 把 FileNotify 回环广播回发送端，导致「对端复制的文件又出现
+            // 在对端待拉取列表」。与 P2P 拉取路径(pull_files)一致——登记路径哈希，
+            // 使本地监听判定为回声而丢弃，彻底切断回环。
+            self.engine.suppress_next_file_offer(&saved);
             self.engine
                 .clipboard()
                 .write_file_paths(&saved)
