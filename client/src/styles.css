@@ -57,6 +57,7 @@ body {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
+  flex-direction: column;
 }
 
 /* 主页面左右两栏：左 40%（设备），右 60%（剪贴板 + 文件）各自独立滚动 */
@@ -640,6 +641,14 @@ body {
   align-items: center;
 }
 
+/* 功能按钮组（设置等，未来可加更多）：与右侧窗口控制组间隔 20px */
+.tb-func {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: 20px;
+}
+
 /* 窗口控制组（最小化 / 最大化 / 关闭）：紧凑排列 */
 .tb-window {
   display: flex;
@@ -647,9 +656,9 @@ body {
   gap: 2px;
 }
 
-/* 底部状态栏内的「打开设置」文字按钮 */
-.status-settings {
-  height: 22px;
+/* 标题栏内的「打开设置」文字按钮 */
+.tb-settings {
+  height: 24px;
   display: inline-flex;
   align-items: center;
   padding: 0 10px;
@@ -663,7 +672,7 @@ body {
   transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
 }
 
-.status-settings:hover {
+.tb-settings:hover {
   background: rgba(148, 163, 184, 0.20);
   color: #f1f5f9;
   border-color: rgba(148, 163, 184, 0.6);
