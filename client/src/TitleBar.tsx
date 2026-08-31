@@ -89,8 +89,8 @@ export default function TitleBar({ onOpenSettings, deviceName }: { onOpenSetting
       <div className="titlebar-spacer" />
       <div className="titlebar-actions">
         <div className="tb-func">
-          <button className="tb-settings" onClick={onOpenSettings} title="打开设置">
-            打开设置
+          <button className="tb-settings" onClick={onOpenSettings} title="设置">
+            设置
           </button>
         </div>
         <div className="tb-window">
