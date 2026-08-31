@@ -556,6 +556,7 @@ export default function App() {
           </div>
 
           <div className="app-right">
+            <div className="app-right-scroll">
             <section className="peers">
               <h2>粘贴板文字内容</h2>
               <div className="clipboard-box">
@@ -697,6 +698,7 @@ export default function App() {
             {msg && <div className="msg">{msg}</div>}
 
             {folderWarn && <div className="folder-warn">{folderWarn}</div>}
+            </div>
 
             <div className="app-right-footer">
               <button className="btn" onClick={() => setView('settings')}>
