@@ -655,13 +655,13 @@ body {
   gap: 2px;
 }
 
-/* 标题栏内的「打开设置」文字按钮 */
+/* 标题栏内的「设置」文字按钮：默认无可见边框，悬浮时再显示 */
 .tb-settings {
   height: 24px;
   display: inline-flex;
   align-items: center;
   padding: 0 10px;
-  border: 1px solid rgba(148, 163, 184, 0.4);
+  border: 1px solid transparent;
   background: transparent;
   color: #cbd5e1;
   border-radius: 6px;
