@@ -31,8 +31,14 @@ pub struct AppConfig {
     /// 对端点击「拉取」后，文件下载到 `<sync_dir>/<对方设备名>/<相对路径>`。
     #[serde(default)]
     pub sync_dir: Option<String>,
-    /// 自动拉取阈值（MB）。对端拷贝的文件/图片若总大小**小于**此值，本端收到后自动
-    /// 拉取（下载到 `sync_dir` 并写本机剪贴板），无需手动点「拉取」。拷贝端自身除外。
+    /// 是否开启「自动拉取」。关闭后，对端传来的任何文件都**不会**自动拉取，
+    /// 必须手动点「拉取」；此开关优先于阈值——即便阈值很大，关闭时也一律不自动拉取。
+    /// 默认开启。
+    #[serde(default = "default_true")]
+    pub auto_pull_enabled: bool,
+    /// 自动拉取阈值（MB）。仅当 `auto_pull_enabled` 开启、且对端拷贝的文件/图片总大小
+    /// **小于**此值时，本端收到后才自动拉取（下载到 `sync_dir` 并写本机剪贴板），
+    /// 无需手动点「拉取」。拷贝端自身除外。
     /// 默认 1MB；可调大让更大文件也自动拉取，但过大（如 >10MB）会占用较多带宽/磁盘。
     #[serde(default = "default_auto_pull_threshold_mb")]
     pub auto_pull_threshold_mb: u64,
@@ -129,6 +135,7 @@ impl Default for AppConfig {
             sync_primary_selection: false,
             cache_ttl_hours: 24,
             sync_dir: None,
+            auto_pull_enabled: true,
             auto_pull_threshold_mb: 1,
             max_folder_files: 100,
             theme: Theme::System,
@@ -143,9 +150,15 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    /// 自动拉取阈值（字节）。`auto_pull_threshold_mb` 为 0 时退化为「不自动拉取」。
+    /// 自动拉取阈值（字节）。
     pub fn auto_pull_threshold_bytes(&self) -> u64 {
         self.auto_pull_threshold_mb.saturating_mul(1024 * 1024)
+    }
+
+    /// 是否应自动拉取：总开关 `auto_pull_enabled` 开启、且 `total_bytes` 严格小于阈值。
+    /// 拷贝端自身由调用方另行排除。阈值设为 0 时 `total < 0` 永不成立，自然不自动拉取。
+    pub fn should_auto_pull(&self, total_bytes: u64) -> bool {
+        self.auto_pull_enabled && total_bytes < self.auto_pull_threshold_bytes()
     }
 }
 

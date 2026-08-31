@@ -351,6 +351,14 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         </div>
       </div>
       <div className="row">
+        <label>自动拉取（关闭后需手动点「拉取」）</label>
+        <input
+          type="checkbox"
+          checked={cfg.auto_pull_enabled ?? true}
+          onChange={(e) => update('auto_pull_enabled', e.target.checked)}
+        />
+      </div>
+      <div className="row">
         <label>自动拉取阈值 (MB，默认 1；超过 10 将提醒)</label>
         <input
           type="number"
