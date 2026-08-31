@@ -74,6 +74,8 @@ export default function App() {
   const [crossLanOffers, setCrossLanOffers] = useState<CrossLanOffer[]>([]);
   // 跨 LAN 拉取中的 ext_file_ep 集合
   const [crossPulling, setCrossPulling] = useState<Set<string>>(new Set());
+  // 本机计算机名（底部状态栏右侧展示）
+  const [deviceName, setDeviceName] = useState('');
 
   const flash = (m: string) => {
     setMsg(m);
@@ -110,6 +112,8 @@ export default function App() {
     getServerStatus().then(setServerStatus).catch(() => {});
     getDeviceId().then(setMyId).catch(() => {});
     listCrossLanOffers().then(setCrossLanOffers).catch(() => {});
+    // 本机计算机名：供底部状态栏右侧展示（设置中可改，这里取一次）
+    getConfig().then((c) => setDeviceName(c.device_name)).catch(() => {});
 
     // 对端拷贝文件后广播「待拉取」；本端点击拉取后收到开始/完成事件
     const unlistenFileOffer = listen<PendingOffer>('file-offer', (e) => {
@@ -381,7 +385,7 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <TitleBar />
+      <TitleBar onOpenSettings={() => setView('settings')} />
       {view === 'settings' ? (
         <SettingsPage onBack={() => setView('main')} />
       ) : (
@@ -695,17 +699,15 @@ export default function App() {
               </section>
             )}
 
-            {msg && <div className="msg">{msg}</div>}
-
-            {folderWarn && <div className="folder-warn">{folderWarn}</div>}
-            </div>
-
-            <div className="app-right-footer">
-              <button className="btn" onClick={() => setView('settings')}>
-                打开设置
-              </button>
             </div>
           </div>
+        </div>
+        <div className="status-bar">
+          <div className="status-bar-left">
+            {folderWarn && <span className="status-warn">{folderWarn}</span>}
+            {msg && <span className="status-msg">{msg}</span>}
+          </div>
+          <div className="status-bar-right">{deviceName}</div>
         </div>
       </main>
       </div>
