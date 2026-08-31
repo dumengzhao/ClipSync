@@ -555,27 +555,33 @@ pub fn list_cross_lan_offers(state: State<AppState>) -> Vec<crate::server_conn::
 }
 
 /// 拉取某条跨 LAN 文件通知：从对端 ext_file_ep 下载并写本机剪贴板。
+/// `pull_id` 是前端待拉取条目 id（不含 `local:` 前缀），用于把进度/完成事件
+/// 精确投递到对应条目；失败时补发 `file-pull-complete(ok:false)` 便于前端提示。
 #[tauri::command]
 pub async fn pull_cross_lan(
     app: AppHandle,
     state: State<'_, AppState>,
+    pull_id: String,
     ext_file_ep: String,
     manifest: serde_json::Value,
 ) -> Result<(), String> {
     let sc = state.server_conn.lock().clone();
     let sc = sc.ok_or_else(|| "服务端未连接".to_string())?;
     let r = sc
-        .pull_cross_lan(&ext_file_ep, manifest)
+        .pull_cross_lan(&pull_id, &ext_file_ep, manifest)
         .await
         .map_err(|e| e.to_string());
-    // 通知「待拉取小窗」拉取结果，便于清理该条目并给出成功/失败反馈
-    let _ = app.emit(
-        "cross-lan-pull-complete",
-        serde_json::json!({
-            "ext_file_ep": ext_file_ep,
-            "ok": r.is_ok(),
-            "error": r.as_ref().err().cloned(),
-        }),
-    );
+    // 拉取过程由 server_conn 实时上报 file-pull-progress / file-pull-complete(ok:true)。
+    // 仅当整条拉取失败（如网络不可达）时在此补发一次失败完成事件，便于前端提示。
+    if let Err(e) = &r {
+        let _ = app.emit(
+            "file-pull-complete",
+            serde_json::json!({
+                "transfer_id": pull_id,
+                "ok": false,
+                "error": e.clone(),
+            }),
+        );
+    }
     r
 }
