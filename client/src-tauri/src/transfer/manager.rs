@@ -967,6 +967,19 @@ impl ConnectionHub {
                 engine.suppress_next_file_offer(&received);
                 let _ = engine.clipboard().write_file_paths(&received).await;
             }
+            // 收尾：显式上报 100%。快传输时节流（≥5%/≥200ms）可能永远没机会上报末帧，
+            // 导致前端进度条卡在 0%、且从未看到 100% 就直接关闭。
+            if let Some(a) = &app {
+                let _ = a.emit(
+                    "file-pull-progress",
+                    serde_json::json!({
+                        "transfer_id": tid,
+                        "received": total,
+                        "total": total,
+                        "percent": 100u32,
+                    }),
+                );
+            }
             if let Some(a) = &app {
                 let _ = a.emit(
                     "file-pull-complete",

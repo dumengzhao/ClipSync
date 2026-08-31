@@ -87,6 +87,8 @@ export default function PullToast() {
   const [queued, setQueued] = useState<Item[]>([]);
   /** 已完成/失败的结果反馈 */
   const [results, setResults] = useState<Record<string, { ok: boolean; msg: string }>>({});
+  /** 已完成但保留「100% 进度条」可见片刻的条目（避免直接关闭看不到满） */
+  const [completed, setCompleted] = useState<Record<string, Item>>({});
   const [progress, setProgress] = useState<Record<string, number>>({});
   const [ready, setReady] = useState(false);
   /** 用户是否已点击过「拉取」：点了就取消未操作倒计时，改为等任务完成 */
@@ -250,10 +252,22 @@ export default function PullToast() {
       listen<{ transfer_id: string }>('file-pull-complete', (e) => {
         const id = `local:${e.payload.transfer_id}`;
         log(`file-pull-complete: ${id}`);
-        setPulling((prev) => prev.filter((x) => x.id !== id));
+        // 进度拉满到 100%，并把条目从 pulling 移到 completed：保留进度条可见 ~1.2s，
+        // 让用户确实看到「100%」再转结果，而不是瞬间关闭。
+        setProgress((prev) => ({ ...prev, [id]: 100 }));
+        setPulling((prev) => {
+          const it = prev.find((x) => x.id === id);
+          if (it) setCompleted((c) => ({ ...c, [id]: it }));
+          return prev.filter((x) => x.id !== id);
+        });
         setItems((prev) => prev.filter((x) => x.id !== id));
-        setResults((prev) => ({ ...prev, [id]: { ok: true, msg: '已保存到本地' } }));
-        setTimeout(() => {
+        window.setTimeout(() => {
+          setCompleted((c) => {
+            const n = { ...c };
+            delete n[id];
+            return n;
+          });
+          setResults((prev) => ({ ...prev, [id]: { ok: true, msg: '已保存到本地' } }));
           setProgress((prev) => {
             const n = { ...prev };
             delete n[id];
@@ -316,7 +330,7 @@ export default function PullToast() {
   useEffect(() => {
     if (!ready) return;
 
-    const busy = pulling.length > 0;
+    const busy = pulling.length > 0 || Object.keys(completed).length > 0;
     const hasItems = items.length > 0;
 
     // 1) 拉取中：保持显示，不倒计时
@@ -375,7 +389,7 @@ export default function PullToast() {
       .setSize(new LogicalSize(WIN_W, target))
       .then(() => invoke('show_pull_toast'))
       .catch((e: unknown) => log(`高度自适应失败: ${String(e)}`));
-  }, [items, pulling, results, countdown, ready]);
+  }, [items, pulling, results, completed, countdown, ready]);
 
   const onPull = (it: Item) => {
     // 已操作：取消未操作倒计时，改为「等拉取完成写入剪贴板后再关闭」
@@ -451,6 +465,22 @@ export default function PullToast() {
             </div>
           );
         })}
+
+        {Object.entries(completed).map(([id, it]) => (
+          <div className="pt-item" key={id}>
+            <div className="pt-item-top">
+              <span className="pt-name" title={itemNames(it)}>
+                {itemNames(it)}
+              </span>
+              <span className="pt-size">{fmtSize(itemSize(it))}</span>
+            </div>
+            <div className="pt-sub">{itemFrom(it)}</div>
+            <div className="pt-bar">
+              <div className="pt-bar-fill" style={{ width: '100%' }} />
+              <span className="pt-pct">100%</span>
+            </div>
+          </div>
+        ))}
 
         {items.map((it) => (
           <div className="pt-item" key={it.id}>
