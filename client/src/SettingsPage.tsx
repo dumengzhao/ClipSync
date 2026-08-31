@@ -354,7 +354,7 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         <label>自动拉取（关闭后需手动点「拉取」）</label>
         <input
           type="checkbox"
-          checked={cfg.auto_pull_enabled ?? true}
+          checked={cfg.auto_pull_enabled ?? false}
           onChange={(e) => update('auto_pull_enabled', e.target.checked)}
         />
       </div>
