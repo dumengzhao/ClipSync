@@ -40,10 +40,13 @@ body {
 }
 
 .app {
+  flex: 1 1 auto;
+  min-height: 0;
   max-width: 1000px;
   margin: 0;
   padding: 1rem 2rem 2rem;
   text-align: left;
+  overflow-y: auto;
 }
 
 .app-main {
@@ -422,9 +425,12 @@ body {
 }
 
 .settings {
+  flex: 1 1 auto;
+  min-height: 0;
   max-width: 100%;
   margin: 0;
   padding: 0;
+  overflow-y: auto;
 }
 
 .settings-header {
@@ -571,7 +577,8 @@ body {
 .app-shell {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
 }
 
 .titlebar {
