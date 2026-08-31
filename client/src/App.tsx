@@ -385,7 +385,7 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <TitleBar onOpenSettings={() => setView('settings')} />
+      <TitleBar />
       {view === 'settings' ? (
         <SettingsPage onBack={() => setView('main')} />
       ) : (
@@ -706,6 +706,9 @@ export default function App() {
           <div className="status-bar-left">
             {folderWarn && <span className="status-warn">{folderWarn}</span>}
             {msg && <span className="status-msg">{msg}</span>}
+            <button className="status-settings" onClick={() => setView('settings')} title="打开设置">
+              打开设置
+            </button>
           </div>
           <div className="status-bar-right">{deviceName}</div>
         </div>
