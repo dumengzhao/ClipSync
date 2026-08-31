@@ -105,6 +105,53 @@ impl Default for AppState {
     }
 }
 
+/// Windows 上 mDNS 入站多播（UDP 5353）默认被防火墙拦截，导致本机收不到对端广播、
+/// 局域网发现失效（而出站默认放行，所以本机「能被发现」却「发现不了别人」）。
+/// 启动时尽力加一条入站放行规则；非管理员权限时 netsh 会返回拒绝，此时仅记录日志
+/// 并提示手动命令，不阻断启动。规则已存在则跳过，避免重复添加与噪音。
+#[cfg(windows)]
+fn ensure_mdns_firewall_rule() {
+    use std::process::Command;
+    let rule_name = "ClipSync mDNS (UDP 5353)";
+    let exists = Command::new("netsh")
+        .args(["advfirewall", "firewall", "show", "rule", &format!("name={rule_name}")])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if exists {
+        tracing::info!("mDNS 防火墙入站规则已存在，跳过");
+        return;
+    }
+    match Command::new("netsh")
+        .args([
+            "advfirewall",
+            "firewall",
+            "add",
+            "rule",
+            &format!("name={rule_name}"),
+            "dir=in",
+            "action=allow",
+            "protocol=UDP",
+            "localport=5353",
+        ])
+        .output()
+    {
+        Ok(o) if o.status.success() => {
+            tracing::info!("已添加 Windows 防火墙入站规则（UDP 5353），局域网发现应恢复");
+        }
+        Ok(o) => {
+            let msg = String::from_utf8_lossy(&o.stderr);
+            tracing::warn!(
+                "未能自动添加防火墙规则（多半需管理员权限）：{}。\
+                 请以管理员运行一次：netsh advfirewall firewall add rule \
+                 name=\"ClipSync mDNS\" dir=in action=allow protocol=UDP localport=5353",
+                msg.trim()
+            );
+        }
+        Err(e) => tracing::warn!("执行 netsh 失败：{e}"),
+    }
+}
+
 /// 应用入口
 pub fn run() {
     crate::obs::logging::init_file_logging();
@@ -214,6 +261,10 @@ pub fn run() {
                 {
                     tracing::error!("mDNS discovery failed to start: {e}");
                 }
+                // Windows 上 mDNS 入站多播默认被防火墙拦截，导致发现不了别人；
+                // 尽力加一条入站放行规则（需管理员权限，失败仅提示）。
+                #[cfg(windows)]
+                ensure_mdns_firewall_rule();
             }
 
             // 启动同步引擎（剪贴板监听 + 事件广播），失败仅记录不阻断启动

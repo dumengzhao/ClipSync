@@ -387,6 +387,15 @@ export default function PullToast() {
   // 关键：改完尺寸必须让 Rust 重新定位——它是按窗口「实际」尺寸贴右下角的，
   // 不重新定位的话底边/右边会错位（历史 bug 的根源就是这个尺寸不一致）。
   useEffect(() => {
+    // 无内容时绝不弹窗/调尺寸：否则启动时空窗会被本 effect 弹出（footRef 有高度、
+    // lastH=0 触发 setSize+show_pull_toast），显示「暂无待拉取文件」几秒后由关闭策略收起——
+    // 表现为「一启动就闪一下空窗」。只在确有条目/进度/结果时才显示并自适应高度。
+    const hasContent =
+      items.length > 0 ||
+      pulling.length > 0 ||
+      Object.keys(results).length > 0 ||
+      Object.keys(completed).length > 0;
+    if (!hasContent) return;
     const listH = listRef.current?.scrollHeight ?? 0;
     const footH = footRef.current?.offsetHeight ?? 0;
     if (listH === 0 && footH === 0) return;
