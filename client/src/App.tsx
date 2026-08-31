@@ -389,8 +389,9 @@ export default function App() {
       {view === 'settings' ? (
         <SettingsPage onBack={() => setView('main')} />
       ) : (
-        <div className="app">
-          <main className="app-main">
+      <>
+      <div className="app">
+        <main className="app-main">
             <div className="app-layout">
           <div className="app-left">
             <section className="peers">
@@ -702,32 +703,33 @@ export default function App() {
             </div>
           </div>
         </div>
-        <div className="status-bar">
-          <div className="status-bar-left">
-            {folderWarn && <span className="status-warn">{folderWarn}</span>}
-            {msg && <span className="status-msg">{msg}</span>}
-          </div>
-          <div className="status-bar-right">
-            <span
-              className={
-                'titlebar-status ' +
-                (serverStatus === 2
-                  ? 'active'
-                  : serverStatus === 1
-                    ? 'pending'
-                    : 'disconnected')
-              }
-            >
-              {serverStatus === 2
-                ? '跨 LAN 同步 · 已启用'
-                : serverStatus === 1
-                  ? '跨 LAN 同步 · 待启用'
-                  : '跨 LAN 同步 · 未连接'}
-            </span>
-          </div>
-        </div>
       </main>
       </div>
+      <div className="status-bar">
+        <div className="status-bar-left">
+          {folderWarn && <span className="status-warn">{folderWarn}</span>}
+          {msg && <span className="status-msg">{msg}</span>}
+        </div>
+        <div className="status-bar-right">
+          <span
+            className={
+              'titlebar-status ' +
+              (serverStatus === 2
+                ? 'active'
+                : serverStatus === 1
+                  ? 'pending'
+                  : 'disconnected')
+            }
+          >
+            {serverStatus === 2
+              ? '跨 LAN 同步 · 已启用'
+              : serverStatus === 1
+                ? '跨 LAN 同步 · 待启用'
+                : '跨 LAN 同步 · 未连接'}
+          </span>
+        </div>
+      </div>
+      </>
       )}
     </div>
   );
