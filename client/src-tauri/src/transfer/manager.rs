@@ -384,15 +384,16 @@ impl ConnectionHub {
         PathBuf::from("Downloads")
     }
 
-    /// 自动拉取阈值（字节）：各端自行配置 `auto_pull_threshold_mb`（默认 1MB）。
-    /// 对端传来的传输若总大小小于此值，本端收到后直接自动拉取，无需手动点「拉取」。
-    fn auto_pull_threshold_bytes(&self) -> u64 {
+    /// 是否应自动拉取：配置总开关 `auto_pull_enabled` 开启、且对端传来的总大小严格小于
+    /// 阈值 `auto_pull_threshold_mb`。拷贝端自身由调用方另行排除。
+    /// 无 app handle 时保守返回 false（不自动拉取）。
+    fn should_auto_pull(&self, total: u64) -> bool {
         self.app
             .lock()
             .unwrap()
             .as_ref()
-            .map(|a| a.state::<AppState>().config.lock().auto_pull_threshold_bytes())
-            .unwrap_or(1024 * 1024)
+            .map(|a| a.state::<AppState>().config.lock().should_auto_pull(total))
+            .unwrap_or(false)
     }
 
     /// 本地拷贝了文件/目录：生成传输 ID，展开为文件清单，向所有已连接对端广播「可拉取」。
@@ -519,9 +520,9 @@ impl ConnectionHub {
                     return;
                 }
                 let total: u64 = files.iter().map(|f| f.file_size).sum();
-                // 自动拉取阈值：小于阈值则本端收到后直接拉取，免手动点击。
+                // 自动拉取需同时满足：总开关 auto_pull_enabled 开启 且 总大小严格小于阈值。
                 // 拷贝端自身已被上面的 device_id 守卫排除，所以这里一定是「其它端」。
-                let auto_pull = total < self.auto_pull_threshold_bytes();
+                let auto_pull = self.should_auto_pull(total);
                 self.pending_offers.lock().unwrap().insert(
                     transfer_id.clone(),
                     PendingOffer {

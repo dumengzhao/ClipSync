@@ -130,7 +130,9 @@ export interface AppConfig {
   theme: 'System' | 'Light' | 'Dark';
   /** 文件同步落盘目录；为空时回退系统下载目录 */
   sync_dir?: string | null;
-  /** 自动拉取阈值（MB）：对端传来的文件总大小小于此值时本端自动拉取，无需手动点击。默认 1 */
+  /** 是否开启自动拉取：关闭后任何文件都需手动点「拉取」；此开关优先于阈值。默认 true */
+  auto_pull_enabled?: boolean;
+  /** 自动拉取阈值（MB）：仅当 auto_pull_enabled 开启、且对端文件总大小小于此值时才自动拉取。默认 1 */
   auto_pull_threshold_mb?: number;
   /** 复制文件夹时递归文件数上限：超过此值则拦截推送、仅本地提示请压缩。0 表示不限制。默认 100 */
   max_folder_files?: number;
