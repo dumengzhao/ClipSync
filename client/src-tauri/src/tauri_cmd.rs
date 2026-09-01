@@ -148,6 +148,12 @@ pub fn open_settings(app: AppHandle) -> Result<(), String> {
     // 不再为 release 建独立「settings」窗口——前端以 view 状态渲染（默认 main），
     // 独立窗未 emit open-settings 会停在主视图，表现为「托盘点设置打不开设置页」。
     if let Some(w) = tauri::Manager::get_webview_window(&app, "main") {
+        // 窗口若已被最小化到任务栏，Windows 上 show()/set_focus() 不会还原（SW_SHOW 不还原
+        // 最小化窗口），表现为「打开过主界面并最小化后再点设置没反应」。必须先 unminimize()
+        // 才能正确弹到前台。
+        if w.is_minimized().unwrap_or(false) {
+            let _ = w.unminimize();
+        }
         let _ = w.show();
         let _ = w.set_focus();
     }
