@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+#
+# ClipSync Relay Server 一键部署（在 Linux 主机上以 root 运行）
+# 自动完成：建用户/目录 -> 装二进制 + service + env -> 随机密码 -> 启用并启动 systemd。
+#
+# 用法：
+#   sudo ./install.sh                         # 自动找脚本同目录 / target 下的 clipsync-server
+#   sudo ./install.sh /path/to/clipsync-server # 显式指定二进制
+#   sudo ./install.sh --no-start               # 只安装不启动
+set -euo pipefail
+
+BIN_ARG=""
+DO_START=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-start) DO_START=0 ;;
+    --*) echo "未知参数: $1" >&2; exit 1 ;;
+    *) BIN_ARG="$1" ;;
+  esac
+  shift
+done
+
+INSTALL_DIR=/opt/clipsync-server
+RUN_USER=clipsync
+RUN_GROUP=clipsync
+SVC=clipsync-server
+PORT=20070
+
+[ "$(id -u)" -eq 0 ] || { echo "请使用 root 运行：sudo $0" >&2; exit 1; }
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# 定位二进制
+find_binary() {
+  local cands=()
+  [ -n "$BIN_ARG" ] && cands+=("$BIN_ARG")
+  cands+=("$SCRIPT_DIR/clipsync-server"
+          "$SCRIPT_DIR/target/x86_64-unknown-linux-musl/release/clipsync-server"
+          "$SCRIPT_DIR/target/release/clipsync-server")
+  for c in "${cands[@]}"; do
+    [ -n "$c" ] && [ -f "$c" ] && { echo "$c"; return 0; }
+  done
+  return 1
+}
+
+BIN="$(find_binary)" || {
+  echo "找不到 clipsync-server 二进制。" >&2
+  echo "请把二进制放到脚本同目录，或：sudo $0 /path/to/clipsync-server" >&2
+  exit 1
+}
+echo ">>> 使用二进制: $BIN"
+
+# 建用户/目录
+if ! id "$RUN_USER" &>/dev/null; then
+  useradd -r -d "$INSTALL_DIR" -s /usr/sbin/nologin "$RUN_USER"
+  echo ">>> 已创建用户 $RUN_USER"
+fi
+mkdir -p "$INSTALL_DIR/data"
+install -m 0755 "$BIN" "$INSTALL_DIR/clipsync-server"
+echo ">>> 已安装二进制 -> $INSTALL_DIR/clipsync-server"
+
+# service 单元
+if [ -f "$SCRIPT_DIR/clipsync-server.service" ]; then
+  install -m 0644 "$SCRIPT_DIR/clipsync-server.service" /etc/systemd/system/
+  echo ">>> 已安装 service -> /etc/systemd/system/clipsync-server.service"
+fi
+
+# env（已存在则保留，否则用示例并随机化密码）
+if [ ! -f "$INSTALL_DIR/clipsync-server.env" ]; then
+  if [ -f "$SCRIPT_DIR/clipsync-server.env.example" ]; then
+    cp "$SCRIPT_DIR/clipsync-server.env.example" "$INSTALL_DIR/clipsync-server.env"
+  else
+    cat > "$INSTALL_DIR/clipsync-server.env" <<ENV
+CLIPSYNC_DATA_DIR=$INSTALL_DIR/data
+ADMIN_USER=admin
+ADMIN_PASS=$(openssl rand -hex 12)
+LISTEN=0.0.0.0:$PORT
+ENV
+  fi
+  if grep -q '请改成强密码' "$INSTALL_DIR/clipsync-server.env"; then
+    PASS="$(openssl rand -hex 12)"
+    sed -i "s|ADMIN_PASS=.*|ADMIN_PASS=$PASS|" "$INSTALL_DIR/clipsync-server.env"
+    echo ">>> 已生成随机管理员密码（请记好）: $PASS"
+  fi
+  chmod 600 "$INSTALL_DIR/clipsync-server.env"
+  echo ">>> 已生成 env -> $INSTALL_DIR/clipsync-server.env (权限 600)"
+fi
+
+chown -R "$RUN_USER:$RUN_GROUP" "$INSTALL_DIR"
+echo ">>> 目录权限已设给 $RUN_USER:$RUN_GROUP"
+
+if [ "$DO_START" -eq 1 ]; then
+  systemctl daemon-reload
+  systemctl enable --now "$SVC"
+  sleep 1
+  if systemctl is-active --quiet "$SVC"; then
+    echo ">>> 服务状态: $(systemctl is-active "$SVC")"
+    echo ">>> 健康检查: $(curl -fsS "http://127.0.0.1:$PORT/healthz" || echo '无响应(服务可能还在起)')"
+  else
+    echo ">>> 服务未运行，查看日志: journalctl -u $SVC -n 50" >&2
+    exit 1
+  fi
+fi
+
+echo
+echo "部署完成。可选下一步：配置 nginx 反代（见 nginx-clipsync.conf.example），"
+echo "走 nginx TLS 时桌面端服务器地址填 wss://域名。"
