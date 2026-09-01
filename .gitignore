@@ -40,6 +40,9 @@ yarn-error.log*
 # Crash dumps
 crash_dumps/
 
+# Windows reserved device-name artifact (created by a `2>nul` misuse; cannot be deleted normally, so ignore it)
+nul
+
 # Local key material (never commit)
 *.p12
 *.pfx
