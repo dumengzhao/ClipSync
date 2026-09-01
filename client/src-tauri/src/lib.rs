@@ -506,6 +506,10 @@ fn show_main_window(app: &tauri::AppHandle) {
         let _ = app.set_activation_policy(ActivationPolicy::Regular);
     }
     if let Some(w) = app.get_webview_window("main") {
+        // 同 open_settings：最小化后 show()/set_focus() 无法还原窗口，需先 unminimize()。
+        if w.is_minimized().unwrap_or(false) {
+            w.unminimize().ok();
+        }
         w.show().ok();
         w.set_focus().ok();
         // 通知前端窗口已显示：TitleBar 监听此事件强制回流，清除隐藏期间残留的 :hover 红底
