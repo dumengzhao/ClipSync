@@ -18,11 +18,13 @@ if ! systemctl list-unit-files "$SVC.service" &>/dev/null; then
 fi
 
 if ! systemctl is-active --quiet "$SVC"; then
-  echo ">>> $SVC 当前未运行，改为启动"
   systemctl start "$SVC"
+  echo ">>> 未运行，已直接启动 $SVC"
 else
-  systemctl restart "$SVC"
-  echo ">>> 已重启 $SVC"
+  systemctl stop "$SVC"
+  echo ">>> 已停止 $SVC"
+  systemctl start "$SVC"
+  echo ">>> 已重新启动 $SVC（关闭再启动）"
 fi
 
 sleep 1
