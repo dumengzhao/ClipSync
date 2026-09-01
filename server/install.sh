@@ -51,6 +51,14 @@ BIN="$(find_binary)" || {
 }
 echo ">>> 使用二进制: $BIN"
 
+# 更新检测：若服务已在运行，先停掉以释放旧二进制（避免覆盖正在执行的文件）
+WAS_ACTIVE=0
+if systemctl is-active --quiet "$SVC"; then WAS_ACTIVE=1; fi
+if [ "$WAS_ACTIVE" -eq 1 ]; then
+  systemctl stop "$SVC"
+  echo ">>> 检测到已运行服务，已停止（准备更新）"
+fi
+
 # 建用户/目录
 if ! id "$RUN_USER" &>/dev/null; then
   useradd -r -d "$INSTALL_DIR" -s /usr/sbin/nologin "$RUN_USER"
@@ -117,7 +125,13 @@ echo ">>> 目录权限已设给 $RUN_USER:$RUN_GROUP"
 
 if [ "$DO_START" -eq 1 ]; then
   systemctl daemon-reload
-  systemctl enable --now "$SVC"
+  if [ "$WAS_ACTIVE" -eq 1 ]; then
+    systemctl restart "$SVC"
+    echo ">>> 更新完成：服务已用新二进制重启"
+  else
+    systemctl enable --now "$SVC"
+    echo ">>> 部署完成：服务已启用并启动"
+  fi
   sleep 1
   if systemctl is-active --quiet "$SVC"; then
     echo ">>> 服务状态: $(systemctl is-active "$SVC")"
