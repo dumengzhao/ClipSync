@@ -7,7 +7,7 @@
 !include "LogicLib.nsh"
 
 Name "ClipSync Relay Server"
-OutFile "clipsync-server-setup.exe"
+OutFile "dist\clipsync-server-setup.exe"
 InstallDir "C:\ClipSyncServer"
 RequestExecutionLevel admin
 SetCompressor lzma
