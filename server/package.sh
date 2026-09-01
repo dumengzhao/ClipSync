@@ -19,12 +19,13 @@ mkdir -p "$OUT"
 
 cp "$BIN"                              "$OUT/clipsync-server"
 cp "$HERE/install.sh"                  "$OUT/"
+cp "$HERE/restart.sh"                  "$OUT/"
 cp "$HERE/clipsync-server.service"     "$OUT/"
 cp "$HERE/clipsync-server.env.example" "$OUT/"
 cp "$HERE/nginx-clipsync.conf.example" "$OUT/"
 cp "$HERE/README.md"                   "$OUT/部署说明-README.md"
 
-chmod +x "$OUT/clipsync-server" "$OUT/install.sh" 2>/dev/null || true
+chmod +x "$OUT/clipsync-server" "$OUT/install.sh" "$OUT/restart.sh" 2>/dev/null || true
 
 echo ">>> 打包完成: $OUT"
 echo ">>> 整目录拷到服务器后: sudo ./install.sh"
