@@ -33,6 +33,26 @@ cargo build --release --target x86_64-unknown-linux-musl   # 静态单二进制
 
 前置 nginx 终止 TLS 并反代 `/ws`、`/api/admin`、`/admin`。可选 `Dockerfile` + `docker-compose.yml`。
 
+## Linux 部署（systemd 常驻）
+
+二进制是全静态 ELF、零运行时依赖，适合直接跑在 Ubuntu 等主机上当常驻中继。
+
+1. **取得二进制**：本机交叉编译后把 `clipsync-server` 拷到 Linux；或在 Linux 主机 `rustup target add x86_64-unknown-linux-musl && cargo build --release --target x86_64-unknown-linux-musl`。
+2. **放文件**（以 `/opt/clipsync-server` 为例）：
+   - `clipsync-server` → `/opt/clipsync-server/clipsync-server`（`chmod +x`，属主 `root`）
+   - `clipsync-server.env.example` 复制为 `/opt/clipsync-server/clipsync-server.env` 并改密码
+   - `clipsync-server.service` → `/etc/systemd/system/`
+   - 建用户/目录：`useradd -r -d /opt/clipsync-server -s /usr/sbin/nologin clipsync && mkdir -p /opt/clipsync-server/data && chown -R clipsync:clipsync /opt/clipsync-server`
+3. **起服务**：
+   ```bash
+   systemctl daemon-reload
+   systemctl enable --now clipsync-server
+   systemctl status clipsync-server   # 看 /healthz 是否 ok
+   ```
+4. **nginx 反代**（终止 TLS）：`/ws`、`/api/admin`、`/admin` 转发到 `127.0.0.1:20070`；`/ws` 须带 `Upgrade`/`Connection` 头。
+
+> 数据落在 `CLIPSYNC_DATA_DIR`（默认 `data/`），含 `networks.json` / `admin.json` / `server.key`；迁移机器时连同该目录一起拷即可。
+
 ## 状态
 
 方案 v2 已确认（Rust / 管理页+登录 / 文件存储 / 两步信任启用）。分阶段实现中，见架构方案第 7 节路线图。
