@@ -144,30 +144,14 @@ pub fn quit_app(app: AppHandle) {
 
 #[tauri::command]
 pub fn open_settings(app: AppHandle) -> Result<(), String> {
-    #[cfg(debug_assertions)]
-    {
-        // dev 模式下额外窗口加载前端不可靠（白屏），改为通知主窗口内嵌显示设置视图
-        app.emit("open-settings", ()).map_err(|e| e.to_string())
+    // 统一用主窗口内嵌显示设置视图：显示主窗口并置顶，再 emit 事件让前端切到 settings。
+    // 不再为 release 建独立「settings」窗口——前端以 view 状态渲染（默认 main），
+    // 独立窗未 emit open-settings 会停在主视图，表现为「托盘点设置打不开设置页」。
+    if let Some(w) = tauri::Manager::get_webview_window(&app, "main") {
+        let _ = w.show();
+        let _ = w.set_focus();
     }
-    #[cfg(not(debug_assertions))]
-    {
-        // 正式构建：创建独立设置窗口
-        if let Some(w) = tauri::Manager::get_webview_window(&app, "settings") {
-            let _ = w.show();
-            let _ = w.set_focus();
-            return Ok(());
-        }
-        let url = tauri::WebviewUrl::App("/".into());
-        tauri::WebviewWindowBuilder::new(&app, "settings", url)
-            .title("ClipSync 设置")
-            .inner_size(760.0, 600.0)
-            .min_inner_size(560.0, 460.0)
-            .resizable(true)
-            .center()
-            .build()
-            .map_err(|e| e.to_string())?;
-        Ok(())
-    }
+    app.emit("open-settings", ()).map_err(|e| e.to_string())
 }
 
 /// 列出当前通过 mDNS 发现的局域网对端。
