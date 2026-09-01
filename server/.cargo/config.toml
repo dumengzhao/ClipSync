@@ -1,0 +1,16 @@
+# 交叉编译到 Linux（x86_64-unknown-linux-musl）全静态单二进制。
+# 无需安装任何外部 C 工具链：Rust 自带 musl libc 启动对象（crt1.o/libc.a）
+# 与 rust-lld 链接器（link-self-contained=yes 启用自带链接器/启动对象）。
+# 仅对 musl 目标生效，不影响 Windows / 本机默认构建。
+#
+# 前置（一次性，本机已做）：把 rust-lld 复制为 ld.lld.exe 放到 cargo bin
+#   cp "$HOME/.rustup/toolchains/stable-x86_64-pc-windows-msvc/lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe" "$HOME/.cargo/bin/ld.lld.exe"
+# 本机绝对路径见下方 linker。换机器时把路径改成自己 ~/.cargo/bin/ld.lld.exe 即可。
+# 构建时需 RUSTC_BOOTSTRAP=1（linker-flavor=gnu-lld 在 stable 仍属不稳定项）。
+[target.x86_64-unknown-linux-musl]
+linker = "C:\\Users\\DMZ\\.cargo\\bin\\ld.lld.exe"
+rustflags = [
+  "-Z", "unstable-options",
+  "-C", "linker-flavor=gnu-lld",
+  "-C", "link-self-contained=yes",
+]
