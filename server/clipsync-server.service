@@ -1,0 +1,23 @@
+[Unit]
+Description=ClipSync Relay Server
+Documentation=https://github.com/dumengzhao/ClipSync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=clipsync
+Group=clipsync
+WorkingDirectory=/opt/clipsync-server
+EnvironmentFile=/opt/clipsync-server/clipsync-server.env
+ExecStart=/opt/clipsync-server/clipsync-server
+Restart=on-failure
+RestartSec=3
+# 安全加固（按需开启）
+# NoNewPrivileges=true
+# ProtectSystem=strict
+# ProtectHome=true
+# ReadWritePaths=/opt/clipsync-server/data
+
+[Install]
+WantedBy=multi-user.target
