@@ -37,6 +37,8 @@ cargo build --release --target x86_64-unknown-linux-musl   # 静态单二进制
 
 二进制是全静态 ELF、零运行时依赖，适合直接跑在 Ubuntu 等主机上当常驻中继。
 
+> **打包成单目录**（本机 Windows 交叉编译后）：`bash package.sh` 自动把二进制 + `install.sh` + `clipsync-server.service` + `clipsync-server.env.example` + `nginx-clipsync.conf.example` 汇总到 `server/dist/clipsync-server-linux/`。把该目录**整目录**拷到服务器，进去 `sudo ./install.sh` 即可，不用管文件对应关系。
+
 > **一键部署**：在 Linux 主机 `git pull` 拿到脚本与二进制后，一条命令搞定（建用户/目录、装二进制 + service + env、随机生成管理员密码、启用并启动）：
 > ```bash
 > sudo ./install.sh            # 自动找脚本同目录 / target 下的 clipsync-server
@@ -44,6 +46,8 @@ cargo build --release --target x86_64-unknown-linux-musl   # 静态单二进制
 > # 只安装不启动：     sudo ./install.sh --no-start
 > ```
 > 脚本会自动回显随机管理员密码，起好后 `curl 127.0.0.1:20070/healthz` 应返回 ok。下面为分步说明（脚本就是从这里来的）。
+>
+> **只拷文件到服务器（非 git pull）也行**：把 `install.sh` 和编译好的 `clipsync-server` 放在**同一目录**，`sudo ./install.sh` 即可——`.service` / `.env.example` 脚本会**自动生成**，不必一起拷；`/opt/clipsync-server`、`/etc/systemd/system/` 是脚本自动创建的**目标**位置，你不用预先建。也可 `sudo ./install.sh /绝对路径/clipsync-server` 显式指定二进制。
 
 1. **取得二进制**：本机交叉编译后把 `clipsync-server` 拷到 Linux；或在 Linux 主机 `rustup target add x86_64-unknown-linux-musl && cargo build --release --target x86_64-unknown-linux-musl`。
 2. **放文件**（以 `/opt/clipsync-server` 为例）：
