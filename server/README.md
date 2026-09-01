@@ -49,8 +49,15 @@ cargo build --release --target x86_64-unknown-linux-musl   # 静态单二进制
    systemctl enable --now clipsync-server
    systemctl status clipsync-server   # 看 /healthz 是否 ok
    ```
-4. **nginx 反代**（终止 TLS）：`/ws`、`/api/admin`、`/admin` 转发到 `127.0.0.1:20070`；`/ws` 须带 `Upgrade`/`Connection` 头。
+4. **nginx 反代**（终止 TLS）：`/ws`、`/api/admin`、`/admin` 转发到 `127.0.0.1:20070`。具体配置见 **`nginx-clipsync.conf.example`**（已含 `/ws` 的 `Upgrade`/`Connection` 头映射与 3600s 长超时、`/healthz` 探针、80→443 跳转）。改好 `server_name`/证书路径后：`nginx -t && systemctl reload nginx`。
+5. **看日志 / 健康检查**：
+   ```bash
+   journalctl -u clipsync-server -f          # 实时跟踪服务日志
+   curl -s 127.0.0.1:20070/healthz          # 期望 ok（未走 nginx 时）
+   curl -s https://你的域名/healthz         # 走 nginx TLS 时
+   ```
 
+> **走 nginx TLS 时，桌面端「服务器地址」填 `wss://域名`（端口 443），不要再填 `ip:20070`**，否则客户端会直连未加密的 20070 端口、绕过 TLS。
 > 数据落在 `CLIPSYNC_DATA_DIR`（默认 `data/`），含 `networks.json` / `admin.json` / `server.key`；迁移机器时连同该目录一起拷即可。
 
 ## 状态
