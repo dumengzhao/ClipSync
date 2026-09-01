@@ -23,6 +23,14 @@ cargo build --release --target x86_64-unknown-linux-musl   # 静态单二进制
 ./target/x86_64-unknown-linux-musl/release/clipsync-server
 ```
 
+> **从 Windows 主机交叉编译** 还需两步（纯 Rust，无需安装任何 Linux C 工具链）：
+> 1. 复制 Rust 自带的 ELF 链接器 `ld.lld` 到 cargo bin：
+>    `cp "$HOME/.rustup/toolchains/stable-x86_64-pc-windows-msvc/lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe" "$HOME/.cargo/bin/ld.lld.exe"`
+> 2. 构建时开启 `RUSTC_BOOTSTRAP=1`（`.cargo/config.toml` 已为该目标配好 `linker-flavor=gnu-lld` + `link-self-contained=yes`，用自带 musl libc 启动对象与 rust-lld）。
+>
+> 产出为 **全静态 x86_64 ELF**，可直接拷到任意 glibc / musl 的 Linux 主机运行，零运行时依赖。
+> 注：服务端会话 JWT 已改为纯 Rust 自实现 HS256（移除 `jsonwebtoken`/`ring`），故整个依赖图纯 Rust，musl 目标无需 C 编译器。
+
 前置 nginx 终止 TLS 并反代 `/ws`、`/api/admin`、`/admin`。可选 `Dockerfile` + `docker-compose.yml`。
 
 ## 状态

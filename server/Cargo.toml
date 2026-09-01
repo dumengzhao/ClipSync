@@ -17,7 +17,6 @@ anyhow = "1"
 hmac = "0.12"
 base64 = "0.22"
 rust-embed = "8"
-jsonwebtoken = "9"
 
 # Windows 服务支持（仅在 Windows 编译时启用；非 Windows 目标忽略）
 [target.'cfg(windows)'.dependencies]
