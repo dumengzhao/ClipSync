@@ -77,12 +77,18 @@ fn build_router(state: Arc<AppState>) -> axum::Router {
     axum::Router::new()
         .route("/ws", get(ws::device_ws))
         .route("/healthz", get(|| async { "ok" }))
+        .route("/", get(redirect_root))
         .route("/api/admin/login", post(admin::admin_login))
         .route("/api/admin/ws", get(admin_ws::admin_ws))
         .route("/admin", get(admin::admin_page))
         .route("/admin/static/:p", get(admin::admin_static))
         .merge(protected)
         .with_state(state.clone())
+}
+
+/// GET /：根路径重定向到管理后台，访问 host:port/ 也能跳到 admin 页面。
+async fn redirect_root() -> axum::response::Redirect {
+    axum::response::Redirect::to("/admin")
 }
 
 fn listen_addr() -> String {
