@@ -99,26 +99,30 @@ SERVICE
 }
 install_service
 
-# env（已存在则保留，否则用示例并随机化密码）
-if [ ! -f "$INSTALL_DIR/clipsync-server.env" ]; then
+# env：首次部署用示例生成（ADMIN_PASS 留空），已存在则保留。
+# 无论首次还是更新，若 ADMIN_PASS 为空则随机生成，避免空密码上线。
+ENV_FILE="$INSTALL_DIR/clipsync-server.env"
+if [ ! -f "$ENV_FILE" ]; then
   if [ -f "$SCRIPT_DIR/clipsync-server.env.example" ]; then
-    cp "$SCRIPT_DIR/clipsync-server.env.example" "$INSTALL_DIR/clipsync-server.env"
+    cp "$SCRIPT_DIR/clipsync-server.env.example" "$ENV_FILE"
   else
-    cat > "$INSTALL_DIR/clipsync-server.env" <<ENV
+    cat > "$ENV_FILE" <<ENV
 CLIPSYNC_DATA_DIR=$INSTALL_DIR/data
 ADMIN_USER=admin
-ADMIN_PASS=$(openssl rand -hex 12)
+ADMIN_PASS=
 LISTEN=0.0.0.0:$PORT
 ENV
   fi
-  if grep -q '请改成强密码' "$INSTALL_DIR/clipsync-server.env"; then
-    PASS="$(openssl rand -hex 12)"
-    sed -i "s|ADMIN_PASS=.*|ADMIN_PASS=$PASS|" "$INSTALL_DIR/clipsync-server.env"
-    echo ">>> 已生成随机管理员密码（请记好）: $PASS"
-  fi
-  chmod 600 "$INSTALL_DIR/clipsync-server.env"
-  echo ">>> 已生成 env -> $INSTALL_DIR/clipsync-server.env (权限 600)"
+  echo ">>> 已生成 env -> $ENV_FILE (权限 600)"
 fi
+
+# ADMIN_PASS 为空（首次占位或手填空）则随机生成并写回
+if ! grep -Eq '^ADMIN_PASS=.+' "$ENV_FILE"; then
+  PASS="$(openssl rand -hex 12)"
+  sed -i "s|^ADMIN_PASS=.*|ADMIN_PASS=$PASS|" "$ENV_FILE"
+  echo ">>> 已生成随机管理员密码（请记好）: $PASS"
+fi
+chmod 600 "$ENV_FILE"
 
 chown -R "$RUN_USER:$RUN_GROUP" "$INSTALL_DIR"
 echo ">>> 目录权限已设给 $RUN_USER:$RUN_GROUP"
