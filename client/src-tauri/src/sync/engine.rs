@@ -251,6 +251,9 @@ impl SyncEngine {
                     content_kind(&content),
                     mark.sync_id.0
                 );
+                if matches!(content, ClipboardContent::Text(_)) {
+                    crate::tray_dot(crate::TrayDotKind::Push);
+                }
                 let _ = event_tx.send(SyncEvent::LocalClipboardChanged { mark, content });
             }
         });
@@ -283,6 +286,9 @@ impl SyncEngine {
     /// 回调触发的回声被判定为重复而丢弃，避免回环。
     pub async fn apply_remote(&self, mark: SyncMark, content: ClipboardContent) {
         self.anti_loop.record_applied(&mark);
+        if matches!(content, ClipboardContent::Text(_)) {
+            crate::tray_dot(crate::TrayDotKind::Receive);
+        }
         {
             let mut g = self.last_emitted.lock().unwrap();
             *g = Some(content_hash(&content));

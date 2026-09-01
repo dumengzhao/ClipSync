@@ -39,6 +39,10 @@ use crate::transfer::manager::ConnectionHub;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::time::Duration;
+use tauri::image::Image;
 
 /// 全局应用状态（在 `setup` 之前通过 `manage` 注入）
 pub struct AppState {
@@ -369,6 +373,65 @@ pub fn run() {
 }
 
 /// 构建系统托盘图标与菜单
+/// 托盘图标圆点指示：推送文本(左上) / 收到文本(右上)，3 秒后还原。
+#[derive(Clone, Copy)]
+pub enum TrayDotKind {
+    Push,
+    Receive,
+}
+
+struct TrayDotIcons {
+    base: Image<'static>,
+    push: Image<'static>,
+    receive: Image<'static>,
+}
+
+static TRAY_DOT_ICONS: OnceLock<TrayDotIcons> = OnceLock::new();
+static APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
+static TRAY_DOT_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// 启动时调用：缓存应用句柄与三张托盘图标，返回 base 图标供托盘构建使用。
+pub fn init_tray_dot(app: &tauri::App) -> Image<'static> {
+    let base = Image::from_bytes(include_bytes!("../icons/tray-icon.png"))
+        .expect("tray-icon.png decode failed");
+    let push = Image::from_bytes(include_bytes!("../icons/tray-icon-dot-left.png"))
+        .expect("tray-icon-dot-left.png decode failed");
+    let receive = Image::from_bytes(include_bytes!("../icons/tray-icon-dot-right.png"))
+        .expect("tray-icon-dot-right.png decode failed");
+    let _ = TRAY_DOT_ICONS.set(TrayDotIcons {
+        base: base.clone(),
+        push,
+        receive,
+    });
+    let _ = APP_HANDLE.set(app.app_handle().clone());
+    base
+}
+
+/// 在托盘图标上叠加圆点（推送=左上 / 收到=右上），3 秒后还原基础图标。
+/// 3 秒内再次触发会刷新代次，使还原时间顺延到最后一次触发之后，避免来回闪烁。
+pub fn tray_dot(kind: TrayDotKind) {
+    let (Some(app), Some(icons)) = (APP_HANDLE.get(), TRAY_DOT_ICONS.get()) else {
+        return;
+    };
+    let dot = match kind {
+        TrayDotKind::Push => &icons.push,
+        TrayDotKind::Receive => &icons.receive,
+    };
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_icon(Some(dot.clone()));
+    }
+    let gen = TRAY_DOT_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    let app2 = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        if TRAY_DOT_GEN.load(Ordering::SeqCst) == gen {
+            if let (Some(tray), Some(icons)) = (app2.tray_by_id("main"), TRAY_DOT_ICONS.get()) {
+                let _ = tray.set_icon(Some(icons.base.clone()));
+            }
+        }
+    });
+}
+
 fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let show_i = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
     let hide_i = MenuItem::with_id(app, "hide", "隐藏主窗口", true, None::<&str>)?;
@@ -378,8 +441,8 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let menu = Menu::with_items(app, &[&show_i, &hide_i, &settings_i, &sep_i, &quit_i])?;
 
     // 托盘专用图标：内嵌编译进二进制，dev/build 均可靠；与窗口应用图标解耦。
-    let tray_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon.png"))
-        .expect("tray-icon.png decode failed");
+    // 同时缓存圆点变体（推送=左上 / 收到=右上）供 tray_dot 切换。
+    let tray_icon = init_tray_dot(app);
 
     TrayIconBuilder::with_id("main")
         .icon(tray_icon)
