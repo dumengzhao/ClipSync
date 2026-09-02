@@ -67,6 +67,13 @@ pub struct AppConfig {
     /// （拉取中绝不关闭）。默认 15000（15 秒）。设为 0 表示「不自动关闭」。
     #[serde(default = "default_toast_auto_hide_ms")]
     pub toast_auto_hide_ms: u64,
+    /// 主窗口默认宽高（逻辑像素）。为空（None）时采用 tauri.conf.json 的默认尺寸（即「当前宽高」）；
+    /// 仅当 `window_width` 与 `window_height` 同时设置（均非 None）时才生效，任一缺失则沿用默认尺寸。
+    #[serde(default)]
+    pub window_width: Option<u32>,
+    /// 主窗口默认高度（逻辑像素）。含义同 `window_width`。
+    #[serde(default)]
+    pub window_height: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,6 +156,8 @@ impl Default for AppConfig {
             lan_group: String::new(),
             show_main_window_on_launch: true,
             toast_auto_hide_ms: default_toast_auto_hide_ms(),
+            window_width: None,
+            window_height: None,
         }
     }
 }
