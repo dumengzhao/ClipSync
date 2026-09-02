@@ -7,7 +7,6 @@ mod state;
 mod storage;
 mod ws;
 
-use crate::models::AdminRecord;
 use crate::state::AppState;
 use axum::middleware::from_fn_with_state;
 use axum::routing::{get, post};
@@ -21,40 +20,19 @@ fn load_state() -> Arc<AppState> {
     let store = storage::Store::new(PathBuf::from(&data_dir));
     let networks = store.load_networks();
 
-    // 凭据解析规则（解决「改配置文件密码没用」）：
-    // - 环境变量 ADMIN_USER / ADMIN_PASS 显式设置时优先，并回写持久化记录（env 是配置权威来源）
-    // - 否则沿用已持久化的 data/admin.json
-    // - 首次运行（无持久化）且未设 env 时，回退默认 admin/clipsync 并持久化
-    let env_user = std::env::var("ADMIN_USER").ok();
-    let env_pass = std::env::var("ADMIN_PASS").ok();
-    let (admin_user, admin_pass_hash) = match store.load_admin() {
-        Some(a) => {
-            if env_user.is_some() || env_pass.is_some() {
-                let user = env_user.unwrap_or_else(|| a.user.clone());
-                let pass_hash = match &env_pass {
-                    Some(p) => storage::hash_pass(p),
-                    None => a.pass_hash.clone(),
-                };
-                let _ = store.save_admin(&AdminRecord {
-                    user: user.clone(),
-                    pass_hash: pass_hash.clone(),
-                });
-                (user, pass_hash)
-            } else {
-                (a.user, a.pass_hash)
-            }
-        }
-        None => {
-            let user = env_user.unwrap_or_else(|| "admin".to_string());
-            let pass = env_pass.unwrap_or_else(|| "clipsync".to_string());
-            let h = storage::hash_pass(&pass);
-            let _ = store.save_admin(&AdminRecord {
-                user: user.clone(),
-                pass_hash: h.clone(),
-            });
-            (user, h)
-        }
-    };
+    // 管理员凭据单一来源 = 环境变量 ADMIN_USER / ADMIN_PASS。
+    // 不再读/写 data/admin.json，避免两份配置打架（这正是「改配置文件密码不生效」的根因）。
+    // env 缺失时回退默认 admin/clipsync（仅本地开发用；生产由 install.sh 保证写入真实密码）。
+    let admin_user = std::env::var("ADMIN_USER").unwrap_or_else(|_| {
+        eprintln!("[clipsync-server] 警告：未设置 ADMIN_USER，使用默认用户名 admin");
+        "admin".to_string()
+    });
+    let admin_pass = std::env::var("ADMIN_PASS").unwrap_or_else(|_| {
+        eprintln!("[clipsync-server] 警告：未设置 ADMIN_PASS，使用默认密码 clipsync（生产请通过 env 配置）");
+        "clipsync".to_string()
+    });
+    let admin_pass_hash = storage::hash_pass(&admin_pass);
+
     let server_key = store.load_or_create_key().expect("create server key");
 
     Arc::new(AppState {

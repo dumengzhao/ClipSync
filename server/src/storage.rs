@@ -1,11 +1,12 @@
-use crate::models::{AdminRecord, Network};
+use crate::models::Network;
 use anyhow::Result;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
 use rand::rngs::OsRng;
 use std::path::{Path, PathBuf};
 
-/// 文件存储（无数据库）：networks.json / admin.json / server.key
+/// 文件存储（无数据库）：networks.json / server.key
+/// 管理员凭据不落盘——单一来源为环境变量 ADMIN_USER / ADMIN_PASS。
 pub struct Store {
     pub dir: PathBuf,
 }
@@ -17,9 +18,6 @@ impl Store {
     }
     fn networks_path(&self) -> PathBuf {
         self.dir.join("networks.json")
-    }
-    fn admin_path(&self) -> PathBuf {
-        self.dir.join("admin.json")
     }
     fn key_path(&self) -> PathBuf {
         self.dir.join("server.key")
@@ -35,15 +33,6 @@ impl Store {
     pub fn save_networks(&self, nets: &[Network]) -> Result<()> {
         let s = serde_json::to_string_pretty(nets)?;
         atomic_write(&self.networks_path(), &s)
-    }
-
-    pub fn load_admin(&self) -> Option<AdminRecord> {
-        let p = self.admin_path();
-        std::fs::read_to_string(&p).ok().and_then(|s| serde_json::from_str(&s).ok())
-    }
-    pub fn save_admin(&self, a: &AdminRecord) -> Result<()> {
-        let s = serde_json::to_string_pretty(a)?;
-        atomic_write(&self.admin_path(), &s)
     }
 
     /// 读取会话签名密钥；缺失则随机生成并落盘。
