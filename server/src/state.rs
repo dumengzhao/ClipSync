@@ -5,6 +5,7 @@ use crate::storage::Store;
 use anyhow::Result;
 use serde_json::json;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::mpsc;
@@ -26,6 +27,12 @@ pub struct AppState {
     pub server_key: String,
     pub admin_user: String,
     pub admin_pass_hash: String,
+    /// 客户端更新托管根目录（latest.json 与 files/<platform>/）
+    pub update_dir: PathBuf,
+    /// 改写 latest.json url 用的公开基址（如 https://sync.example.com）；缺省回退请求头（仅 https）
+    pub update_public_base: Option<String>,
+    /// 单次上传总大小上限（字节）
+    pub update_max_upload: u64,
 }
 
 impl AppState {
