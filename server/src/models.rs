@@ -126,10 +126,3 @@ pub struct NodeInfo {
     #[serde(default)]
     pub hardware_id: String,
 }
-
-/// 管理员账号记录（存储于 admin.json）。
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct AdminRecord {
-    pub user: String,
-    pub pass_hash: String, // argon2
-}
