@@ -10,7 +10,6 @@
     "core:window:allow-show",
     "core:window:allow-set-focus",
     "core:window:allow-set-size",
-    "updater:default",
     "autostart:default",
     "shell:allow-open",
     "dialog:default"

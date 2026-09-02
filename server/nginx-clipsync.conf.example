@@ -24,13 +24,23 @@ server {
         proxy_set_header Host $host;
     }
 
-    # 管理 REST API
+    # 管理 REST API（含 /api/admin/update 大包上传，需放宽体积）
     location /api/admin {
         proxy_pass http://127.0.0.1:20070;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        client_max_body_size 256m;   # 更新安装包上传（与 UPDATE_MAX_UPLOAD_MB 对齐）
+    }
+
+    # 客户端更新托管（公开读；TLS 在此终止，是无签名更新模型唯一安全边界）
+    location /update/ {
+        proxy_pass http://127.0.0.1:20070;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        client_max_body_size 256m;
     }
 
     # 管理页面（rust-embed 内嵌，单页）
