@@ -12,6 +12,7 @@ use axum::middleware::from_fn_with_state;
 use axum::routing::{get, post};
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(windows)]
 use std::time::Duration;
 
 /// 读取环境变量并初始化存储 / 状态（控制台模式与服务模式共用）。
