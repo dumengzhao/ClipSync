@@ -54,6 +54,49 @@ pub fn get_config(state: State<AppState>) -> crate::config::AppConfig {
     state.config.lock().clone()
 }
 
+/// 主窗口当前尺寸（逻辑像素），供设置页「获取实时宽高」按钮获取并回填默认窗口宽高。
+#[derive(serde::Serialize)]
+pub struct WindowSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// 获取主窗口当前实际尺寸（逻辑像素）。与启动时 `set_size(LogicalSize)` 使用同一坐标系，
+/// 因此获取后回填保存，下次启动会得到完全一致的窗口尺寸。
+#[tauri::command]
+pub fn get_window_size(app: AppHandle) -> Result<WindowSize, String> {
+    let w = app
+        .get_webview_window("main")
+        .ok_or_else(|| "找不到主窗口".to_string())?;
+    // 用 outer_size 而非 inner_size：本应用窗口 decorations=false（无边框），
+    // inner_size 读取的是 webview 内容区，在窗口初次布局完成前会瞬态返回 0，
+    // 而 outer_size 取 NSWindow 自身尺寸（创建即确定），始终可靠。
+    let size = w.outer_size().map_err(|e| e.to_string())?;
+    let scale = w.scale_factor().map_err(|e| e.to_string())?;
+    let logical = size.to_logical::<f64>(scale);
+    let mut width = logical.width.round() as i64;
+    let mut height = logical.height.round() as i64;
+    // 兜底：极少数情况下 outer_size 仍为 0，回退到 tauri.conf.json 的默认 800x600，
+    // 避免设置页把输入框填成 0。
+    if width <= 0 {
+        width = 800;
+    }
+    if height <= 0 {
+        height = 600;
+    }
+    tracing::info!(
+        "get_window_size: raw={:?} scale={} -> {}x{}",
+        size,
+        scale,
+        width,
+        height
+    );
+    Ok(WindowSize {
+        width: width as u32,
+        height: height as u32,
+    })
+}
+
 /// 更新并持久化配置（如监听端口）。
 ///
 /// - 校验端口范围（1..=65535）
