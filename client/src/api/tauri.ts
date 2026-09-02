@@ -148,6 +148,10 @@ export interface AppConfig {
   /** 待拉取小窗「未操作自动关闭」时长（毫秒）。未点击「拉取」则此时长后自动收起；
    *  一旦点击拉取，改为等拉取完成并写入本机剪贴板后再关闭。0 表示不自动关闭。默认 15000 */
   toast_auto_hide_ms?: number;
+  /** 主窗口默认宽度（逻辑像素）；不设置（null/undefined）时采用应用默认尺寸。需与 window_height 同时设置才生效 */
+  window_width?: number | null;
+  /** 主窗口默认高度（逻辑像素）；不设置（null/undefined）时采用应用默认尺寸。需与 window_width 同时设置才生效 */
+  window_height?: number | null;
 }
 
 export async function getConfig(): Promise<AppConfig> {
@@ -156,6 +160,11 @@ export async function getConfig(): Promise<AppConfig> {
 
 export async function setConfig(cfg: AppConfig): Promise<void> {
   return invoke<void>('set_config', { cfg });
+}
+
+/** 获取主窗口当前实际尺寸（逻辑像素），用于「获取实时宽高」回填 */
+export async function getWindowSize(): Promise<{ width: number; height: number }> {
+  return invoke<{ width: number; height: number }>('get_window_size');
 }
 
 export async function openSettings(): Promise<void> {
