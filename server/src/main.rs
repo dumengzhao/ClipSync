@@ -98,6 +98,11 @@ fn build_router(state: Arc<AppState>) -> axum::Router {
             "/api/admin/update",
             get(update::admin_info).post(update::admin_upload),
         )
+        // 上传安装包可能 >2MB，须放开 axum 默认的 2MB DefaultBodyLimit
+        // （否则 Multipart extractor 内部 with_limited_body 会在 2MB 处截断报错）
+        .layer(axum::extract::DefaultBodyLimit::max(
+            state.update_max_upload.min(usize::MAX as u64) as usize,
+        ))
         .route_layer(from_fn_with_state(state.clone(), admin::admin_auth));
 
     axum::Router::new()
