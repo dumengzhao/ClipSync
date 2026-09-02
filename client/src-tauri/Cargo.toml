@@ -16,7 +16,6 @@ tauri-build = { version = "2.0", features = [] }
 [dependencies]
 tauri = { version = "2.0", features = ["tray-icon", "image-png"] }
 tauri-plugin-autostart = "2.0"
-tauri-plugin-updater = "2.0"
 tauri-plugin-shell = "2.0"
 tauri-plugin-dialog = "2.0"
 tauri-plugin-single-instance = "2"

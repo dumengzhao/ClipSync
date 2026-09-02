@@ -167,7 +167,6 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--hidden"]),
         ))
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             // 第二个实例启动时不再新建窗口，而是聚焦已运行的第一个实例主窗口
             show_main_window(app);
