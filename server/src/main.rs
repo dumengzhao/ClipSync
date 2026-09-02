@@ -5,6 +5,7 @@ mod hub;
 mod models;
 mod state;
 mod storage;
+mod update;
 mod ws;
 
 use crate::state::AppState;
@@ -36,6 +37,23 @@ fn load_state() -> Arc<AppState> {
 
     let server_key = store.load_or_create_key().expect("create server key");
 
+    // 更新托管配置（见 UPDATE_MODULE_PLAN.md 第 3 节）
+    let update_dir = std::env::var("UPDATE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(&data_dir).join("update"));
+    let update_public_base = std::env::var("UPDATE_PUBLIC_BASE")
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty());
+    let update_max_upload = std::env::var("UPDATE_MAX_UPLOAD_MB")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(200)
+        * 1024
+        * 1024;
+    let _ = std::fs::create_dir_all(update_dir.join("files"));
+
     Arc::new(AppState {
         store,
         networks: std::sync::Mutex::new(networks),
@@ -44,6 +62,9 @@ fn load_state() -> Arc<AppState> {
         server_key,
         admin_user,
         admin_pass_hash,
+        update_dir,
+        update_public_base,
+        update_max_upload,
     })
 }
 
@@ -73,6 +94,10 @@ fn build_router(state: Arc<AppState>) -> axum::Router {
             "/api/admin/networks/:id/removed/:dev/restore",
             post(admin::restore_device_handler),
         )
+        .route(
+            "/api/admin/update",
+            get(update::admin_info).post(update::admin_upload),
+        )
         .route_layer(from_fn_with_state(state.clone(), admin::admin_auth));
 
     axum::Router::new()
@@ -83,6 +108,11 @@ fn build_router(state: Arc<AppState>) -> axum::Router {
         .route("/api/admin/ws", get(admin_ws::admin_ws))
         .route("/admin", get(admin::admin_page))
         .route("/admin/static/:p", get(admin::admin_static))
+        .route("/update/latest.json", get(update::latest_json))
+        .route(
+            "/update/files/:platform/:file",
+            get(update::download_file),
+        )
         .merge(protected)
         .with_state(state.clone())
 }
