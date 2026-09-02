@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type FocusEvent } from 'react';
-import { getConfig, setConfig, pairManual, regeneratePairingCode, type AppConfig } from './api/tauri';
+import { getConfig, setConfig, getWindowSize, pairManual, regeneratePairingCode, type AppConfig } from './api/tauri';
 import { open } from '@tauri-apps/plugin-dialog';
 import { applyTheme } from './theme';
 
@@ -55,6 +55,8 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
     toastTimer.current = setTimeout(() => setToast(null), 1800);
   };
   const [thresholdWarn, setThresholdWarn] = useState('');
+  // 主窗口当前实际尺寸（逻辑像素），供「默认窗口宽高」在配置为空时作为显示回退、以及「获取实时宽高」回填
+  const [curSize, setCurSize] = useState<{ width: number; height: number } | null>(null);
   // 服务端地址拆分为：ws/wss 协议下拉 + 主机:端口 输入框（/ws 路径固定，不显示、不可编辑）
   const [srvScheme, setSrvScheme] = useState<'ws' | 'wss'>('ws');
   const [srvHost, setSrvHost] = useState('');
@@ -79,6 +81,10 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         applyTheme(c.theme);
       })
       .catch((e) => setMsg('加载配置失败: ' + String(e)));
+    // 配置为空时，用当前窗口实际尺寸回填显示，避免输入框留空
+    getWindowSize()
+      .then((s) => setCurSize(s))
+      .catch(() => {/* 获取失败不阻断设置页 */});
   }, []);
 
   const update = <K extends keyof AppConfig>(key: K, value: AppConfig[K]) => {
@@ -101,6 +107,33 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
     } catch (e) {
       setMsg('保存失败: ' + String(e));
     }
+  };
+
+  // 「获取实时宽高」：取当前主窗口实际尺寸，回填并立即保存；不影响手动输入宽高的独立保存。
+  const handleGetRealtimeSize = async () => {
+    try {
+      const s = await getWindowSize();
+      update('window_width', s.width);
+      update('window_height', s.height);
+      await persist({ window_width: s.width, window_height: s.height }, '已获取并保存当前窗口宽高');
+    } catch (e) {
+      setMsg('获取窗口尺寸失败: ' + String(e), 'err');
+    }
+  };
+
+  // 宽/高输入框落盘：仅当值真正发生变化才写盘。特别地，配置本为「未设置」且本次值恰好等于
+  // 「当前窗口实时尺寸」(仅作为显示回退) 时，视为未改动，不写盘，避免把「未设置」误存成「已设置」。
+  const commitSize = (key: 'window_width' | 'window_height', raw: string) => {
+    const trimmed = raw.trim();
+    const n = Math.round(Number(trimmed));
+    const v: number | null = trimmed === '' || !Number.isFinite(n) ? null : Math.max(0, n);
+    const cur = persistedRef.current
+      ? (persistedRef.current[key] as number | null | undefined)
+      : undefined;
+    if (v === cur) return;
+    const fallback = key === 'window_width' ? curSize?.width : curSize?.height;
+    if ((cur === null || cur === undefined) && v === fallback) return;
+    persist({ [key]: v } as Partial<AppConfig>);
   };
 
   // 文本框：回车或失焦即保存（带类型转换，且值未变时不写盘）。
@@ -596,6 +629,57 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         小窗弹出后，若在该时长内<b>未点击「拉取」</b>则自动关闭；一旦点击了拉取，就取消倒计时，
         改为<b>等拉取完成并写入本机剪贴板之后</b>才关闭（拉取中绝不会自动关闭）。
         填 0 表示从不自动关闭，需手动处理。
+      </p>
+
+      <div className="section">主窗口</div>
+      <div className="row">
+        <label style={{ display: 'inline-flex', alignItems: 'center' }}>
+          默认窗口宽高
+          <span
+            onClick={handleGetRealtimeSize}
+            style={{ color: '#3b82f6', cursor: 'pointer', marginLeft: '0.6rem', fontSize: '0.85em' }}
+          >
+            获取实时宽高
+          </span>
+        </label>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flex: '0 0 auto' }}>
+          <input
+            type="number"
+            min={1}
+            style={{ width: '100px' }}
+            placeholder="宽"
+            value={cfg.window_width ?? curSize?.width ?? ''}
+            onChange={(e) => {
+              const raw = e.target.value.trim();
+              const n = Math.round(Number(raw));
+              update('window_width', raw === '' || !Number.isFinite(n) ? null : Math.max(0, n));
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+            }}
+            onBlur={(e) => commitSize('window_width', e.target.value)}
+          />
+          <span>×</span>
+          <input
+            type="number"
+            min={1}
+            style={{ width: '100px' }}
+            placeholder="高"
+            value={cfg.window_height ?? curSize?.height ?? ''}
+            onChange={(e) => {
+              const raw = e.target.value.trim();
+              const n = Math.round(Number(raw));
+              update('window_height', raw === '' || !Number.isFinite(n) ? null : Math.max(0, n));
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+            }}
+            onBlur={(e) => commitSize('window_height', e.target.value)}
+          />
+        </div>
+      </div>
+      <p className="hint">
+        留空则沿用当前默认尺寸；宽与高需<b>同时填写</b>才会覆盖默认尺寸。点击「获取实时宽高」可填入并保存当前窗口实际尺寸。
       </p>
 
       <div className="section">外观</div>
