@@ -26,6 +26,9 @@ pub struct AppConfig {
     pub manual_addresses: Vec<ManualAddress>,
     pub sync_primary_selection: bool,
     pub cache_ttl_hours: u32,
+    /// 界面主题。默认深色（`Theme::Dark`），与多数剪贴板工具一致；可选 `System` / `Light`。
+    /// 已有配置里显式写了其它值时以配置为准，仅当字段缺失时回退到深色默认。
+    #[serde(default = "default_theme")]
     pub theme: Theme,
     /// 文件同步落盘目录（各端自选）。为空时回退到系统「下载」目录。
     /// 对端点击「拉取」后，文件下载到 `<sync_dir>/<对方设备名>/<相对路径>`。
@@ -115,6 +118,11 @@ fn default_false() -> bool {
     false
 }
 
+/// 界面主题默认深色，与多数剪贴板工具一致。
+fn default_theme() -> Theme {
+    Theme::Dark
+}
+
 /// 默认设备名取本机机器名（hostname），使不同设备默认即可区分。
 /// 取不到（或为空）时回退到固定占位名，避免空名称。
 pub fn default_device_name() -> String {
@@ -149,7 +157,6 @@ impl Default for AppConfig {
             auto_pull_enabled: false,
             auto_pull_threshold_mb: 1,
             max_folder_files: 100,
-            theme: Theme::System,
             server_url: String::new(),
             network_token: String::new(),
             ext_file_ep: String::new(),
@@ -158,6 +165,7 @@ impl Default for AppConfig {
             toast_auto_hide_ms: default_toast_auto_hide_ms(),
             window_width: None,
             window_height: None,
+            theme: Theme::Dark,
         }
     }
 }
