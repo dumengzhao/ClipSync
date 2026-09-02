@@ -59,6 +59,10 @@
     transition:border-color .15s, box-shadow .15s;}
   input:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(34,211,238,.15)}
   input::placeholder{color:var(--muted)}
+  select{
+    background:rgba(4,9,20,.85);border:1px solid var(--line-strong);color:var(--text);
+    padding:10px 12px;border-radius:8px;font-size:14px;outline:none;font-family:var(--sans);}
+  select:focus{border-color:var(--cyan)}
 
   /* ---------- 顶栏 ---------- */
   .topbar{
@@ -272,6 +276,21 @@
         </div>
 
         <div id="netList" class="net-grid"></div>
+
+        <!-- ===== 客户端更新托管 ===== -->
+        <div class="panel" style="margin-top:16px">
+          <div class="panel-title">CLIENT UPDATE <span class="n" id="updVer"></span></div>
+          <div id="updInfo" class="hint" style="margin:0 0 12px">加载中…</div>
+          <div class="form-row" style="margin-bottom:10px">
+            <div class="fld" style="min-width:260px"><label>latest.json（更新清单）</label><input type="file" id="updManifest" accept=".json,application/json"/></div>
+          </div>
+          <div id="updFiles"></div>
+          <div class="form-row" style="margin-top:10px">
+            <button class="ghost sm" id="updAddFile" type="button">+ 添加平台安装包</button>
+            <button id="updSubmit" type="button">发布更新</button>
+          </div>
+          <div class="hint">每个安装包选对应平台键（windows-x86_64 / darwin-aarch64 / linux-x86_64 …）。服务端收到完整 manifest 后才原子切换线上版本，传齐再发布。</div>
+        </div>
       </section>
 
       <!-- ===== 视图 2：网络明细 ===== -->
@@ -378,6 +397,7 @@ function openList(){
   closeDevWs();
   showView('list');
   loadNetworks().catch(()=>{});
+  loadUpdateInfo();
 }
 
 /* ================= 视图 2：网络明细 ================= */
@@ -577,6 +597,73 @@ $('#createNet').onclick=async()=>{
   $('#netName').value=''; $('#netDesc').value='';
   toast('网络已创建');
   await loadNetworks();
+};
+
+/* ================= 客户端更新托管 ================= */
+const UPD_PLATFORMS=['windows-x86_64','windows-aarch64','darwin-x86_64','darwin-aarch64','linux-x86_64','linux-aarch64'];
+
+function fmtSize(n){
+  if(n===null||n===undefined) return '?';
+  if(n<1024) return n+'B';
+  if(n<1048576) return (n/1024).toFixed(1)+'KB';
+  return (n/1048576).toFixed(1)+'MB';
+}
+
+async function loadUpdateInfo(){
+  const box=$('#updInfo');
+  try{
+    const r=await api('/api/admin/update');
+    $('#updVer').textContent='['+r.version+']';
+    const plats=Object.entries(r.platforms||{}).map(([p,v])=>
+      `${esc(p)}：${v.uploaded?`已上传(${fmtSize(v.size)})`:'<span style="color:var(--amber)">缺文件</span>'}`
+    ).join('　·　');
+    box.innerHTML=`线上版本 <b style="color:var(--cyan)">${esc(r.version)}</b>（${esc(r.pub_date||'-')}）`+
+      (plats?`<br>${plats}`:'')+(r.notes?`<br>${esc(r.notes)}`:'');
+  }catch(e){
+    $('#updVer').textContent='';
+    box.innerHTML='尚未发布更新。用下方表单上传 latest.json + 安装包。';
+  }
+}
+
+function updAddRow(){
+  const row=document.createElement('div');
+  row.className='form-row';
+  row.style.marginBottom='8px';
+  row.innerHTML=`
+    <div class="fld" style="min-width:190px"><label>平台</label>
+      <select class="upd-platform">${UPD_PLATFORMS.map(p=>`<option>${p}</option>`).join('')}</select>
+    </div>
+    <div class="fld" style="min-width:240px"><label>安装包文件</label><input type="file" class="upd-file"/></div>
+    <button class="ghost sm upd-del" type="button">移除</button>`;
+  row.querySelector('.upd-del').onclick=()=>row.remove();
+  $('#updFiles').appendChild(row);
+}
+$('#updAddFile').onclick=updAddRow;
+
+$('#updSubmit').onclick=async()=>{
+  const manifestEl=$('#updManifest');
+  if(!manifestEl.files.length){ toast('请选择 latest.json'); return; }
+  const rows=[...document.querySelectorAll('#updFiles .form-row')].filter(r=>r.querySelector('.upd-file').files.length);
+  if(!rows.length){ toast('请至少添加一个平台安装包'); return; }
+  const fd=new FormData();
+  fd.append('manifest', manifestEl.files[0]);
+  for(const r of rows){
+    fd.append('platform', r.querySelector('.upd-platform').value);
+    fd.append('filename', r.querySelector('.upd-file').files[0].name);
+    fd.append('file', r.querySelector('.upd-file').files[0]);
+  }
+  $('#updSubmit').disabled=true;
+  try{
+    // multipart：不能用 api()（其默认 Content-Type: json），只带 Authorization
+    const res=await fetch('/api/admin/update',{method:'POST',headers:{'Authorization':'Bearer '+token},body:fd});
+    const d=await res.json().catch(()=>({}));
+    if(!res.ok){ toast('发布失败: '+(d.error||('HTTP '+res.status))); return; }
+    toast('已发布 v'+d.version);
+    manifestEl.value='';
+    $('#updFiles').innerHTML='';
+    loadUpdateInfo();
+  }catch(e){ toast('发布失败: '+e.message); }
+  finally{ $('#updSubmit').disabled=false; }
 };
 
 /* ================= 登录 / 登出 ================= */
