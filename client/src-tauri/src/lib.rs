@@ -234,6 +234,40 @@ pub fn run() {
                         } else {
                             tracing::info!("应用默认窗口尺寸：{}x{}（逻辑像素）", w, h);
                         }
+                    } else {
+                        // 配置未设置默认宽高：读取「当前窗口实际尺寸」写入 config 落盘作为默认值，
+                        // 这样设置页直接读 config 即可，无需每次打开设置时再动态获取当前窗口尺寸。
+                        match window.outer_size() {
+                            Ok(phys) => {
+                                let scale = window.scale_factor().unwrap_or(1.0);
+                                let logical = phys.to_logical::<f64>(scale);
+                                let dw = logical.width.round() as u32;
+                                let dh = logical.height.round() as u32;
+                                if dw == 0 || dh == 0 {
+                                    tracing::warn!("读取到窗口尺寸为 0，跳过写入默认宽高");
+                                } else {
+                                    let handle = app.handle().clone();
+                                    let cfg = {
+                                        let state = app.state::<AppState>();
+                                        let mut g = state.config.lock();
+                                        g.window_width = Some(dw);
+                                        g.window_height = Some(dh);
+                                        g.clone()
+                                    };
+                                    if let Err(e) = crate::config::save_config(&handle, &cfg) {
+                                        tracing::warn!("写入默认窗口尺寸失败: {e}");
+                                    } else {
+                                        tracing::info!(
+                                            "配置未设默认宽高，已写入当前窗口尺寸默认值：{}x{}",
+                                            dw, dh
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("读取当前窗口尺寸失败，跳过写入默认宽高: {e}")
+                            }
+                        }
                     }
                 }
             }
