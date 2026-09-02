@@ -4,14 +4,14 @@
 //! 数据分两部分落地，敏感程度不同、载体也不同：
 //!
 //! - **设备元数据**（id / 名称 / 指纹 / 信任级别 / 最后在线）→ 明文 JSON，
-//!   位于 `<app_config_dir>/paired_devices.json`。这些信息本就要展示给用户，
-//!   不敏感。
+//!   位于 `<home_dir>/ClipSync/paired_devices.json`（用户主目录下、非隐藏）。
+//!   这些信息本就要展示给用户，不敏感。
 //! - **重连口令（link secret）** → 系统密钥链（Windows Credential Manager /
 //!   macOS Keychain / Linux Secret Service）。它等价于长期共享密钥，泄露即可
 //!   冒充已配对设备，绝不能明文落盘。
 //!
 //! 密钥链在部分环境不可用（典型：无 Secret Service 的 headless Linux）。此时
-//! 降级写入 `<app_config_dir>/paired_secrets.json` 并收紧到属主可读写，同时打
+//! 降级写入 `<home_dir>/ClipSync/paired_secrets.json` 并收紧到属主可读写（0o600），同时打
 //! WARN——**能用**优先于**完美**，但要让用户知道降级发生了。
 
 use std::collections::HashMap;
@@ -77,7 +77,7 @@ impl From<PairedRecord> for PairedDevice {
 }
 
 fn config_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
-    app.path().app_config_dir().ok()
+    crate::config::clipsync_base_dir(app)
 }
 
 fn devices_path(app: &tauri::AppHandle) -> Option<PathBuf> {
@@ -88,8 +88,41 @@ fn secrets_path(app: &tauri::AppHandle) -> Option<PathBuf> {
     config_dir(app).map(|d| d.join(SECRETS_FILE))
 }
 
+/// 升级迁移：将旧位置（应用配置目录 `<app_config_dir>`）下的配对文件一次性搬到
+/// 新的用户主目录 ClipSync/ 位置（仅一次）。保证升级/重装后历史配对关系与降级口令不丢失；
+/// 新位置已存在对应文件或旧位置无文件则跳过。口令文件迁移后收紧到属主可读写。
+fn migrate_legacy_files(app: &tauri::AppHandle) {
+    let Some(new_dir) = crate::config::clipsync_base_dir(app) else {
+        return;
+    };
+    let Some(old_dir) = app.path().app_config_dir().ok() else {
+        return;
+    };
+    if std::fs::create_dir_all(&new_dir).is_err() {
+        tracing::warn!("创建配置目录失败，跳过配对文件迁移");
+        return;
+    }
+    for fname in [DEVICES_FILE, SECRETS_FILE] {
+        let old = old_dir.join(fname);
+        let new = new_dir.join(fname);
+        if new.exists() || !old.exists() {
+            continue;
+        }
+        match std::fs::copy(&old, &new) {
+            Ok(_) => {
+                tracing::info!("已从旧位置迁移配对文件 {fname} 到 {}", new.display());
+                if fname == SECRETS_FILE {
+                    restrict_permissions(&new);
+                }
+            }
+            Err(e) => tracing::warn!("迁移配对文件 {fname} 失败（不影响启动）：{e}"),
+        }
+    }
+}
+
 /// 读取已配对设备列表。文件缺失或损坏时返回空表（视为「尚未配对过」），不报错中断启动。
 pub fn load_devices(app: &tauri::AppHandle) -> Vec<PairedDevice> {
+    migrate_legacy_files(app);
     let Some(path) = devices_path(app) else {
         return Vec::new();
     };
@@ -168,6 +201,7 @@ fn remove_fallback_secret(app: &tauri::AppHandle, device_id: &str) {
 }
 
 fn read_fallback_secrets(app: &tauri::AppHandle) -> HashMap<String, String> {
+    migrate_legacy_files(app);
     secrets_path(app)
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|t| serde_json::from_str(&t).ok())
