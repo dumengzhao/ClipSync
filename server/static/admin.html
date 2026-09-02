@@ -99,6 +99,14 @@
   #login .sub{text-align:center;color:var(--muted);font-size:11px;letter-spacing:.3em;margin-top:6px;font-family:var(--mono)}
   #login form{display:flex;flex-direction:column;gap:12px;margin-top:22px}
   #loginErr{color:var(--red);font-size:12px;text-align:center;min-height:16px}
+  /* 密码框 + 明文切换眼睛 */
+  .pwd-wrap{position:relative}
+  .pwd-wrap input{width:100%;padding-right:44px}
+  .pwd-eye{
+    position:absolute;top:50%;right:8px;transform:translateY(-50%);
+    background:transparent;border:none;box-shadow:none;min-height:auto;padding:4px 6px;
+    color:var(--muted);cursor:pointer;border-radius:6px;display:flex;align-items:center;}
+  .pwd-eye:hover{color:var(--cyan);background:transparent;box-shadow:none}
 
   /* ---------- 网络列表（主页） ---------- */
   .section-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;gap:10px;flex-wrap:wrap}
@@ -225,7 +233,12 @@
     <div class="panel">
       <form id="loginForm">
         <input id="u" placeholder="用户名" autocomplete="username" />
-        <input id="p" type="password" placeholder="密码" autocomplete="current-password" />
+        <div class="pwd-wrap">
+          <input id="p" type="password" placeholder="密码" autocomplete="current-password" />
+          <button type="button" class="pwd-eye" id="pwEye" aria-label="显示/隐藏密码" title="显示密码">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
         <button type="submit" id="loginBtn">接 入</button>
         <div id="loginErr"></div>
       </form>
