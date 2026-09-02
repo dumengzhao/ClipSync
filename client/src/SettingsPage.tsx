@@ -1,5 +1,16 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type FocusEvent } from 'react';
-import { getConfig, setConfig, getWindowSize, pairManual, regeneratePairingCode, type AppConfig } from './api/tauri';
+import {
+  getConfig,
+  setConfig,
+  getWindowSize,
+  pairManual,
+  regeneratePairingCode,
+  checkUpdate,
+  downloadUpdate,
+  installUpdate,
+  type AppConfig,
+  type UpdateInfo,
+} from './api/tauri';
 import { open } from '@tauri-apps/plugin-dialog';
 import { applyTheme } from './theme';
 
@@ -69,6 +80,10 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
   const [manualPairCode, setManualPairCode] = useState('');
   // 记录已落盘的快照，用于判断「值是否真的变化」，避免受控组件重渲染导致的误判。
   const persistedRef = useRef<AppConfig | null>(null);
+  // 客户端自更新（基址取自 server_url 配置，无签名自托管）
+  const [upd, setUpd] = useState<UpdateInfo | null>(null);
+  const [updBusy, setUpdBusy] = useState<'check' | 'download' | null>(null);
+  const [updMsg, setUpdMsg] = useState('');
 
   useEffect(() => {
     getConfig()
@@ -83,6 +98,43 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
       .catch((e) => setMsg('加载配置失败: ' + String(e)));
     // 不再于打开设置时动态获取窗口尺寸：默认值已在启动时由 Rust 端写入 config。
   }, []);
+
+  // 「检查更新」：调 Rust 自写更新器；null=已是最新/未发布
+  const doCheckUpdate = async () => {
+    setUpdBusy('check');
+    setUpdMsg('');
+    try {
+      const r = await checkUpdate();
+      if (!r) {
+        setUpd(null);
+        setUpdMsg('已是最新');
+      } else {
+        setUpd(r);
+        setUpdMsg('');
+      }
+    } catch (e) {
+      setUpd(null);
+      setUpdMsg('检查失败: ' + String(e));
+    } finally {
+      setUpdBusy(null);
+    }
+  };
+
+  // 「下载并安装」：下载 + sha256 校验 + 拉起安装包（Windows 上随后自动退出旧进程）
+  const doInstall = async () => {
+    if (!upd) return;
+    setUpdBusy('download');
+    setUpdMsg('');
+    try {
+      const p = await downloadUpdate(upd.url, upd.sha256);
+      setUpdMsg('校验通过，正在启动安装…');
+      await installUpdate(p);
+    } catch (e) {
+      setUpdMsg('安装失败: ' + String(e));
+    } finally {
+      setUpdBusy(null);
+    }
+  };
 
   const update = <K extends keyof AppConfig>(key: K, value: AppConfig[K]) => {
     setCfg((c) => (c ? { ...c, [key]: value } : c));
@@ -689,6 +741,28 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
           <option value="Dark">深色</option>
         </select>
       </div>
+
+      <div className="section">更新</div>
+      <div className="row">
+        <label>检查新版本（更新地址取自服务端配置）</label>
+        <button onClick={doCheckUpdate} disabled={updBusy !== null}>
+          {updBusy === 'check' ? '检查中…' : '检查更新'}
+        </button>
+        {upd && (
+          <button onClick={doInstall} disabled={updBusy !== null}>
+            {updBusy === 'download' ? '下载中…' : `下载并安装 v${upd.version}`}
+          </button>
+        )}
+      </div>
+      {(upd || updMsg) && (
+        <p className="hint">
+          {upd
+            ? `发现 v${upd.version}${upd.pub_date ? `（${upd.pub_date}）` : ''}${
+                upd.notes ? `：${upd.notes}` : ''
+              }`
+            : updMsg}
+        </p>
+      )}
 
       {toast && (
         <div className={`toast toast-${toast.type}`} role="status">

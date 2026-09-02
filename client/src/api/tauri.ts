@@ -240,3 +240,29 @@ export function crossItemId(o: CrossLanOffer): string {
   return `local:${crossItemBase(o)}`;
 }
 
+
+/* ================= 客户端自更新（无签名自托管，见 server/UPDATE_MODULE_PLAN.md） ================= */
+
+/** 服务端自定义 latest.json 中与本平台相关的更新信息（Rust 端 `UpdateInfo`） */
+export interface UpdateInfo {
+  version: string;
+  notes: string;
+  pub_date: string;
+  url: string;
+  sha256: string;
+}
+
+/** 检查更新：null 表示已是最新 / 服务端未发布；Err 表示未配置 wss 地址或网络失败 */
+export async function checkUpdate(): Promise<UpdateInfo | null> {
+  return invoke<UpdateInfo | null>('check_update');
+}
+
+/** 下载安装包到临时目录并做 sha256 完整性校验，返回本地文件路径 */
+export async function downloadUpdate(url: string, sha256: string): Promise<string> {
+  return invoke<string>('download_update', { url, sha256 });
+}
+
+/** 运行安装包（Windows NSIS 被动模式安装后退出进程） */
+export async function installUpdate(path: string): Promise<void> {
+  return invoke<void>('install_update', { path });
+}
