@@ -214,6 +214,30 @@ pub fn run() {
                 }
             }
 
+            // 应用「默认窗口宽高」配置：用户同时设置了 window_width 与 window_height 时，
+            // 覆盖 tauri.conf.json 的默认尺寸；任一为 None（未设置）则沿用当前默认尺寸。
+            // 在 show 之后设置也生效，隐藏（--hidden）状态下设置同样有效，之后显示即为该尺寸。
+            {
+                if let Some(window) = app.get_webview_window("main") {
+                    let state = app.state::<AppState>();
+                    let (w, h) = {
+                        let g = state.config.lock();
+                        (g.window_width, g.window_height)
+                    };
+                    if let (Some(w), Some(h)) = (w, h) {
+                        if w == 0 || h == 0 {
+                            tracing::warn!("window_width/height 为 0，忽略该尺寸配置");
+                        } else if let Err(e) =
+                            window.set_size(tauri::LogicalSize::new(w as f64, h as f64))
+                        {
+                            tracing::warn!("应用默认窗口尺寸失败: {e}");
+                        } else {
+                            tracing::info!("应用默认窗口尺寸：{}x{}（逻辑像素）", w, h);
+                        }
+                    }
+                }
+            }
+
             // 同步「配对码」到连接中枢：作为 SPAKE2 应答方的常驻口令，
             // 对端首配对时输入本机显示的这个码即可（两端无需预先设成相同）。
             {
@@ -332,6 +356,7 @@ pub fn run() {
             tauri_cmd::get_device_id,
             tauri_cmd::get_device_name,
             tauri_cmd::get_config,
+            tauri_cmd::get_window_size,
             tauri_cmd::get_clipboard,
             tauri_cmd::set_clipboard,
             tauri_cmd::get_paired_devices,
