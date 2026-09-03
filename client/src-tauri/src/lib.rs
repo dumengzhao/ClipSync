@@ -497,9 +497,11 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let show_i = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
     let hide_i = MenuItem::with_id(app, "hide", "隐藏主窗口", true, None::<&str>)?;
     let settings_i = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
+    let update_i = MenuItem::with_id(app, "check_update", "检查更新", true, None::<&str>)?;
     let sep_i = PredefinedMenuItem::separator(app)?;
     let quit_i = MenuItem::with_id(app, "quit", "退出 ClipSync", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show_i, &hide_i, &settings_i, &sep_i, &quit_i])?;
+    let menu =
+        Menu::with_items(app, &[&show_i, &hide_i, &settings_i, &update_i, &sep_i, &quit_i])?;
 
     // 托盘专用图标：内嵌编译进二进制，dev/build 均可靠；与窗口应用图标解耦。
     // 同时缓存圆点变体（推送=左上 / 收到=右上）供 tray_dot 切换。
@@ -518,6 +520,51 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
                 if let Err(e) = crate::tauri_cmd::open_settings(app.clone()) {
                     tracing::error!("failed to open settings window: {e}");
                 }
+            }
+            "check_update" => {
+                let app_handle = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    use tauri_plugin_dialog::DialogExt;
+                    let server_url = {
+                        let state = app_handle.state::<AppState>();
+                        let url = state.config.lock().server_url.clone();
+                        url
+                    };
+                    match crate::update::do_check_update(&server_url).await {
+                        Ok(Some(info)) => {
+                            let notes = if info.notes.trim().is_empty() {
+                                "（无更新说明）"
+                            } else {
+                                info.notes.trim()
+                            };
+                            let msg = format!(
+                                "发现新版本 {}（{}）\n\n{}\n\n请在「设置 → 更新」中下载并安装。",
+                                info.version, info.pub_date, notes
+                            );
+                            app_handle
+                                .dialog()
+                                .message(msg)
+                                .title("发现新版本")
+                                .kind(tauri_plugin_dialog::MessageDialogKind::Info)
+                                .show(|_| {});
+                        }
+                        Ok(None) => {
+                            app_handle
+                                .dialog()
+                                .message("当前已是最新版本。")
+                                .title("检查更新")
+                                .show(|_| {});
+                        }
+                        Err(e) => {
+                            app_handle
+                                .dialog()
+                                .message(format!("检查更新失败：{e}"))
+                                .title("检查更新")
+                                .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+                                .show(|_| {});
+                        }
+                    }
+                });
             }
             "quit" => app.exit(0),
             _ => {}

@@ -153,7 +153,12 @@ fn basename_of(url: &str) -> String {
 #[tauri::command]
 pub async fn check_update(state: State<'_, AppState>) -> Result<Option<UpdateInfo>, String> {
     let server_url = state.config.lock().server_url.clone();
-    let base = update_base_from_server_url(&server_url)
+    do_check_update(&server_url).await
+}
+
+/// 核心检查逻辑（与 tauri command 解耦，供托盘菜单等无需 `State` 的调用方复用）。
+pub async fn do_check_update(server_url: &str) -> Result<Option<UpdateInfo>, String> {
+    let base = update_base_from_server_url(server_url)
         .ok_or_else(|| "未配置服务端地址，请在设置里填写服务端连接地址".to_string())?;
     let url = format!("{base}/update/latest.json");
     let resp = reqwest::get(&url)
