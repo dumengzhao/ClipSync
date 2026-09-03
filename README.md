@@ -53,6 +53,39 @@ scripts/local-ci.sh
 
 等价于 GitHub Actions 的 `ci.yml` 检查项：fmt、clippy、test、lint、build。
 
+## 本地打包（macOS）
+
+生成正式签名的应用与磁盘镜像：
+
+```bash
+cd client
+TAURI_SIGNING_PRIVATE_KEY_PATH=~/.tauri/clipsync.key \
+TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" \
+npm run tauri build -- --bundles app
+```
+
+> 需 `dangerouslyDisableSandbox` 类真实环境（codesign / Keychain 写入被沙箱拦截）。
+
+**打包产物目录（绝对路径）**：
+
+```
+/Volumes/ssd/DMZ/Work/DmzClipSync/client/src-tauri/target/release/bundle/macos/
+├── ClipSync.app   # 正式签名客户端（双击/拖到 Applications 即可运行）
+└── ClipSync.dmg   # 已签名磁盘镜像（4.54 MB，可直接分发）
+```
+
+> **签名钥匙串注意**：自签名证书 `ClipSync Dev` 同时存在于 `login.keychain-db` 与密码已遗失的 `build.keychain-db`。打包前必须把钥匙串搜索顺序调成 `login` 置首，否则 codesign 会卡在未知密码的 `build` 钥匙串（报 `errSecInternalComponent`）：
+> ```bash
+> security list-keychains -s ~/Library/Keychains/login.keychain-db ~/.clipsync/build.keychain-db /Library/Keychains/System.keychain
+> ```
+> `bundle_dmg.sh` 末段 `osascript` 在本机会被系统拦截（`-10004`），请改用：
+> ```bash
+> hdiutil create -volname ClipSync -srcfolder ClipSync.app -ov -format UDZO ClipSync.dmg
+> codesign --sign "ClipSync Dev" ClipSync.dmg
+> ```
+
+安装方式见下方「下载安装 → macOS」。
+
 ## 项目结构详情
 
 详细架构见 [docs/development-plan.md](docs/development-plan.md)。
