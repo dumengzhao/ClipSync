@@ -532,6 +532,7 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
                     };
                     match crate::update::do_check_update(&server_url).await {
                         Ok(Some(info)) => {
+                            tracing::info!("托盘检查更新：发现新版本 {}（当前 {}）", info.version, env!("CARGO_PKG_VERSION"));
                             let notes = if info.notes.trim().is_empty() {
                                 "（无更新说明）"
                             } else {
@@ -556,15 +557,19 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
                                 )
                                 .show(move |confirmed| {
                                     if !confirmed {
+                                        tracing::info!("托盘检查更新：用户取消下载");
                                         return;
                                     }
+                                    tracing::info!("托盘检查更新：用户确认下载安装");
                                     tauri::async_runtime::spawn(async move {
                                         use tauri_plugin_dialog::DialogExt;
                                         match crate::update::download_update(url, sha256).await {
                                             Ok(path) => {
+                                                tracing::info!("托盘更新下载完成（sha256 校验通过）：{path}，启动安装器");
                                                 if let Err(e) =
                                                     crate::update::install_update(path).await
                                                 {
+                                                    tracing::error!("托盘更新启动安装失败：{e}");
                                                     app_dl
                                                         .dialog()
                                                         .message(format!("启动安装失败：{e}"))
@@ -578,6 +583,7 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
                                                 // spawn NSIS 后直接 exit(0)，不会走到这里之后
                                             }
                                             Err(e) => {
+                                                tracing::error!("托盘更新下载失败：{e}");
                                                 app_dl
                                                     .dialog()
                                                     .message(format!("下载失败：{e}"))
@@ -592,6 +598,7 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
                                 });
                         }
                         Ok(None) => {
+                            tracing::info!("托盘检查更新：已是最新");
                             app_handle
                                 .dialog()
                                 .message("当前已是最新版本。")
@@ -599,6 +606,7 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
                                 .show(|_| {});
                         }
                         Err(e) => {
+                            tracing::warn!("托盘检查更新失败：{e}");
                             app_handle
                                 .dialog()
                                 .message(format!("检查更新失败：{e}"))
