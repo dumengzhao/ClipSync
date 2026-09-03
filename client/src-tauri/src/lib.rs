@@ -538,15 +538,58 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
                                 info.notes.trim()
                             };
                             let msg = format!(
-                                "发现新版本 {}（{}）\n\n{}\n\n请在「设置 → 更新」中下载并安装。",
+                                "发现新版本 {}（{}）\n\n{}",
                                 info.version, info.pub_date, notes
                             );
+                            let (url, sha256) = (info.url.clone(), info.sha256.clone());
+                            let app_dl = app_handle.clone();
                             app_handle
                                 .dialog()
                                 .message(msg)
                                 .title("发现新版本")
                                 .kind(tauri_plugin_dialog::MessageDialogKind::Info)
-                                .show(|_| {});
+                                .buttons(
+                                    tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom(
+                                        "下载并安装".to_string(),
+                                        "稍后".to_string(),
+                                    ),
+                                )
+                                .show(move |confirmed| {
+                                    if !confirmed {
+                                        return;
+                                    }
+                                    tauri::async_runtime::spawn(async move {
+                                        use tauri_plugin_dialog::DialogExt;
+                                        match crate::update::download_update(url, sha256).await {
+                                            Ok(path) => {
+                                                if let Err(e) =
+                                                    crate::update::install_update(path).await
+                                                {
+                                                    app_dl
+                                                        .dialog()
+                                                        .message(format!("启动安装失败：{e}"))
+                                                        .title("更新")
+                                                        .kind(
+                                                            tauri_plugin_dialog::MessageDialogKind::Error,
+                                                        )
+                                                        .show(|_| {});
+                                                }
+                                                // Windows 成功路径在 install_update 内
+                                                // spawn NSIS 后直接 exit(0)，不会走到这里之后
+                                            }
+                                            Err(e) => {
+                                                app_dl
+                                                    .dialog()
+                                                    .message(format!("下载失败：{e}"))
+                                                    .title("更新")
+                                                    .kind(
+                                                        tauri_plugin_dialog::MessageDialogKind::Error,
+                                                    )
+                                                    .show(|_| {});
+                                            }
+                                        }
+                                    });
+                                });
                         }
                         Ok(None) => {
                             app_handle
