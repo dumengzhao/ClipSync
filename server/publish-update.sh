@@ -38,6 +38,12 @@ ARGS=()
 add_platform() { # platform 安装包路径（存在才收）
   local p="$1" f="$2"
   if [ -n "$f" ] && [ -f "$f" ]; then
+    # Windows Git Bash：curl 是原生 exe、node 也不是 MSYS 程序，二者都读不了
+    # /c/... 形式路径（curl 报 exit 26 读文件失败）。用 cygpath 转成 C:/...；
+    # Linux/macOS 无 cygpath，保持原样。
+    if command -v cygpath >/dev/null 2>&1; then
+      f="$(cygpath -m "$f")"
+    fi
     ARGS+=("$p" "$f")
     echo ">>> 平台 $p <- $f"
   fi
