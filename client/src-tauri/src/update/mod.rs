@@ -79,42 +79,35 @@ pub fn platform_key() -> &'static str {
 
 /// 从用户配置的 server_url 推导更新基址。
 ///
-/// 接受 `wss://host:port/ws` / `https://host` （映射为 `https://host:port`）；
-/// `ws://` / `http://` 一律拒绝（TLS 是无签名模型唯一安全边界），
-/// 仅豁免本机回环（127.0.0.1 / localhost / [::1]）供开发联调。
+/// 规则：**配的什么就用什么**（用户明确要求不因安全边界而拒绝）——
+/// `wss://host/ws` → `https://host`、`ws://host/ws` → `http://host`、
+/// `https://host` → `https://host`、`http://host` → `http://host`；
+/// 无协议前缀时按 `ws` 兜底（与 relay 端默认一致）→ `http://host`。
 pub fn update_base_from_server_url(server_url: &str) -> Option<String> {
     let s = server_url.trim();
-    let (scheme_is_tls, rest) = if let Some(r) = s.strip_prefix("wss://") {
-        (true, r)
-    } else if let Some(r) = s.strip_prefix("https://") {
+    if s.is_empty() {
+        return None;
+    }
+    let (tls, rest) = if let Some(r) = s.strip_prefix("wss://") {
         (true, r)
     } else if let Some(r) = s.strip_prefix("ws://") {
         (false, r)
+    } else if let Some(r) = s.strip_prefix("https://") {
+        (true, r)
     } else if let Some(r) = s.strip_prefix("http://") {
         (false, r)
     } else {
-        return None;
+        // 无协议前缀：按 ws 兜底（relay 端 server_url 常省略为 host:port）
+        (false, s)
     };
     let authority = rest.split(['/', '?']).next()?.trim();
     if authority.is_empty() {
         return None;
     }
-    let host = match authority.rsplit_once(':') {
-        // IPv6 字面量 [::1]:port
-        Some((h, _)) if h.starts_with('[') => h,
-        Some((h, _)) => h,
-        None => authority,
-    };
-    let host = host.trim_end_matches(']');
-    let is_loopback = matches!(host, "127.0.0.1" | "localhost" | "::1");
-    if scheme_is_tls || is_loopback {
-        Some(format!(
-            "{}://{authority}",
-            if scheme_is_tls { "https" } else { "http" }
-        ))
-    } else {
-        None
-    }
+    Some(format!(
+        "{}://{authority}",
+        if tls { "https" } else { "http" }
+    ))
 }
 
 /// 语义化版本粗比较：按 `主.次.补丁` 数值逐段比较，manifest 更新才返回 true。
@@ -160,9 +153,8 @@ fn basename_of(url: &str) -> String {
 #[tauri::command]
 pub async fn check_update(state: State<'_, AppState>) -> Result<Option<UpdateInfo>, String> {
     let server_url = state.config.lock().server_url.clone();
-    let base = update_base_from_server_url(&server_url).ok_or_else(|| {
-        "未配置 wss:// 服务端地址（更新基址仅接受 https）".to_string()
-    })?;
+    let base = update_base_from_server_url(&server_url)
+        .ok_or_else(|| "未配置服务端地址，请在设置里填写服务端连接地址".to_string())?;
     let url = format!("{base}/update/latest.json");
     let resp = reqwest::get(&url)
         .await
@@ -322,7 +314,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn base_https_only_with_loopback_exempt() {
+    fn base_from_server_url_uses_configured_scheme() {
+        // 配的什么就用什么：wss→https
         assert_eq!(
             update_base_from_server_url("wss://sync.example.com/ws"),
             Some("https://sync.example.com".into())
@@ -331,21 +324,30 @@ mod tests {
             update_base_from_server_url("https://a.com:8443"),
             Some("https://a.com:8443".into())
         );
-        // 明文 ws/http → 拒绝（安全边界）
-        assert_eq!(update_base_from_server_url("ws://sync.example.com/ws"), None);
-        assert_eq!(update_base_from_server_url("http://a.com"), None);
-        // 本机回环豁免（开发联调）
+        // ws→http、http→http（用户明确要求不因安全边界而拒绝明文）
+        assert_eq!(
+            update_base_from_server_url("ws://sync.example.com/ws"),
+            Some("http://sync.example.com".into())
+        );
+        assert_eq!(
+            update_base_from_server_url("http://a.com"),
+            Some("http://a.com".into())
+        );
+        // 本机地址走 ws 也映射为 http
         assert_eq!(
             update_base_from_server_url("ws://127.0.0.1:20075/ws"),
             Some("http://127.0.0.1:20075".into())
         );
+        // 无协议前缀按 ws 兜底 → http
         assert_eq!(
-            update_base_from_server_url("ws://localhost:20075/ws"),
-            Some("http://localhost:20075".into())
+            update_base_from_server_url("host:20070"),
+            Some("http://host:20070".into())
         );
-        // 空值/垃圾输入
+        assert_eq!(update_base_from_server_url("127.0.0.1:20070"),
+            Some("http://127.0.0.1:20070".into()));
+        // 空值
         assert_eq!(update_base_from_server_url(""), None);
-        assert_eq!(update_base_from_server_url("host:20070"), None);
+        assert_eq!(update_base_from_server_url("   "), None);
     }
 
     #[test]
