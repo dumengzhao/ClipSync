@@ -76,6 +76,18 @@ pub enum FileFrame {
     Complete { transfer_id: String },
     /// 单块文件数据。offset 为文件内偏移，接收方按 file_index+offset 顺序落盘。
     Chunk(FileChunkResponsePayload),
+    /// 发送方通知：部分或全部文件读取失败（原文件在「复制 → 拉取」之间被删除、
+    /// 移动或修改）。此前没有此帧，失败只能被静默跳过并照发 `Complete`，接收方
+    /// 会误以为全部成功。
+    ///
+    /// 注意：本变体**必须追加在枚举末尾**——`FileFrame` 走 bincode 按变体序号编码，
+    /// 插到中间会改变既有变体的序号，导致新旧版本两端互不可解析。
+    Error {
+        transfer_id: String,
+        message: String,
+        /// 失败文件在 `Offer.files` 中的下标，供接收方定位具体文件名
+        failed_indices: Vec<usize>,
+    },
 }
 
 /// 文件分片载荷（bincode 序列化后随 `FileFrame::Chunk` 加密传输）
