@@ -261,12 +261,26 @@ export default function PullToast() {
         transfer_id: string;
         message: string;
         failed_files: string[];
+        /** true = 传输彻底没跑起来（条目失效/对端未连接），**不会有** complete 跟随 */
+        fatal?: boolean;
       }>('file-pull-error', (e) => {
-        // 对端明确告知有文件没传成（原文件被删/移/改写等）。记录在 ref 里，
-        // 等随后的 file-pull-complete 到达时据此把结果判为失败并展示原因。
         const id = `local:${e.payload.transfer_id}`;
-        log(`file-pull-error: ${id} ${e.payload.message}`);
-        pullErrorsRef.current[id] = e.payload.message;
+        const msg = e.payload.message;
+        log(`file-pull-error: ${id} fatal=${e.payload.fatal === true} ${msg}`);
+        if (e.payload.fatal === true) {
+          // 不会有 complete 到达：必须立刻把条目从「拉取中」移出并给出结果，
+          // 否则小窗会一直停在「等待任务完成后关闭…」，看起来像卡死。
+          setPulling((prev) => prev.filter((x) => x.id !== id));
+          setProgress((prev) => {
+            const n = { ...prev };
+            delete n[id];
+            return n;
+          });
+          setResults((prev) => ({ ...prev, [id]: { ok: false, msg } }));
+          return;
+        }
+        // 部分失败：仅记录原因，等随后的 file-pull-complete 收口展示结果
+        pullErrorsRef.current[id] = msg;
       }),
 
       listen<{ transfer_id: string; ok?: boolean; error?: string }>(

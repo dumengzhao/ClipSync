@@ -161,8 +161,26 @@ export default function App() {
       transfer_id: string;
       message: string;
       failed_files: string[];
+      /** true = 不会有 file-pull-complete 跟随（条目失效 / 对端未连接） */
+      fatal?: boolean;
+      /** true = 后端已无此条目（被留存上限淘汰或已拉取过），前端应移除 */
+      stale?: boolean;
     }>('file-pull-error', (e) => {
-      flash(`文件传输未完成：${e.payload.message}`);
+      const { transfer_id, message, fatal, stale } = e.payload;
+      // 清掉「拉取中」标记：fatal 错误不会有 complete 到达，不清理的话条目会永远转圈
+      if (fatal === true) {
+        setPulling((prev) => {
+          const n = new Set(prev);
+          n.delete(transfer_id);
+          return n;
+        });
+      }
+      // 条目在后端已不存在（如被 3 条留存上限淘汰）→ 从列表移除，
+      // 否则留着一个点了只会报错的死条目。对端未连接的情况不移除，保留可重试。
+      if (stale === true) {
+        setPendingOffers((prev) => prev.filter((o) => o.transfer_id !== transfer_id));
+      }
+      flash(`文件传输未完成：${message}`);
     });
 
     // 实时订阅局域网发现 / 配对 / 连接状态
