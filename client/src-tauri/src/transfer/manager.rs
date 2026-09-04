@@ -1006,12 +1006,29 @@ impl ConnectionHub {
     }
 
     pub async fn pull_files(self: Arc<Self>, transfer_id: String) {
+        let app = self.app.lock().unwrap().clone();
         let offer = {
             let mut g = self.pending_offers.lock().unwrap();
             match g.remove(&transfer_id) {
                 Some(o) => o,
                 None => {
                     tracing::warn!("拉取失败：找不到传输 {transfer_id}");
+                    // 传输已不在待拉取清单（被留存上限淘汰、或已被拉取过）。必须显式
+                    // 告知前端——否则用户点「拉取」后毫无反应，完全无从判断原因。
+                    if let Some(a) = &app {
+                        let _ = a.emit(
+                            "file-pull-error",
+                            serde_json::json!({
+                                "transfer_id": transfer_id,
+                                "message": "该传输已失效（可能已被清理或已拉取过），请让对端重新复制",
+                                "failed_files": [],
+                                // fatal：不会有 complete 跟随；stale：条目在后端已不存在，
+                                // 前端应把它从待拉取列表移除，避免留下点不动的死条目
+                                "fatal": true,
+                                "stale": true,
+                            }),
+                        );
+                    }
                     return;
                 }
             }
@@ -1026,6 +1043,22 @@ impl ConnectionHub {
                 Some(p) => p.tx.clone(),
                 None => {
                     tracing::warn!("拉取失败：对端 {} 未连接", offer.device_id);
+                    // 同样要让用户看见：条目仍在待拉取列表里，等对端重连后可直接重试，
+                    // 但静默返回会让「点了没反应」看起来像程序坏了。
+                    if let Some(a) = &app {
+                        let _ = a.emit(
+                            "file-pull-error",
+                            serde_json::json!({
+                                "transfer_id": transfer_id,
+                                "message": format!(
+                                    "对端「{}」当前未连接，已保留在待拉取列表，可稍后重试",
+                                    offer.device_name
+                                ),
+                                "failed_files": [],
+                                "fatal": true,
+                            }),
+                        );
+                    }
                     // 放回待拉取清单（对端重连后可再试），并同步维护插入顺序与上限
                     let mut g = self.pending_offers.lock().unwrap();
                     g.insert(transfer_id.clone(), offer);
@@ -1041,7 +1074,7 @@ impl ConnectionHub {
                 }
             }
         };
-        let app = self.app.lock().unwrap().clone();
+        // app 句柄已在函数开头取过（失败路径也要用），此处不再重复绑定
         let sync_dir = self.resolve_sync_dir(app.as_ref());
         let root = sync_dir
             .join(Self::sanitize_name(&offer.device_name))
