@@ -42,15 +42,23 @@ impl FileShare {
 }
 
 /// 由本地路径构造 FileMeta（含 SHA-256 内容哈希）。目录仅登记元信息、不读内容。
+///
+/// 哈希**分块流式**计算：此前用 `std::fs::read` 把整个文件读进内存，复制大文件
+/// （数 GB）会瞬间占用等量内存。这里固定 64 KiB 缓冲，内存占用与文件大小无关。
 fn build_meta(p: &PathBuf) -> Option<FileMeta> {
     let meta = std::fs::metadata(p).ok()?;
     let is_dir = meta.is_dir();
     let (file_size, hash) = if is_dir {
         (0u64, String::new())
     } else {
-        let data = std::fs::read(p).ok()?;
-        let digest = Sha256::digest(&data);
-        (data.len() as u64, format!("{digest:x}"))
+        match sha256_file(p) {
+            Some((size, digest)) => (size, digest),
+            // 读不了（权限/被占用/中途被删）：跳过该文件，返回 None 由调用方忽略
+            None => {
+                tracing::warn!("登记跨 LAN 文件失败，读取不到内容：{}", p.display());
+                return None;
+            }
+        }
     };
     let file_name = p.file_name()?.to_string_lossy().to_string();
     Some(FileMeta {
@@ -62,4 +70,22 @@ fn build_meta(p: &PathBuf) -> Option<FileMeta> {
         mime_type: String::new(),
         hash: if hash.is_empty() { None } else { Some(hash) },
     })
+}
+
+/// 流式计算文件 SHA-256，同时返回字节数。内存占用恒定为 64 KiB 缓冲区。
+fn sha256_file(p: &std::path::Path) -> Option<(u64, String)> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(p).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    let mut total: u64 = 0;
+    loop {
+        let n = f.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        total += n as u64;
+    }
+    Some((total, format!("{:x}", hasher.finalize())))
 }

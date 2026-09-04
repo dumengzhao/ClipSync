@@ -21,10 +21,19 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+
+/// 本机作为发送方最多留存多少条「待对端拉取」的传输（每条含全部原文件绝对路径）。
+/// 超出即按插入顺序淘汰最早的一条——这些登记项只在内存，留多了没必要，
+/// 且原文件随时可能已被删除/移动，过老的登记基本不会被拉取。
+const MAX_ACTIVE_OFFERS: usize = 3;
+/// 本机作为接收方最多留存多少条「待拉取」清单。超出即淘汰最早的一条，
+/// 避免长期不拉取时清单无限增长、界面堆满过期条目。
+const MAX_PENDING_OFFERS: usize = 3;
 
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
@@ -222,8 +231,12 @@ pub struct ConnectionHub {
     connecting: Mutex<HashSet<String>>,
     /// 本端作为发送方的活动传输（transfer_id -> 本地文件清单 + 绝对路径）
     active_offers: Mutex<HashMap<String, OfferState>>,
+    /// `active_offers` 的插入顺序（FIFO 淘汰用）。HashMap 无序，靠它判断「最早是谁」。
+    active_offer_order: Mutex<VecDeque<String>>,
     /// 本端作为接收方收到的待拉取清单（transfer_id -> 对端 offer）
     pending_offers: Mutex<HashMap<String, PendingOffer>>,
+    /// `pending_offers` 的插入顺序（FIFO 淘汰用）
+    pending_offer_order: Mutex<VecDeque<String>>,
     /// 本端正在拉取的传输（transfer_id -> 写入通道 + 落盘目录 + 进度）
     active_pulls: Mutex<HashMap<String, PullState>>,
     /// 文件分片大小（字节）
@@ -248,7 +261,9 @@ impl ConnectionHub {
             connected_addrs: Mutex::new(HashSet::new()),
             connecting: Mutex::new(HashSet::new()),
             active_offers: Mutex::new(HashMap::new()),
+            active_offer_order: Mutex::new(VecDeque::new()),
             pending_offers: Mutex::new(HashMap::new()),
+            pending_offer_order: Mutex::new(VecDeque::new()),
             active_pulls: Mutex::new(HashMap::new()),
             chunk_size: 256 * 1024, // 256 KiB/片
             listen_port: std::sync::atomic::AtomicU16::new(0),
@@ -396,6 +411,46 @@ impl ConnectionHub {
             .unwrap_or(false)
     }
 
+    /// 记录一条新插入的 key，并把 map 的总量裁剪到 `max` 条以内（FIFO 淘汰最早）。
+    ///
+    /// HashMap 本身无序，靠 `order` 这个插入顺序队列判断「谁最早」。淘汰时打 warn
+    /// 日志——这是有代价的行为（被淘汰的条目将无法再被对端拉取 / 无法再手动拉取），
+    /// 必须留痕，不能静默丢。
+    fn track_and_trim<T>(
+        map: &Mutex<HashMap<String, T>>,
+        order: &Mutex<VecDeque<String>>,
+        key: &str,
+        max: usize,
+        label: &str,
+    ) {
+        let mut m = map.lock().unwrap();
+        let mut o = order.lock().unwrap();
+        o.push_back(key.to_string());
+        while o.len() > max {
+            let Some(oldest) = o.pop_front() else { break };
+            if m.remove(&oldest).is_some() {
+                tracing::warn!(
+                    "{label} 超过 {max} 条上限，已淘汰最早的一条 {oldest}"
+                );
+            }
+        }
+        // 顺带清掉 order 里已被其它路径（拉取/取消/完成）移除的陈旧 key，
+        // 避免队列无限增长、也让后续淘汰判断始终基于真实在册的条目。
+        o.retain(|k| m.contains_key(k));
+        drop(o);
+        drop(m);
+    }
+
+    /// 从 map 与插入顺序队列中同时移除某条记录（拉取完成 / 取消 / 传输结束）。
+    fn forget_key<T>(
+        map: &Mutex<HashMap<String, T>>,
+        order: &Mutex<VecDeque<String>>,
+        key: &str,
+    ) {
+        map.lock().unwrap().remove(key);
+        order.lock().unwrap().retain(|k| k != key);
+    }
+
     /// 本地拷贝了文件/目录：生成传输 ID，展开为文件清单，向所有已连接对端广播「可拉取」。
     ///
     /// 绝对路径**只留在本端** `active_offers`，从不进网络；对端仅收到 `FileMeta` 元数据。
@@ -460,6 +515,13 @@ impl ConnectionHub {
                 files: files.clone(),
                 local_paths,
             },
+        );
+        Self::track_and_trim(
+            &self.active_offers,
+            &self.active_offer_order,
+            &transfer_id,
+            MAX_ACTIVE_OFFERS,
+            "待拉取文件登记（active_offers）",
         );
         let peers = self.peers.lock().unwrap().clone();
         if peers.is_empty() {
@@ -535,6 +597,13 @@ impl ConnectionHub {
                         auto_pull,
                     },
                 );
+                Self::track_and_trim(
+                    &self.pending_offers,
+                    &self.pending_offer_order,
+                    &transfer_id,
+                    MAX_PENDING_OFFERS,
+                    "待拉取清单（pending_offers）",
+                );
                 if let Some(app) = self.app.lock().unwrap().clone() {
                     let _ = app.emit(
                         "file-offer",
@@ -588,53 +657,162 @@ impl ConnectionHub {
                 };
                 let tx = tx.clone();
                 let chunk_size = self.chunk_size;
+                // 传输结束后要从 active_offers 摘掉，需持有 hub 的 Arc 副本
+                // （handle_file_frame 的 self 就是 Arc<Self>）。
+                let hub = self.clone();
                 tauri::async_runtime::spawn(async move {
+                    // 失败清单：(下标, 原因)。用于末尾发 Error 帧告知接收方，
+                    // 避免「静默跳过 + 照发 Complete」让对端误以为全部成功。
+                    let mut failed: Vec<(usize, String)> = Vec::new();
                     for &idx in &file_indices {
                         if idx >= offer.local_paths.len() {
                             continue;
                         }
                         let path = &offer.local_paths[idx];
-                        if let Ok(mut file) = tokio::fs::File::open(path).await {
-                            use tokio::io::AsyncReadExt;
-                            let mut offset: u64 = 0;
-                            let mut buf = vec![0u8; chunk_size];
-                            loop {
-                                match file.read(&mut buf).await {
-                                    Ok(0) => break,
-                                    Ok(n) => {
-                                        let data = buf[..n].to_vec();
-                                        if tx
-                                            .send(Outgoing::File(FileFrame::Chunk(
-                                                FileChunkResponsePayload {
-                                                    transfer_id: transfer_id.clone(),
-                                                    file_index: idx,
-                                                    offset,
-                                                    data,
-                                                },
-                                            )))
-                                            .is_err()
-                                        {
-                                            return;
+                        let expect = offer.files.get(idx);
+                        // 拉取前二次校验：原文件在「复制 → 拉取」之间可能已被删除、
+                        // 移动或改写。大小/修改时间任一不符即中止该文件，不发送可能
+                        // 已经漂移的内容（否则对端拿到的是与元数据不匹配的文件）。
+                        if let Ok(md) = std::fs::metadata(path) {
+                            if let Some(e) = expect {
+                                let mtime = md
+                                    .modified()
+                                    .ok()
+                                    .and_then(|t| {
+                                        t.duration_since(std::time::UNIX_EPOCH).ok()
+                                    })
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(0);
+                                if md.len() != e.file_size {
+                                    failed.push((
+                                        idx,
+                                        format!(
+                                            "大小不符（清单 {} 字节，现为 {} 字节）",
+                                            e.file_size,
+                                            md.len()
+                                        ),
+                                    ));
+                                    continue;
+                                }
+                                if e.modified_at > 0 && mtime != e.modified_at {
+                                    failed.push((
+                                        idx,
+                                        "文件在复制后被修改，已拒绝发送".to_string(),
+                                    ));
+                                    continue;
+                                }
+                            }
+                        } else {
+                            failed.push((idx, "原文件已不存在（可能被删除或移动）".to_string()));
+                            continue;
+                        }
+                        match tokio::fs::File::open(path).await {
+                            Ok(mut file) => {
+                                use tokio::io::AsyncReadExt;
+                                let mut offset: u64 = 0;
+                                let mut buf = vec![0u8; chunk_size];
+                                loop {
+                                    match file.read(&mut buf).await {
+                                        Ok(0) => break,
+                                        Ok(n) => {
+                                            let data = buf[..n].to_vec();
+                                            if tx
+                                                .send(Outgoing::File(FileFrame::Chunk(
+                                                    FileChunkResponsePayload {
+                                                        transfer_id: transfer_id.clone(),
+                                                        file_index: idx,
+                                                        offset,
+                                                        data,
+                                                    },
+                                                )))
+                                                .is_err()
+                                            {
+                                                return;
+                                            }
+                                            offset += n as u64;
                                         }
-                                        offset += n as u64;
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("读文件失败 {}: {e}", path.display());
-                                        break;
+                                        Err(e) => {
+                                            tracing::warn!("读文件失败 {}: {e}", path.display());
+                                            failed.push((idx, format!("读取中断: {e}")));
+                                            break;
+                                        }
                                     }
                                 }
                             }
+                            Err(e) => {
+                                tracing::warn!("打开文件失败 {}: {e}", path.display());
+                                failed.push((idx, format!("无法读取: {e}")));
+                            }
                         }
+                    }
+                    // 有失败项：先发 Error 让接收方知情，再发 Complete 结束落盘任务
+                    // （Complete 必须发，否则接收方的写盘任务会一直挂等）。
+                    if !failed.is_empty() {
+                        let names: Vec<String> = failed
+                            .iter()
+                            .map(|(i, why)| {
+                                let n = offer
+                                    .files
+                                    .get(*i)
+                                    .map(|f| f.file_name.clone())
+                                    .unwrap_or_else(|| format!("#{i}"));
+                                format!("{n}：{why}")
+                            })
+                            .collect();
+                        let msg = format!("{} 个文件未能传输：{}", failed.len(), names.join("；"));
+                        tracing::error!("传输 {transfer_id} {msg}");
+                        let _ = tx.send(Outgoing::File(FileFrame::Error {
+                            transfer_id: transfer_id.clone(),
+                            message: msg,
+                            failed_indices: failed.iter().map(|(i, _)| *i).collect(),
+                        }));
                     }
                     let _ = tx.send(Outgoing::File(FileFrame::Complete {
                         transfer_id: transfer_id.clone(),
                     }));
+                    // 传输结束即清理：此前只在 PullCancel 时移除，成功传输后会一直
+                    // 留着原文件路径，进程不重启就持续累积。
+                    hub.active_offers.lock().unwrap().remove(&transfer_id);
+                    hub.active_offer_order
+                        .lock()
+                        .unwrap()
+                        .retain(|k| k != &transfer_id);
                     tracing::info!("传输 {transfer_id} 分片发送完毕");
                 });
             }
             FileFrame::PullCancel { transfer_id } => {
-                self.active_offers.lock().unwrap().remove(&transfer_id);
+                Self::forget_key(&self.active_offers, &self.active_offer_order, &transfer_id);
                 self.active_pulls.lock().unwrap().remove(&transfer_id);
+            }
+            FileFrame::Error {
+                transfer_id,
+                message,
+                failed_indices,
+            } => {
+                // 发送方明确告知「有文件没传成」。此前协议无此帧，接收方只能看到
+                // Complete，误以为全部成功。这里补日志 + 前端事件，让失败可见。
+                tracing::warn!("对端传输 {transfer_id} 报错：{message}");
+                let failed_files: Vec<String> = failed_indices
+                    .iter()
+                    .filter_map(|i| {
+                        self.active_pulls
+                            .lock()
+                            .unwrap()
+                            .get(&transfer_id)
+                            .and_then(|s| s.files.get(*i))
+                            .map(|f| f.file_name.clone())
+                    })
+                    .collect();
+                if let Some(app) = self.app.lock().unwrap().clone() {
+                    let _ = app.emit(
+                        "file-pull-error",
+                        serde_json::json!({
+                            "transfer_id": transfer_id,
+                            "message": message,
+                            "failed_files": failed_files,
+                        }),
+                    );
+                }
             }
             FileFrame::Complete { transfer_id } => {
                 let tx_opt = self
@@ -838,16 +1016,27 @@ impl ConnectionHub {
                 }
             }
         };
+        self.pending_offer_order
+            .lock()
+            .unwrap()
+            .retain(|k| k != &transfer_id);
         let peer_tx = {
             let g = self.peers.lock().unwrap();
             match g.get(&offer.device_id) {
                 Some(p) => p.tx.clone(),
                 None => {
                     tracing::warn!("拉取失败：对端 {} 未连接", offer.device_id);
-                    self.pending_offers
-                        .lock()
-                        .unwrap()
-                        .insert(transfer_id.clone(), offer);
+                    // 放回待拉取清单（对端重连后可再试），并同步维护插入顺序与上限
+                    let mut g = self.pending_offers.lock().unwrap();
+                    g.insert(transfer_id.clone(), offer);
+                    drop(g);
+                    Self::track_and_trim(
+                        &self.pending_offers,
+                        &self.pending_offer_order,
+                        &transfer_id,
+                        MAX_PENDING_OFFERS,
+                        "待拉取清单（pending_offers）",
+                    );
                     return;
                 }
             }
