@@ -155,6 +155,15 @@ export default function App() {
       }));
       flash(`已从「${e.payload.device_name}」拉取 ${e.payload.file_count} 个文件`);
     });
+    // 对端报告「部分文件没传成」（原文件在复制后被删除/移动/改写）。
+    // 该事件先于 file-pull-complete 到达，这里只做提示，结果展示由 complete 收口。
+    const unlistenPullError = listen<{
+      transfer_id: string;
+      message: string;
+      failed_files: string[];
+    }>('file-pull-error', (e) => {
+      flash(`文件传输未完成：${e.payload.message}`);
+    });
 
     // 实时订阅局域网发现 / 配对 / 连接状态
     const unlistenDiscovered = listen<DiscoveredPeer>('peer-discovered', (e) => {
@@ -262,6 +271,7 @@ export default function App() {
       unlistenFileOffer.then((u) => u());
       unlistenPullStart.then((u) => u());
       unlistenPullComplete.then((u) => u());
+      unlistenPullError.then((u) => u());
       unlistenServerStatus.then((u) => u());
       unlistenServerRemoved.then((u) => u());
       unlistenServerNodes.then((u) => u());
