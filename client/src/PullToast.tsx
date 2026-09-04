@@ -105,6 +105,15 @@ export default function PullToast() {
   const pullingRef = useRef<Item[]>([]);
   pullingRef.current = pulling;
 
+  /**
+   * 对端报告的「部分文件传输失败」原因，键为条目 id。
+   *
+   * 用 ref 而非 state：`file-pull-error` 一定先于 `file-pull-complete` 到达，
+   * 而 complete 处理里要**同步读到**这条错误才能把结果判成失败；若用 state，
+   * 闭包里读到的是上一次渲染的旧值，会漏判。
+   */
+  const pullErrorsRef = useRef<Record<string, string>>({});
+
   // 高度自适应：测量「列表内容 + 页脚」的真实高度，反向设置窗口高度，
   // 消除固定 200px 造成的底部大片空白。
   const listRef = useRef<HTMLDivElement>(null);
@@ -248,11 +257,26 @@ export default function PullToast() {
         }));
       }),
 
+      listen<{
+        transfer_id: string;
+        message: string;
+        failed_files: string[];
+      }>('file-pull-error', (e) => {
+        // 对端明确告知有文件没传成（原文件被删/移/改写等）。记录在 ref 里，
+        // 等随后的 file-pull-complete 到达时据此把结果判为失败并展示原因。
+        const id = `local:${e.payload.transfer_id}`;
+        log(`file-pull-error: ${id} ${e.payload.message}`);
+        pullErrorsRef.current[id] = e.payload.message;
+      }),
+
       listen<{ transfer_id: string; ok?: boolean; error?: string }>(
         'file-pull-complete',
         (e) => {
           const id = `local:${e.payload.transfer_id}`;
-          const ok = e.payload.ok !== false;
+          // 取走（并清除）本次传输的错误原因：有则判失败、展示对端给出的具体原因
+          const err = pullErrorsRef.current[id];
+          if (err) delete pullErrorsRef.current[id];
+          const ok = e.payload.ok !== false && !err;
           log(`file-pull-complete: ${id} ok=${ok}`);
           // 进度拉满到 100%，并把条目从 pulling 移到 completed：保留进度条可见 ~1.2s，
           // 让用户确实看到「100%」再转结果，而不是瞬间关闭。
@@ -273,7 +297,11 @@ export default function PullToast() {
               ...prev,
               [id]: {
                 ok,
-                msg: ok ? '已保存到本地' : `拉取失败：${e.payload.error || '未知错误'}`,
+                msg: ok
+                  ? '已保存到本地'
+                  : err
+                    ? `部分文件传输失败：${err}`
+                    : `拉取失败：${e.payload.error || '未知错误'}`,
               },
             }));
             setProgress((prev) => {
