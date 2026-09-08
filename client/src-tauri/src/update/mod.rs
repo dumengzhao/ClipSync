@@ -156,6 +156,34 @@ pub fn is_newer(manifest_version: &str, current: &str) -> bool {
     }
 }
 
+/// 当前进程是否为「安装版」（经 NSIS 安装包装到系统）。
+///
+/// 判定依据：当前 exe 同目录下存在 NSIS 生成的 `uninstall.exe`。免安装（绿色）版
+/// 是直接双击 exe 跑起来的，同目录不会有卸载程序。
+///
+/// 为什么要区分：更新链路目前**只分发 NSIS 安装包**，绿色版若走更新，会把用户从
+/// 「直接跑 exe」悄悄变成「装到用户目录的安装版」——形态不一致，而且源码目录那个
+/// exe 并不会被替换，等于多出一份副本。因此更新入口只对安装版开放。
+///
+/// 两个豁免（不影响正式使用）：
+/// - `debug_assertions`（debug 构建）恒为 true：开发/自测需要能触达更新流程；
+/// - 环境变量 `CLIPSYNC_FORCE_UPDATE` 存在时恒为 true：release 绿色版临时自测用。
+pub fn is_installed_build() -> bool {
+    if std::env::var("CLIPSYNC_FORCE_UPDATE").is_ok() {
+        return true;
+    }
+    if cfg!(debug_assertions) {
+        return true;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let Some(dir) = exe.parent() else {
+        return false;
+    };
+    dir.join("uninstall.exe").exists()
+}
+
 fn basename_of(url: &str) -> String {
     let s = url.trim_end_matches(['/', '\\']);
     match s.rsplit(['/', '\\']).next() {
@@ -170,6 +198,13 @@ fn basename_of(url: &str) -> String {
 pub async fn check_update(state: State<'_, AppState>) -> Result<Option<UpdateInfo>, String> {
     let server_url = state.config.lock().server_url.clone();
     do_check_update(&server_url).await
+}
+
+/// 前端启动时调用一次，判断是否显示更新相关 UI。
+/// `false` = 当前是免安装版（直接双击 exe），更新链路不可用。
+#[tauri::command]
+pub fn is_installed_build_cmd() -> bool {
+    is_installed_build()
 }
 
 /// 核心检查逻辑（与 tauri command 解耦，供托盘菜单等无需 `State` 的调用方复用）。
@@ -218,6 +253,9 @@ pub async fn download_update(
     url: String,
     sha256: String,
 ) -> Result<String, String> {
+    if !is_installed_build() {
+        return Err("当前为免安装版，不支持在线更新（请使用 NSIS 安装版）".to_string());
+    }
     let fname = basename_of(&url);
     if fname.is_empty() || fname.contains("..") || fname.contains('/') || fname.contains('\\') {
         return Err(format!("无效的下载文件名: {fname}"));
@@ -325,6 +363,9 @@ pub async fn download_update(
 /// macOS：open 引导用户；Linux：AppImage 加执行位后拉起 / deb 走 pkexec dpkg -i。
 #[tauri::command]
 pub async fn install_update(path: String) -> Result<(), String> {
+    if !is_installed_build() {
+        return Err("当前为免安装版，不支持在线更新（请使用 NSIS 安装版）".to_string());
+    }
     let p = PathBuf::from(&path);
     if !p.exists() {
         return Err(format!("安装包不存在: {path}"));
