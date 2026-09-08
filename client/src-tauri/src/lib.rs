@@ -563,7 +563,20 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
                                     tracing::info!("托盘检查更新：用户确认下载安装");
                                     tauri::async_runtime::spawn(async move {
                                         use tauri_plugin_dialog::DialogExt;
-                                        match crate::update::download_update(url, sha256).await {
+                                        // 主窗口可能处于隐藏状态：先显示出来，否则下载进度用户完全看不到，
+                                        // 会误以为点了「下载并安装」之后程序没反应。
+                                        show_main_window(&app_dl);
+                                        // 给前端一点时间渲染并注册 update-progress 监听，
+                                        // 否则开头几个进度事件会因为监听尚未就绪而丢失。
+                                        tokio::time::sleep(std::time::Duration::from_millis(400))
+                                            .await;
+                                        match crate::update::download_update(
+                                            app_dl.clone(),
+                                            url,
+                                            sha256,
+                                        )
+                                        .await
+                                        {
                                             Ok(path) => {
                                                 tracing::info!("托盘更新下载完成（sha256 校验通过）：{path}，启动安装器");
                                                 if let Err(e) =

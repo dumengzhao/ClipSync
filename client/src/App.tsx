@@ -274,6 +274,24 @@ export default function App() {
     const unlistenCrossLanFile = listen<CrossLanOffer>('cross-lan-file', (e) =>
       setCrossLanOffers((prev) => [...prev, e.payload]),
     );
+    // 客户端自更新：下载进度回传。此前下载阶段完全静默，用户点了「下载并安装」后
+    // 界面毫无反应，会误以为程序卡死或已退出，故把阶段与百分比显示出来。
+    const unlistenUpdateProgress = listen<{
+      phase: string;
+      downloaded: number;
+      total: number;
+      percent: number | null;
+      message?: string;
+    }>('update-progress', (e) => {
+      const p = e.payload;
+      if (p.message) {
+        flash(p.message);
+      } else if (p.percent !== null) {
+        flash(`正在下载更新… ${p.percent}%`);
+      } else {
+        flash(`正在下载更新… ${(p.downloaded / 1048576).toFixed(1)} MB`);
+      }
+    });
 
     return () => {
       unlistenSettings.then((u) => u());
@@ -294,6 +312,7 @@ export default function App() {
       unlistenServerRemoved.then((u) => u());
       unlistenServerNodes.then((u) => u());
       unlistenCrossLanFile.then((u) => u());
+      unlistenUpdateProgress.then((u) => u());
     };
   }, []);
 
