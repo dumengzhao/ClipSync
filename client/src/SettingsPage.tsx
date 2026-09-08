@@ -9,6 +9,7 @@ import {
   downloadUpdate,
   installUpdate,
   isInstalledBuild,
+  getVersion,
   type AppConfig,
   type UpdateInfo,
 } from './api/tauri';
@@ -88,6 +89,8 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
   const [updMsg, setUpdMsg] = useState('');
   // 免安装版不支持更新，启动时一次性探测，整段更新 UI 直接不渲染
   const [installedBuild, setInstalledBuild] = useState<boolean | null>(null);
+  // 当前客户端版本号（来自 Cargo.toml / tauri.conf.json 的 package version）
+  const [appVersion, setAppVersion] = useState<string>('');
 
   useEffect(() => {
     getConfig()
@@ -104,6 +107,8 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
     isInstalledBuild()
       .then(setInstalledBuild)
       .catch(() => setInstalledBuild(false));
+    // 取一次客户端版本号，用于「更新」section 显示当前版本（便于与远端版本比对）
+    getVersion().then(setAppVersion).catch(() => setAppVersion(''));
   }, []);
 
   // 「检查更新」：调 Rust 自写更新器；null=已是最新/未发布
@@ -783,18 +788,21 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
               </button>
             )}
           </div>
-          {(upd || updMsg) && (
-            <p className="hint">
-              {upd
-                ? `发现 v${upd.version}${upd.pub_date ? `（${upd.pub_date}）` : ''}${
-                    upd.notes ? `：${upd.notes}` : ''
-                  }`
-                : updMsg}
-            </p>
-          )}
+          <p className="hint">
+            当前版本{appVersion ? ` v${appVersion}` : ''}
+            {upd
+              ? ` · 远端 v${upd.version}${upd.pub_date ? `（${upd.pub_date}）` : ''}${
+                  upd.notes ? `：${upd.notes}` : ''
+                }`
+              : updMsg
+                ? ` · ${updMsg}`
+                : ''}
+          </p>
         </>
       ) : (
-        <p className="hint">当前为免安装版（直接双击 exe 运行），不支持在线更新。请使用 NSIS 安装版。</p>
+        <>
+          <p className="hint">当前版本{appVersion ? ` v${appVersion}` : ''}（免安装版，不支持在线更新，请使用 NSIS 安装版）</p>
+        </>
       )}
 
       {toast && (
