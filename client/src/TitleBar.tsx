@@ -9,7 +9,16 @@ import { listen } from '@tauri-apps/api/event';
  * - 按钮 hover 底色用 JS 控制的 .is-hover 类（而非 CSS :hover），关闭点击时立即移除，
  *   窗口重开（main-shown）时再兜底清除，避免红/灰底残留与「闪一下」。
  */
-export default function TitleBar({ onOpenSettings, deviceName }: { onOpenSettings: () => void; deviceName: string }) {
+export default function TitleBar({
+  onOpenSettings,
+  deviceName,
+  version,
+}: {
+  onOpenSettings: () => void;
+  deviceName: string;
+  /** 当前客户端版本号（如 "0.1.0"），显示在左上角设备名右侧 */
+  version?: string;
+}) {
   // 本机设备名称由 App 通过 prop 传入，在标题栏左上展示
   // 重开瞬间抑制 hover：窗口出现时指针若停在按钮上会触发 mouseenter，
   // 必须忽略，直到用户真正移动鼠标，否则关闭按钮红底「闪一下」。
@@ -85,6 +94,7 @@ export default function TitleBar({ onOpenSettings, deviceName }: { onOpenSetting
     <div className="titlebar" onMouseDown={onTitleMouseDown}>
       <div className="titlebar-info" title="本机设备名称">
         <span className="titlebar-device">{deviceName}</span>
+        {version && <span className="titlebar-version">v{version}</span>}
       </div>
       <div className="titlebar-spacer" />
       <div className="titlebar-actions">

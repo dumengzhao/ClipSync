@@ -16,6 +16,7 @@ import {
   listCrossLanOffers,
   pullCrossLan,
   crossItemBase,
+  getVersion,
   type DiscoveredPeer,
   type PairedDeviceInfo,
   type PendingOffer,
@@ -76,6 +77,8 @@ export default function App() {
   const [crossPulling, setCrossPulling] = useState<Set<string>>(new Set());
   // 本机计算机名（底部状态栏右侧展示）
   const [deviceName, setDeviceName] = useState('');
+  // 当前客户端版本号（TitleBar 左上角展示）
+  const [appVersion, setAppVersion] = useState<string>('');
 
   const flash = (m: string) => {
     setMsg(m);
@@ -114,6 +117,8 @@ export default function App() {
     listCrossLanOffers().then(setCrossLanOffers).catch(() => {});
     // 本机计算机名：供底部状态栏右侧展示（设置中可改，这里取一次）
     getConfig().then((c) => setDeviceName(c.device_name)).catch(() => {});
+    // 当前客户端版本号（Rust 端 `get_version` 返回 env!("CARGO_PKG_VERSION")），给 TitleBar 左上角用
+    getVersion().then(setAppVersion).catch(() => setAppVersion(''));
 
     // 对端拷贝文件后广播「待拉取」；本端点击拉取后收到开始/完成事件
     const unlistenFileOffer = listen<PendingOffer>('file-offer', (e) => {
@@ -432,7 +437,7 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <TitleBar onOpenSettings={() => setView('settings')} deviceName={deviceName} />
+      <TitleBar onOpenSettings={() => setView('settings')} deviceName={deviceName} version={appVersion} />
       {view === 'settings' ? (
         <SettingsPage onBack={() => setView('main')} />
       ) : (
