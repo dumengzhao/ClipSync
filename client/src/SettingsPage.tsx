@@ -12,6 +12,7 @@ import {
   type UpdateInfo,
 } from './api/tauri';
 import { open } from '@tauri-apps/plugin-dialog';
+import { listen } from '@tauri-apps/api/event';
 import { applyTheme } from './theme';
 
 // 校验文本是否为合法 IPv4 地址（四段、每段 0-255、仅数字与点）
@@ -119,6 +120,26 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
       setUpdBusy(null);
     }
   };
+
+  // 自更新下载进度：Rust 侧 emit "update-progress"。
+  // 此前下载阶段界面只有一句静态提示，用户会以为点了没反应，这里实时显示百分比。
+  useEffect(() => {
+    const un = listen<{
+      phase: string;
+      downloaded: number;
+      total: number;
+      percent: number | null;
+      message?: string;
+    }>('update-progress', (e) => {
+      const p = e.payload;
+      if (p.message) setUpdMsg(p.message);
+      else if (p.percent !== null) setUpdMsg(`正在下载更新… ${p.percent}%`);
+      else setUpdMsg(`正在下载更新… ${(p.downloaded / 1048576).toFixed(1)} MB`);
+    });
+    return () => {
+      un.then((u) => u());
+    };
+  }, []);
 
   // 「下载并安装」：下载 + sha256 校验 + 拉起安装包（Windows 上随后自动退出旧进程）
   const doInstall = async () => {

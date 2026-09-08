@@ -3,15 +3,31 @@
 //! - 更新基址来自用户配置的 `server_url`（relay 地址）的 https origin —— 绝不硬编码作者服务器。
 //! - `check_update`：拉 `<base>/update/latest.json`（公开、无鉴权）→ 与当前版本比对。
 //! - `download_update`：流式下载到临时目录 + 计算 sha256，与 manifest 比对（完整性校验）。
-//! - `install_update`：按平台拉起安装包（Windows NSIS 被动模式后退出进程交给安装器）。
+//! - `install_update`：按平台拉起安装包（Windows 弹出 NSIS 交互向导，随后退出进程交给安装器）。
 //! - 无签名：信任锚 = 用户自己的中继服务器 + TLS。
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
-use tauri::State;
+use tauri::{Emitter, State};
 
 use crate::AppState;
+
+/// 下载进度事件（emit 到前端 `update-progress`）。
+///
+/// 下载此前完全静默，用户点了「下载并安装」后界面毫无反应，会误以为程序卡死或已退出。
+/// 这里把阶段与百分比回传，前端据此显示进度。
+#[derive(Debug, Clone, Serialize)]
+pub struct DownloadProgress {
+    /// `downloading` / `verifying` / `done` / `error`
+    pub phase: String,
+    pub downloaded: u64,
+    pub total: u64,
+    /// 0-100；`total` 未知时为 None
+    pub percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
 
 /// 服务端自定义 latest.json（无 signature / 无 pubkey）。
 #[derive(Debug, Deserialize)]
@@ -197,7 +213,11 @@ pub async fn do_check_update(server_url: &str) -> Result<Option<UpdateInfo>, Str
 /// 下载安装包到临时目录，流式计算 sha256 并与 manifest 比对；
 /// 不一致则删除文件并报错。成功返回本地路径。
 #[tauri::command]
-pub async fn download_update(url: String, sha256: String) -> Result<String, String> {
+pub async fn download_update(
+    app: tauri::AppHandle,
+    url: String,
+    sha256: String,
+) -> Result<String, String> {
     let fname = basename_of(&url);
     if fname.is_empty() || fname.contains("..") || fname.contains('/') || fname.contains('\\') {
         return Err(format!("无效的下载文件名: {fname}"));
@@ -208,6 +228,8 @@ pub async fn download_update(url: String, sha256: String) -> Result<String, Stri
     if !resp.status().is_success() {
         return Err(format!("下载返回 HTTP {}", resp.status()));
     }
+    // 总大小用于算百分比；服务端未给 Content-Length 时为 0 → 前端只显示已下载字节数。
+    let total: u64 = resp.content_length().unwrap_or(0);
     let dir: PathBuf = std::env::temp_dir().join("clipsync-update");
     tokio::fs::create_dir_all(&dir)
         .await
@@ -219,6 +241,26 @@ pub async fn download_update(url: String, sha256: String) -> Result<String, Stri
         .map_err(|e| format!("创建临时文件失败: {e}"))?;
     let mut hasher = Sha256::new();
     let mut size: u64 = 0;
+    // 进度回传（-5 保证首次 0% 一定 emit）
+    let mut last_pct: i64 = -5;
+    let emit = |phase: &str, downloaded: u64, msg: Option<String>| {
+        // total 为 0（服务端未给 Content-Length）时 checked_div 自然得到 None，无需另判
+        let percent = downloaded
+            .checked_mul(100)
+            .and_then(|v| v.checked_div(total))
+            .map(|p| p.min(100) as u8);
+        let _ = app.emit(
+            "update-progress",
+            DownloadProgress {
+                phase: phase.to_string(),
+                downloaded,
+                total,
+                percent,
+                message: msg,
+            },
+        );
+    };
+    emit("downloading", 0, None);
     let mut stream = resp.bytes_stream();
     use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
@@ -233,12 +275,28 @@ pub async fn download_update(url: String, sha256: String) -> Result<String, Stri
             let _ = tokio::fs::remove_file(&tmp);
             return Err(format!("写入临时文件失败: {e}"));
         }
+        // 节流：每变化 5% 才 emit 一次，避免高频事件刷爆前端
+        if let Some(pct) = size
+            .checked_mul(100)
+            .and_then(|v| v.checked_div(total))
+            .map(|p| p.min(100) as i64)
+        {
+            if pct - last_pct >= 5 || size == total {
+                last_pct = pct;
+                emit("downloading", size, None);
+            }
+        }
     }
     if let Err(e) = file.sync_all().await {
         let _ = tokio::fs::remove_file(&tmp);
         return Err(format!("落盘失败: {e}"));
     }
     drop(file);
+    emit(
+        "verifying",
+        size,
+        Some("正在校验文件完整性…".to_string()),
+    );
     let got = hasher
         .finalize()
         .iter()
@@ -246,19 +304,24 @@ pub async fn download_update(url: String, sha256: String) -> Result<String, Stri
         .collect::<String>();
     if got != sha256.trim().to_lowercase() {
         let _ = tokio::fs::remove_file(&tmp);
-        return Err(format!(
-            "sha256 校验失败（期望 {sha256}，实际 {got}）——已删除下载文件"
-        ));
+        let msg = format!("sha256 校验失败（期望 {sha256}，实际 {got}）——已删除下载文件");
+        emit("error", size, Some(msg.clone()));
+        return Err(msg);
     }
     if let Err(e) = tokio::fs::rename(&tmp, &path).await {
         let _ = tokio::fs::remove_file(&tmp);
         return Err(format!("重命名失败: {e}"));
     }
-    let _ = size;
+    emit(
+        "done",
+        size,
+        Some("下载完成，正在启动安装程序…".to_string()),
+    );
     Ok(path.to_string_lossy().into_owned())
 }
 
-/// 运行安装包。Windows：NSIS 被动模式（/P 显示进度免交互）并退出当前进程；
+/// 运行安装包。Windows：无参数交互模式弹出 NSIS 向导（用户确认后安装、装完自动启动新版本），
+/// 随后退出当前进程，避免安装时文件被占用。
 /// macOS：open 引导用户；Linux：AppImage 加执行位后拉起 / deb 走 pkexec dpkg -i。
 #[tauri::command]
 pub async fn install_update(path: String) -> Result<(), String> {
@@ -269,10 +332,18 @@ pub async fn install_update(path: String) -> Result<(), String> {
     // Windows：先退出当前进程再由安装器接管，避免文件占用
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new(&p)
-            .arg("/P") // NSIS 被动模式：显示进度条、无需交互（Tauri NSIS 支持 /S 静默 /P 被动）
+        // 不要给 NSIS 传 `/P`：实测该参数不被本安装包识别，安装器启动后**立刻自行结束**——
+        // 不显示向导、装完也不启动应用，用户只看到主程序凭空退出（像是更新失败）。
+        // 无参数即交互模式：NSIS 正常弹出安装向导，用户确认后安装，装完由安装器自动启动新版本。
+        let child = std::process::Command::new(&p)
             .spawn()
             .map_err(|e| format!("启动安装器失败: {e}"))?;
+        tracing::info!(
+            "更新安装器已启动（pid {}），退出当前进程交给安装器接管",
+            child.id()
+        );
+        // 给安装器一点时间完成进程初始化：父进程立即 exit 时子进程可能还没真正起来。
+        std::thread::sleep(std::time::Duration::from_millis(300));
         std::process::exit(0);
     }
     #[cfg(target_os = "macos")]
