@@ -19,7 +19,7 @@ pub mod transfer;
 pub mod update;
 
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
+    menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Listener, Manager, WindowEvent,
 };
@@ -416,6 +416,7 @@ pub fn run() {
             update::check_update,
             update::download_update,
             update::install_update,
+            update::is_installed_build_cmd,
             tauri_cmd::list_cross_lan_offers,
             tauri_cmd::pull_cross_lan,
             tauri_cmd::show_pull_toast,
@@ -497,11 +498,29 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let show_i = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
     let hide_i = MenuItem::with_id(app, "hide", "隐藏主窗口", true, None::<&str>)?;
     let settings_i = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
-    let update_i = MenuItem::with_id(app, "check_update", "检查更新", true, None::<&str>)?;
+    // 仅安装版提供「检查更新」：绿色版走更新会把自己悄悄变成安装版，且源码目录那份
+    // 不会被替换（多出一份副本）。判定逻辑见 update::is_installed_build。
+    let update_i = if crate::update::is_installed_build() {
+        Some(MenuItem::with_id(
+            app,
+            "check_update",
+            "检查更新",
+            true,
+            None::<&str>,
+        )?)
+    } else {
+        tracing::info!("免安装版：托盘不显示「检查更新」（更新仅面向安装版）");
+        None
+    };
     let sep_i = PredefinedMenuItem::separator(app)?;
     let quit_i = MenuItem::with_id(app, "quit", "退出 ClipSync", true, None::<&str>)?;
-    let menu =
-        Menu::with_items(app, &[&show_i, &hide_i, &settings_i, &update_i, &sep_i, &quit_i])?;
+    let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> = vec![&show_i, &hide_i, &settings_i];
+    if let Some(u) = update_i.as_ref() {
+        items.push(u);
+    }
+    items.push(&sep_i);
+    items.push(&quit_i);
+    let menu = Menu::with_items(app, &items)?;
 
     // 托盘专用图标：内嵌编译进二进制，dev/build 均可靠；与窗口应用图标解耦。
     // 同时缓存圆点变体（推送=左上 / 收到=右上）供 tray_dot 切换。

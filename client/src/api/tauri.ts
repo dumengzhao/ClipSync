@@ -266,3 +266,8 @@ export async function downloadUpdate(url: string, sha256: string): Promise<strin
 export async function installUpdate(path: string): Promise<void> {
   return invoke<void>('install_update', { path });
 }
+
+/** 是否安装版（NSIS 安装的二进制）。false = 免安装/绿色版，不支持在线更新 */
+export async function isInstalledBuild(): Promise<boolean> {
+  return invoke<boolean>('is_installed_build_cmd');
+}

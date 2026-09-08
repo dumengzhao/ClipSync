@@ -8,6 +8,7 @@ import {
   checkUpdate,
   downloadUpdate,
   installUpdate,
+  isInstalledBuild,
   type AppConfig,
   type UpdateInfo,
 } from './api/tauri';
@@ -85,6 +86,8 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
   const [upd, setUpd] = useState<UpdateInfo | null>(null);
   const [updBusy, setUpdBusy] = useState<'check' | 'download' | null>(null);
   const [updMsg, setUpdMsg] = useState('');
+  // 免安装版不支持更新，启动时一次性探测，整段更新 UI 直接不渲染
+  const [installedBuild, setInstalledBuild] = useState<boolean | null>(null);
 
   useEffect(() => {
     getConfig()
@@ -98,6 +101,9 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
       })
       .catch((e) => setMsg('加载配置失败: ' + String(e)));
     // 不再于打开设置时动态获取窗口尺寸：默认值已在启动时由 Rust 端写入 config。
+    isInstalledBuild()
+      .then(setInstalledBuild)
+      .catch(() => setInstalledBuild(false));
   }, []);
 
   // 「检查更新」：调 Rust 自写更新器；null=已是最新/未发布
@@ -764,25 +770,31 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
       </div>
 
       <div className="section">更新</div>
-      <div className="row">
-        <label>检查新版本（更新地址取自服务端配置）</label>
-        <button onClick={doCheckUpdate} disabled={updBusy !== null}>
-          {updBusy === 'check' ? '检查中…' : '检查更新'}
-        </button>
-        {upd && (
-          <button onClick={doInstall} disabled={updBusy !== null}>
-            {updBusy === 'download' ? '下载中…' : `下载并安装 v${upd.version}`}
-          </button>
-        )}
-      </div>
-      {(upd || updMsg) && (
-        <p className="hint">
-          {upd
-            ? `发现 v${upd.version}${upd.pub_date ? `（${upd.pub_date}）` : ''}${
-                upd.notes ? `：${upd.notes}` : ''
-              }`
-            : updMsg}
-        </p>
+      {installedBuild === null ? null : installedBuild ? (
+        <>
+          <div className="row">
+            <label>检查新版本（更新地址取自服务端配置）</label>
+            <button onClick={doCheckUpdate} disabled={updBusy !== null}>
+              {updBusy === 'check' ? '检查中…' : '检查更新'}
+            </button>
+            {upd && (
+              <button onClick={doInstall} disabled={updBusy !== null}>
+                {updBusy === 'download' ? '下载中…' : `下载并安装 v${upd.version}`}
+              </button>
+            )}
+          </div>
+          {(upd || updMsg) && (
+            <p className="hint">
+              {upd
+                ? `发现 v${upd.version}${upd.pub_date ? `（${upd.pub_date}）` : ''}${
+                    upd.notes ? `：${upd.notes}` : ''
+                  }`
+                : updMsg}
+            </p>
+          )}
+        </>
+      ) : (
+        <p className="hint">当前为免安装版（直接双击 exe 运行），不支持在线更新。请使用 NSIS 安装版。</p>
       )}
 
       {toast && (
