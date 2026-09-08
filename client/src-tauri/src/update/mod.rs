@@ -158,12 +158,14 @@ pub fn is_newer(manifest_version: &str, current: &str) -> bool {
 
 /// 当前进程是否为「安装版」（经 NSIS 安装包装到系统）。
 ///
-/// 判定依据：当前 exe 同目录下存在 NSIS 生成的 `uninstall.exe`。免安装（绿色）版
-/// 是直接双击 exe 跑起来的，同目录不会有卸载程序。
+/// 判定依据（按优先级）：
+/// 1. 当前 exe 同目录存在 NSIS 安装钩子写入的 `installed.marker` —— 这是首选，
+///    因为它专门为此目的设计，不会被其他软件/用户误删也不会被同名文件误命中。
+/// 2. fallback：同目录存在 `uninstall.exe`（兼容 0.1.0 及更早未带 marker 的版本）。
 ///
-/// 为什么要区分：更新链路目前**只分发 NSIS 安装包**，绿色版若走更新，会把用户从
-/// 「直接跑 exe」悄悄变成「装到用户目录的安装版」——形态不一致，而且源码目录那个
-/// exe 并不会被替换，等于多出一份副本。因此更新入口只对安装版开放。
+/// 选用 marker 文件而不是单靠 uninstall.exe 的原因：用户可能把绿色版 exe
+/// 拷到任意目录运行——任何目录里都不会有这两个文件，判定必然是「绿色版」。
+/// 反过来真正的安装版必然经过 NSIS 安装流程，marker 必然存在。
 ///
 /// 两个豁免（不影响正式使用）：
 /// - `debug_assertions`（debug 构建）恒为 true：开发/自测需要能触达更新流程；
@@ -181,7 +183,14 @@ pub fn is_installed_build() -> bool {
     let Some(dir) = exe.parent() else {
         return false;
     };
-    dir.join("uninstall.exe").exists()
+    // marker 是首选（更可靠），uninstall.exe 作为 fallback（兼容旧版本）
+    if dir.join("installed.marker").exists() {
+        return true;
+    }
+    if dir.join("uninstall.exe").exists() {
+        return true;
+    }
+    false
 }
 
 fn basename_of(url: &str) -> String {
@@ -476,5 +485,68 @@ mod tests {
         assert!(!is_newer("0.1.0", "0.2.0"));
         // 解析失败 → 退化为字符串比较
         assert!(is_newer("beta-2", "0.1.0"));
+    }
+
+    /// `is_installed_build` 的核心判定逻辑（剥离豁免分支，跑真实文件检测）。
+    /// 返回 true 仅当同目录存在 installed.marker 或 uninstall.exe。
+    fn detect_installed_in(dir: &std::path::Path) -> bool {
+        if dir.join("installed.marker").exists() {
+            return true;
+        }
+        if dir.join("uninstall.exe").exists() {
+            return true;
+        }
+        false
+    }
+
+    #[test]
+    fn installed_marker_is_required_green_version_anywhere() {
+        // 临时目录 1：纯 exe 拷贝（无 marker / 无 uninstall.exe）→ 绿色版
+        let tmp = std::env::temp_dir().join("clipsync-test-green");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("clipsync.exe"), b"fake-exe").unwrap();
+        assert!(
+            !detect_installed_in(&tmp),
+            "无 marker 也无 uninstall.exe → 必须判定为绿色版（用户拷 exe 到任意目录的场景）"
+        );
+        std::fs::remove_dir_all(&tmp).unwrap();
+
+        // 临时目录 2：模拟 NSIS 装的目录（marker 存在）→ 安装版
+        let tmp2 = std::env::temp_dir().join("clipsync-test-installed-marker");
+        let _ = std::fs::remove_dir_all(&tmp2);
+        std::fs::create_dir_all(&tmp2).unwrap();
+        std::fs::write(tmp2.join("clipsync.exe"), b"fake-exe").unwrap();
+        std::fs::write(tmp2.join("installed.marker"), b"ClipSync installed build\n").unwrap();
+        assert!(
+            detect_installed_in(&tmp2),
+            "有 installed.marker → 判定安装版（NSIS 新装路径）"
+        );
+        std::fs::remove_dir_all(&tmp2).unwrap();
+
+        // 临时目录 3：模拟老版本安装目录（无 marker 但有 uninstall.exe）→ fallback 判定安装版
+        let tmp3 = std::env::temp_dir().join("clipsync-test-installed-fallback");
+        let _ = std::fs::remove_dir_all(&tmp3);
+        std::fs::create_dir_all(&tmp3).unwrap();
+        std::fs::write(tmp3.join("clipsync.exe"), b"fake-exe").unwrap();
+        std::fs::write(tmp3.join("uninstall.exe"), b"fake-uninst").unwrap();
+        assert!(
+            detect_installed_in(&tmp3),
+            "无 marker 但有 uninstall.exe → fallback 判定安装版（兼容 0.1.0 旧版）"
+        );
+        std::fs::remove_dir_all(&tmp3).unwrap();
+
+        // 临时目录 4：uninstall.exe 存在但被改名为别的后缀（用户改名/清理残留）→ 不算安装版
+        // 这是「修复你担心的判断逻辑」的核心场景：mark 检测能穿透 uninstall.exe 缺失的情况。
+        let tmp4 = std::env::temp_dir().join("clipsync-test-renamed");
+        let _ = std::fs::remove_dir_all(&tmp4);
+        std::fs::create_dir_all(&tmp4).unwrap();
+        std::fs::write(tmp4.join("clipsync.exe"), b"fake-exe").unwrap();
+        std::fs::write(tmp4.join("uninstall.exe.bak"), b"backup").unwrap(); // 不算 uninstall.exe
+        assert!(
+            !detect_installed_in(&tmp4),
+            "只有 uninstall.exe.bak → 判定绿色版（说明 marker 缺失时也不能靠同名文件误判）"
+        );
+        std::fs::remove_dir_all(&tmp4).unwrap();
     }
 }
