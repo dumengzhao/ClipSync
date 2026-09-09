@@ -43,7 +43,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
     "macOS": {
       "signingIdentity": "ClipSync Dev"
     },
