@@ -57,19 +57,15 @@ if [ ${#ARGS[@]} -lt 2 ]; then
   exit 1
 fi
 
-# ---- 生成自定义 latest.json（sha256 在此计算；url 仅文件名，服务端改写）----
-MANIFEST=$(node -e '
-const fs = require("fs"), crypto = require("crypto");
-const [version, notes, pubDate, ...pairs] = process.argv.slice(1);
-const platforms = {};
-for (let i = 0; i < pairs.length; i += 2) {
-  const p = pairs[i], f = pairs[i + 1];
-  const h = crypto.createHash("sha256");
-  h.update(fs.readFileSync(f));
-  platforms[p] = { url: f.split(/[\\/]/).pop(), sha256: h.digest("hex") };
-}
-process.stdout.write(JSON.stringify({ version, notes, pub_date: pubDate, platforms }));
-' "$VERSION" "$NOTES" "$PUB_DATE" "${ARGS[@]}")
+# ---- 生成 latest.json：复用 gen-latest-json.mjs（算 sha256 + 落盘到 bundle/nsis/）----
+# 该脚本 stdout 只吐 JSON，提示信息走 stderr，故此处可干净捕获。
+# Windows Git Bash 坑（与上方 add_platform 同源）：node 是原生程序，读不了 /c/...
+# 形式的路径（会把 /c/ 当成 C:\c\），必须用 cygpath 转；Linux/macOS 无 cygpath 保持原样。
+GEN_SCRIPT="$HERE/gen-latest-json.mjs"
+if command -v cygpath >/dev/null 2>&1; then
+  GEN_SCRIPT="$(cygpath -m "$GEN_SCRIPT")"
+fi
+MANIFEST=$(node "$GEN_SCRIPT" "$NOTES")
 echo ">>> latest.json: $MANIFEST"
 
 # ---- 登录拿会话 token ----
