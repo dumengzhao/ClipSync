@@ -3,7 +3,7 @@
 > 状态：**已实现**（2026-09-02，按第 12 节顺序分步落地：服务端 update.rs +
 > 管理上传 + 管理页 UI + 移除 Tauri updater 插件 + 客户端自写更新器 +
 > publish-update.sh）。目标：把客户端自动更新与中继服务合建在同一进程/同一台机器上，
-> 通过管理端上传「自定义 `latest.json` + 安装包」，客户端用**用户自己配置的中转服务地址**
+> 通过管理端上传「版本号/说明 + 安装包」（清单由页面自动生成），客户端用**用户自己配置的中转服务地址**
 > 拉取并安装更新。
 >
 > **本次修订核心决策（2026-09-02，用户拍板）**：
@@ -116,7 +116,7 @@
 
 1. `admin_auth` 已保证是管理员。
 2. 解析 multipart：
-   - `manifest` 字段 → 校验能解析为自定义 schema（至少含 `version` + `platforms`，每平台有 `url` 与 `sha256`）→ 临时写 `latest.json.tmp` → rename。
+   - `manifest` 字段 → 校验能解析为自定义 schema（至少含 `version` + `platforms`，每平台有 `url` 与 `sha256`）→ **与线上已有的 `latest.json` 合并**（见 5.6）→ 临时写 `latest.json.tmp` → rename。
    - `file` 字段 → 必须带 `platform`（须匹配已知键集合白名单：`windows-x86_64`/`windows-aarch64`/`darwin-x86_64`/`darwin-aarch64`/`linux-x86_64` 等）与 `filename` → 写 `<UPDATE_DIR>/files/<platform>/<filename>`（先写 tmp 再 rename）。
 3. 安全：
    - `filename` 必须不含 `/`、`\`、`..`，否则拒绝（防目录穿越）。
@@ -127,6 +127,25 @@
 ### 5.5 存储习惯
 
 沿用 `storage.rs` 既有套路：`create_dir_all` 建目录 → 写 `*.tmp` → `rename` 原子替换，避免半截文件被客户端拉到。
+
+### 5.6 `latest.json` 合并语义（服务端持久累积）
+
+服务端 `latest.json` 是**固定不动、按平台累积**的持久文件：`POST /api/admin/update`
+不再是「整体覆盖」，而是把本次上传的 manifest 合并进线上已有的一份：
+
+| 字段 | 合并规则 |
+| --- | --- |
+| `version` | 以本次上传为准（发布方负责改版本号） |
+| `notes` | 本次上传非空才覆盖，留空则沿用线上值 |
+| `pub_date` | 同上 |
+| `platforms` | 按平台键逐条合并：本次涉及的键覆盖/新增，**其它平台原样保留** |
+
+动机：`publish-update.sh` 只收**本机**产物（Mac 上跑不出 NSIS 包、Windows 上跑不出 dmg），
+若整体覆盖，后发布的平台会把先发布的平台条目抹掉，客户端遇到「缺失平台」直接报错。
+合并后各平台可独立发布，服务端自动汇总出完整清单。
+
+- 现有文件解析失败（损坏/手改坏）→ 忽略旧内容，以本次上传为准重建，不让一次解析失败卡死发布。
+- 响应体额外返回 `previous_version` / `merged` / `platforms`，便于发布脚本肉眼核对。
 
 ## 6. 客户端自写更新器设计（替代 Tauri updater 插件）
 
@@ -155,7 +174,7 @@
 
 - 新增一个"客户端更新"区域：
   - 顶部 `GET /api/admin/update` 拉当前线上版本并展示（版本号 / 发布时间 / 各平台是否已上传）。
-  - 一个 multipart 表单：1 个 `latest.json` 文件选择 + 多平台安装包文件选择（每个标注 platform），提交到 `POST /api/admin/update`。
+  - 一个 multipart 表单：**不需要用户手选 `latest.json`，也不需要手填版本号**——版本号由页面按 semver 正则从安装包文件名自动提取（Tauri 产物恒为 `<Product>_<版本>_<架构>[-setup].<ext>`，如 `ClipSync_0.1.0_aarch64.dmg`；架构段无点结构不会误匹配；提不到或各包不一致时提示人工确认，仍可手工覆盖）+ 更新说明（留空=不改动）+ 多平台安装包文件选择——**平台键也自动识别**（扩展名定系统：exe/msi→windows、dmg/pkg/app(+.tar.gz)→darwin、appimage/deb/rpm→linux；文件名里的 `x64|x86_64|amd64`→x86_64、`aarch64|arm64`→aarch64；任一维识别不出就在提示行点名该文件，留人工选）；提交时页面用 Web Crypto 逐个算安装包 sha256 并**自动生成 manifest**（以 Blob 随 `manifest` 字段提交）到 `POST /api/admin/update`。服务端按平台键合并，故一次不必传齐所有平台。
 - 实现方式二选一（实现时定）：
   - (a) 在现有内嵌 admin HTML 里加一段 section；
   - (b) 新增内嵌页 `admin_update.html` + 路由 `GET /admin/update` 单独展示。
@@ -232,5 +251,5 @@ location /update/ {
 - **更新 URL 必须来自用户 relay 配置**：绝不能硬编码作者服务器，否则陌生人用作者二进制=全信作者服务器（决策第 2 点安全底线）。
 - **无签名 = 服务器/TLS 被攻破即 RCE**：自托管模型下由操作者自担；如需硬核防护，将来可单独加回签名（本次明确不做）。
 - **大文件上传**：msi/nsis 可能 >100MB，nginx `client_max_body_size` 与 `UPDATE_MAX_UPLOAD_MB` 需对齐，且 axum 侧建议流式计数避免 OOM。
-- **多平台发布频率**：管理端一次可传多平台；若只传部分平台，`latest.json` 仍声明全部，缺失平台客户端下载会 404——发布脚本须保证"传齐再换 latest.json"（原子替换已部分覆盖此风险）。
+- **多平台发布频率**：各平台可独立发布，服务端按平台键合并（5.6），不再需要"一次传齐"。残留风险：某平台条目指向的文件未上传（或上传后改名）→ 该平台客户端下载 404；管理端 `GET /api/admin/update` 的 `uploaded` 字段可用于核对。
 - **管理页实现方式**：内嵌现有页加段 vs 新独立页（实现时选，不影响接口）。
