@@ -3,7 +3,8 @@
 # 一键发布客户端更新（无签名自托管，见 UPDATE_MODULE_PLAN.md 第 6/10 节）。
 # 流程：tauri build 出安装包 → 计算各平台 sha256 → 生成自定义 latest.json
 #       （无 signature/pubkey，url 只填文件名，由服务端返回时按自身 origin 改写）
-#       → 经 admin API 单请求原子上传（文件 + manifest，传齐才切换线上版本）。
+#       → 经 admin API 单请求上传（文件 + manifest）。服务端 latest.json 是持久累积文件：
+#       只收本机产物没关系，服务端按平台键合并，不会抹掉其它平台已发布的条目。
 #
 # 前置：本机已装 NSIS（出 windows-x86_64 安装包）；其它平台产物若存在则自动带上。
 # 用法：
