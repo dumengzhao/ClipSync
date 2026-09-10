@@ -170,6 +170,12 @@ pub fn is_newer(manifest_version: &str, current: &str) -> bool {
 /// 两个豁免（不影响正式使用）：
 /// - `debug_assertions`（debug 构建）恒为 true：开发/自测需要能触达更新流程；
 /// - 环境变量 `CLIPSYNC_FORCE_UPDATE` 存在时恒为 true：release 绿色版临时自测用。
+///
+/// **macOS 单独判定**：上面两条都是 Windows/NSIS 专属（`installed.marker` 由 NSIS
+/// 钩子写入），在 mac 上恒不成立，会把更新入口（托盘「检查更新」、设置页、下载/安装）
+/// 整个关死。故 macOS 改为识别标准 bundle：`exe` 位于 `X.app/Contents/MacOS/` 下即放行。
+/// 依据：mac 的更新只是 `open` 下载好的 dmg 引导用户拖拽，**不会改写正在运行的 app**，
+/// 不存在 Windows「免安装版被悄悄变成安装版」的风险，无需照搬那道门禁。
 pub fn is_installed_build() -> bool {
     if std::env::var("CLIPSYNC_FORCE_UPDATE").is_ok() {
         return true;
@@ -180,6 +186,11 @@ pub fn is_installed_build() -> bool {
     let Ok(exe) = std::env::current_exe() else {
         return false;
     };
+    // macOS：运行在 .app bundle 内即视为正式安装版（详见上方文档注释）。
+    #[cfg(target_os = "macos")]
+    if is_in_app_bundle(&exe) {
+        return true;
+    }
     let Some(dir) = exe.parent() else {
         return false;
     };
@@ -191,6 +202,31 @@ pub fn is_installed_build() -> bool {
         return true;
     }
     false
+}
+
+/// 判断给定可执行文件路径是否位于 macOS 标准 app bundle 内，
+/// 形如 `.../ClipSync.app/Contents/MacOS/clipsync`。
+///
+/// 抽成独立纯函数便于单测——`is_installed_build()` 依赖 `current_exe()`，不好直接测。
+#[cfg(target_os = "macos")]
+fn is_in_app_bundle(exe: &std::path::Path) -> bool {
+    let Some(dir) = exe.parent() else {
+        return false;
+    };
+    dir.file_name()
+        .map(|n| n == std::ffi::OsStr::new("MacOS"))
+        .unwrap_or(false)
+        && dir
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n == std::ffi::OsStr::new("Contents"))
+            .unwrap_or(false)
+        && dir
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().ends_with(".app"))
+            .unwrap_or(false)
 }
 
 fn basename_of(url: &str) -> String {
@@ -548,5 +584,33 @@ mod tests {
             "只有 uninstall.exe.bak → 判定绿色版（说明 marker 缺失时也不能靠同名文件误判）"
         );
         std::fs::remove_dir_all(&tmp4).unwrap();
+    }
+
+    /// macOS bundle 结构识别：位于 `X.app/Contents/MacOS/` 下才算正式 .app。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_bundle_path_is_recognized() {
+        assert!(
+            is_in_app_bundle(std::path::Path::new(
+                "/Applications/ClipSync.app/Contents/MacOS/clipsync"
+            )),
+            "标准安装路径 /Applications 必须识别为 bundle"
+        );
+        assert!(
+            is_in_app_bundle(std::path::Path::new(
+                "/Users/dmz/Applications/ClipSync.app/Contents/MacOS/clipsync"
+            )),
+            "用户级 ~/Applications 安装也必须识别"
+        );
+        assert!(
+            !is_in_app_bundle(std::path::Path::new("/tmp/clipsync")),
+            "裸可执行文件不算 bundle"
+        );
+        assert!(
+            !is_in_app_bundle(std::path::Path::new(
+                "/tmp/ClipSync.app/MacOS/clipsync"
+            )),
+            "缺少 Contents 层不算标准 bundle"
+        );
     }
 }
