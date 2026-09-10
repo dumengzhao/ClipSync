@@ -167,6 +167,32 @@ pub fn validate_manifest(raw: &str) -> Result<UpdateManifest, String> {
     Ok(m)
 }
 
+/// 合并策略（服务端 latest.json 是**持久累积**文件，各平台可独立发布）：
+/// - 顶层 `version`：以本次上传为准（发布方负责改版本号）；
+/// - `notes` / `pub_date`：本次上传非空才覆盖，留空则沿用线上值——
+///   便于「只传某个平台的包、不改发布说明」；
+/// - `platforms`：按平台键逐条合并，本次上传涉及的键覆盖/新增，
+///   其它平台原样保留（Windows 发包不会抹掉 darwin 条目）。
+pub fn merge_manifest(
+    existing: Option<UpdateManifest>,
+    incoming: UpdateManifest,
+) -> UpdateManifest {
+    let Some(mut base) = existing else {
+        return incoming;
+    };
+    base.version = incoming.version;
+    if !incoming.notes.trim().is_empty() {
+        base.notes = incoming.notes;
+    }
+    if !incoming.pub_date.trim().is_empty() {
+        base.pub_date = incoming.pub_date;
+    }
+    for (p, e) in incoming.platforms {
+        base.platforms.insert(p, e);
+    }
+    base
+}
+
 fn files_root(state: &AppState) -> PathBuf {
     state.update_dir.join("files")
 }
@@ -517,16 +543,37 @@ pub async fn admin_upload(State(state): State<Arc<AppState>>, mut mp: Multipart)
             return err(StatusCode::BAD_REQUEST, "manifest field required".into()).await;
         }
     };
-    let m = match validate_manifest(&raw) {
+    let incoming = match validate_manifest(&raw) {
         Ok(m) => m,
         Err(e) => return err(StatusCode::BAD_REQUEST, e).await,
     };
+
+    // 与线上已有的 latest.json 合并：本次上传只覆盖自己涉及的平台条目与版本信息，
+    // 其余平台保留。服务端 latest.json 因此成为「固定不动、按平台累积」的持久文件。
+    let latest_dst = state.update_dir.join("latest.json");
+    let existing: Option<UpdateManifest> = match tokio::fs::read_to_string(&latest_dst).await {
+        Ok(s) => match serde_json::from_str::<UpdateManifest>(&s) {
+            Ok(m) => Some(m),
+            Err(_) => None, // 现有文件坏了：以本次上传为准重建，不让一次解析失败卡死发布
+        },
+        Err(_) => None,
+    };
+    let previous_version = existing.as_ref().map(|e| e.version.clone());
+    let merged_from_existing = existing.is_some();
+    let m = merge_manifest(existing, incoming);
+
     let pretty = match serde_json::to_string_pretty(&m) {
         Ok(s) => s,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("encode: {e}")).await,
     };
+    if let Err(e) = tokio::fs::create_dir_all(&state.update_dir).await {
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("create update dir: {e}"),
+        )
+        .await;
+    }
     let latest_tmp = state.update_dir.join("latest.json.tmp");
-    let latest_dst = state.update_dir.join("latest.json");
     if let Err(e) = tokio::fs::write(&latest_tmp, pretty).await {
         return err(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -543,11 +590,15 @@ pub async fn admin_upload(State(state): State<Arc<AppState>>, mut mp: Multipart)
         .await;
     }
 
+    let platforms: Vec<&String> = m.platforms.keys().collect();
     (
         [(CONTENT_TYPE, "application/json")],
         json!({
             "ok": true,
             "version": m.version,
+            "previous_version": previous_version,
+            "merged": merged_from_existing,
+            "platforms": platforms,
             "uploaded": uploaded.iter().map(|(p, f, s)| json!({
                 "platform": p, "filename": f, "size": s
             })).collect::<Vec<_>>(),
@@ -594,6 +645,85 @@ mod tests {
         assert!(validate_manifest(no_sha).is_err());
         let no_version = r#"{"version":"","platforms":{"windows-x86_64":{"url":"a.exe","sha256":"aa"}}}"#;
         assert!(validate_manifest(no_version).is_err());
+    }
+
+    fn manifest(
+        ver: &str,
+        notes: &str,
+        pub_date: &str,
+        entries: &[(&str, &str, &str)],
+    ) -> UpdateManifest {
+        UpdateManifest {
+            version: ver.into(),
+            notes: notes.into(),
+            pub_date: pub_date.into(),
+            platforms: entries
+                .iter()
+                .map(|(p, u, s)| {
+                    (
+                        p.to_string(),
+                        PlatformEntry {
+                            url: u.to_string(),
+                            sha256: s.to_string(),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn merge_without_existing_returns_incoming() {
+        let m = manifest("0.1.1", "n", "d", &[("windows-x86_64", "a.exe", "aa")]);
+        let out = merge_manifest(None, m);
+        assert_eq!(out.version, "0.1.1");
+        assert_eq!(out.platforms.len(), 1);
+    }
+
+    #[test]
+    fn merge_keeps_other_platforms_and_overrides_same_key() {
+        let existing = manifest(
+            "0.1.0",
+            "old notes",
+            "2026-09-01T00:00:00Z",
+            &[
+                ("windows-x86_64", "Setup-0.1.0.exe", "old-win"),
+                ("darwin-aarch64", "ClipSync-0.1.0.dmg", "old-mac"),
+            ],
+        );
+        // Windows 单独发 0.1.1（manifest 里只有自己那一条）
+        let incoming = manifest(
+            "0.1.1",
+            "win notes",
+            "2026-09-02T00:00:00Z",
+            &[("windows-x86_64", "Setup-0.1.1.exe", "new-win")],
+        );
+        let out = merge_manifest(Some(existing), incoming);
+        assert_eq!(out.version, "0.1.1", "版本以本次上传为准");
+        assert_eq!(out.notes, "win notes");
+        assert_eq!(out.pub_date, "2026-09-02T00:00:00Z");
+        assert_eq!(out.platforms.len(), 2, "darwin 条目必须保留");
+        assert_eq!(out.platforms["windows-x86_64"].sha256, "new-win");
+        assert_eq!(
+            out.platforms["darwin-aarch64"].url,
+            "ClipSync-0.1.0.dmg",
+            "未涉及的平台原样保留"
+        );
+    }
+
+    #[test]
+    fn merge_keeps_notes_when_incoming_blank() {
+        let existing = manifest(
+            "0.1.0",
+            "keep me",
+            "2026-09-01T00:00:00Z",
+            &[("linux-x86_64", "a.AppImage", "aa")],
+        );
+        let incoming = manifest("0.1.0", "   ", "", &[("linux-x86_64", "b.AppImage", "bb")]);
+        let out = merge_manifest(Some(existing), incoming);
+        assert_eq!(out.notes, "keep me", "留空不覆盖已有描述");
+        assert_eq!(out.pub_date, "2026-09-01T00:00:00Z", "留空不覆盖已有日期");
+        assert_eq!(out.platforms["linux-x86_64"].sha256, "bb");
     }
 
     #[test]
@@ -664,19 +794,27 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt; // oneshot
 
-    fn multipart_body(boundary: &str, manifest: &str, file_bytes: &[u8]) -> (axum::http::HeaderValue, Vec<u8>) {
+    fn multipart_body(
+        boundary: &str,
+        platform: &str,
+        filename: &str,
+        manifest: &str,
+        file_bytes: &[u8],
+    ) -> (axum::http::HeaderValue, Vec<u8>) {
         let mut b = Vec::new();
         let push = |b: &mut Vec<u8>, s: &str| b.extend_from_slice(s.as_bytes());
         push(&mut b, &format!("--{boundary}\r\n"));
         push(&mut b, "Content-Disposition: form-data; name=\"platform\"\r\n\r\n");
-        push(&mut b, "windows-x86_64\r\n");
+        push(&mut b, &format!("{platform}\r\n"));
         push(&mut b, &format!("--{boundary}\r\n"));
         push(&mut b, "Content-Disposition: form-data; name=\"filename\"\r\n\r\n");
-        push(&mut b, "test-setup.exe\r\n");
+        push(&mut b, &format!("{filename}\r\n"));
         push(&mut b, &format!("--{boundary}\r\n"));
         push(
             &mut b,
-            "Content-Disposition: form-data; name=\"file\"; filename=\"test-setup.exe\"\r\nContent-Type: application/octet-stream\r\n\r\n",
+            &format!(
+                "Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+            ),
         );
         b.extend_from_slice(file_bytes);
         push(&mut b, "\r\n");
@@ -711,6 +849,31 @@ mod tests {
         app.oneshot(req).await.unwrap()
     }
 
+    async fn upload_one(
+        app: &axum::Router,
+        token: &str,
+        platform: &str,
+        filename: &str,
+        manifest: &str,
+        data: &[u8],
+    ) {
+        let (ct, body) = multipart_body("BoUnD", platform, filename, manifest, data);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/admin/update")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header(CONTENT_TYPE, ct)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "platform={platform}");
+    }
+
     #[tokio::test]
     async fn full_update_flow() {
         let state = test_state(Some("https://sync.example.com"));
@@ -718,7 +881,13 @@ mod tests {
         let app = crate::build_router(state.clone());
 
         // 1) 未授权上传 → 401
-        let (ct, body) = multipart_body("XbOuNdArY", r#"{"version":"0.1.1","platforms":{}}"#, b"x");
+        let (ct, body) = multipart_body(
+            "XbOuNdArY",
+            "windows-x86_64",
+            "test-setup.exe",
+            r#"{"version":"0.1.1","platforms":{}}"#,
+            b"x",
+        );
         let resp = app
             .clone()
             .oneshot(
@@ -751,7 +920,13 @@ mod tests {
 
         // 3) 上传 manifest + 文件
         let manifest = r#"{"version":"0.1.1","notes":"t","pub_date":"2026-09-02T00:00:00Z","platforms":{"windows-x86_64":{"url":"test-setup.exe","sha256":"aa"}}}"#;
-        let (ct, body) = multipart_body("XbOuNdArY", manifest, b"hello-installer");
+        let (ct, body) = multipart_body(
+            "XbOuNdArY",
+            "windows-x86_64",
+            "test-setup.exe",
+            manifest,
+            b"hello-installer",
+        );
         let resp = app
             .clone()
             .oneshot(
@@ -871,5 +1046,82 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// 各平台独立发布：Windows 先发、darwin 后发，latest.json 必须同时含两条。
+    #[tokio::test]
+    async fn per_platform_publish_accumulates() {
+        let state = Arc::new(test_state(Some("https://sync.example.com")));
+        std::fs::create_dir_all(state.update_dir.join("files")).unwrap();
+        let app = crate::build_router(state.clone());
+
+        let resp = post_json(
+            app.clone(),
+            "/api/admin/login",
+            None,
+            r#"{"user":"admin","pass":"pw"}"#,
+        )
+        .await;
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let token = v["token"].as_str().unwrap().to_string();
+
+        // Windows 端发布 0.1.1（manifest 里只有自己那一条）
+        upload_one(
+            &app,
+            &token,
+            "windows-x86_64",
+            "Setup-0.1.1.exe",
+            r#"{"version":"0.1.1","notes":"win","pub_date":"2026-09-02T00:00:00Z","platforms":{"windows-x86_64":{"url":"Setup-0.1.1.exe","sha256":"win-sha"}}}"#,
+            b"win-bytes",
+        )
+        .await;
+
+        // darwin 端发布同版本
+        upload_one(
+            &app,
+            &token,
+            "darwin-aarch64",
+            "ClipSync-0.1.1.dmg",
+            r#"{"version":"0.1.1","notes":"mac","pub_date":"2026-09-03T00:00:00Z","platforms":{"darwin-aarch64":{"url":"ClipSync-0.1.1.dmg","sha256":"mac-sha"}}}"#,
+            b"mac-bytes",
+        )
+        .await;
+
+        let raw = std::fs::read_to_string(state.update_dir.join("latest.json")).unwrap();
+        let m: UpdateManifest = serde_json::from_str(&raw).unwrap();
+        assert_eq!(m.platforms.len(), 2, "两个平台都应留在 manifest 里");
+        assert_eq!(m.platforms["windows-x86_64"].sha256, "win-sha");
+        assert_eq!(m.platforms["darwin-aarch64"].sha256, "mac-sha");
+        assert_eq!(m.notes, "mac", "描述以最后一次上传为准");
+
+        // 公开读：两个平台的 url 都被改写
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/update/latest.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            v["platforms"]["darwin-aarch64"]["url"],
+            json!("https://sync.example.com/update/files/darwin-aarch64/ClipSync-0.1.1.dmg")
+        );
+        assert_eq!(
+            v["platforms"]["windows-x86_64"]["url"],
+            json!("https://sync.example.com/update/files/windows-x86_64/Setup-0.1.1.exe")
+        );
     }
 }
