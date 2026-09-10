@@ -1,8 +1,8 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<html lang="zh-CN" data-page-node-id="UTqCLzdjkQLPXVlyQcJrgN">
+<head data-page-node-id="gvmRCU2eAuNftlVawccKhW">
+<meta charset="utf-8" data-page-node-id="jK1HdlFWkECC5dTcAREd2z" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" data-page-node-id="MZgdc0zp9y6sOnHoTFlEl6" />
 <title>ClipSync 控制台</title>
 <style>
   :root{
@@ -226,114 +226,116 @@
   }
 </style>
 </head>
-<body>
+<body data-page-node-id="feHfuTssihyUXtfBYh9HiQ">
   <!-- ============ 登录 ============ -->
-  <div id="login">
-    <div class="logo">
-      <div class="mark">⇄</div>
-      <h1>CLIP<b>SYNC</b></h1>
-      <div class="sub">CONTROL CONSOLE</div>
+  <div id="login" data-page-node-id="cmEgKygOZlyc60AdIg1jvW">
+    <div class="logo" data-page-node-id="kceqqOtYCHaN4ueV5afTaz">
+      <div class="mark" data-page-node-id="VZaKGkYRD49g1ttDfO8f02">⇄</div>
+      <h1 data-page-node-id="jiGq81zIm7uofP9H1H5g1W">CLIP<b data-page-node-id="sMz7NdGmvqbtLSkuBXSwGk">SYNC</b></h1>
+      <div class="sub" data-page-node-id="X3874RlbxwWKCa3NoN6xzx">CONTROL CONSOLE</div>
     </div>
-    <div class="panel">
-      <form id="loginForm">
-        <input id="u" placeholder="用户名" autocomplete="username" />
-        <div class="pwd-wrap">
-          <input id="p" type="password" placeholder="密码" autocomplete="current-password" />
-          <button type="button" class="pwd-eye" id="pwEye" aria-label="显示/隐藏密码" title="显示密码">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>
+    <div class="panel" data-page-node-id="Plwq8ASENWPAwS4KSazSVa">
+      <form id="loginForm" data-page-node-id="oVrebWaL0xaeOTbvhs238Q">
+        <input id="u" placeholder="用户名" autocomplete="username" data-page-node-id="ZDS7TNDUOQuI2frFRjpBH8" />
+        <div class="pwd-wrap" data-page-node-id="EFS2nukQom0Eie73lm26ZL">
+          <input id="p" type="password" placeholder="密码" autocomplete="current-password" data-page-node-id="iNjlddwREXCbWDBb4vrYWy" />
+          <button type="button" class="pwd-eye" id="pwEye" aria-label="显示/隐藏密码" title="显示密码" data-page-node-id="FYWVAU222L9I73MtOk1wCw">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="VWUcNmrQhHm7D8vLzkOWcE"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z" data-page-node-id="AbfoLhZ7xBTBI4RMfHjz0D"/><circle cx="12" cy="12" r="3" data-page-node-id="ELz7ARTPoUZT6c2w7qKE4e"/></svg>
           </button>
         </div>
-        <button type="submit" id="loginBtn">接 入</button>
-        <div id="loginErr"></div>
+        <button type="submit" id="loginBtn" data-page-node-id="ep1cs5N57vpO5T1aydrkYx">接 入</button>
+        <div id="loginErr" data-page-node-id="B8emtfYULwGHqIKPstd0zQ"></div>
       </form>
     </div>
   </div>
 
   <!-- ============ 主界面 ============ -->
-  <div id="app" style="display:none">
-    <header class="topbar">
-      <div class="brand">CLIP<b>SYNC</b><em>CONTROL</em></div>
-      <button class="ghost sm" id="logout">退出</button>
+  <div id="app" style="display:none" data-page-node-id="nMcaAkL9pckZAstdFvchjr">
+    <header class="topbar" data-page-node-id="7urXqVXtlrqmWAn3Je0nU0">
+      <div class="brand" data-page-node-id="w8dcAMpBXnH2ML4OmA5nNs">CLIP<b data-page-node-id="ccEf6mm9e7VqavzzkD8THC">SYNC</b><em data-page-node-id="9w2yc5KAMwIArpCyXwMVaO">CONTROL</em></div>
+      <button class="ghost sm" id="logout" data-page-node-id="TF4txOE639hnjA2FHcc9bB">退出</button>
     </header>
-    <div class="wrap">
+    <div class="wrap" data-page-node-id="mOZOFLqQc9jbihl2KiZOmM">
 
       <!-- ===== 视图 1：网络列表 ===== -->
-      <section id="viewList">
-        <div class="section-head">
-          <h2>网络<span class="cnt" id="netCount"></span></h2>
-          <button class="sm" id="newNet">+ 创建网络</button>
+      <section id="viewList" data-page-node-id="gjeTVQkTDrbmoSBfR29QDs">
+        <div class="section-head" data-page-node-id="eQYjMbBf0VXKqbSJqVKkua">
+          <h2 data-page-node-id="pR3zv2v9xBKayEHdO4dcAu">网络<span class="cnt" id="netCount" data-page-node-id="HSYGkMmcCEZqtbQBQgQVsH"></span></h2>
+          <button class="sm" id="newNet" data-page-node-id="2PiPYtbgy1MlA3fFeAUJ51">+ 创建网络</button>
         </div>
 
-        <div class="panel hidden" id="newNetPanel">
-          <div class="panel-title">NEW NETWORK</div>
-          <div class="form-row">
-            <div class="fld"><label>名称</label><input id="netName" placeholder="如 My Network"/></div>
-            <div class="fld"><label>描述（可选）</label><input id="netDesc" placeholder=""/></div>
-            <button id="createNet">创建</button>
+        <div class="panel hidden" id="newNetPanel" data-page-node-id="vb3hEr822z7BFYLyUAwaeo">
+          <div class="panel-title" data-page-node-id="lqairzK3snEZe5nkxS9nIO">NEW NETWORK</div>
+          <div class="form-row" data-page-node-id="TXd5GNqjdPmOJvvm0MYS2O">
+            <div class="fld" data-page-node-id="FGJFHcw3AEQ4xDzUEtEpgt"><label data-page-node-id="rGM1efrT16Xys8wEVJcrM3">名称</label><input id="netName" placeholder="如 My Network" data-page-node-id="qpwONQ0hVe2E47nA91l3oP"/></div>
+            <div class="fld" data-page-node-id="YpkyiXnvXBCRco4V37lsrF"><label data-page-node-id="gbCXKCSoxRa5B7woAhdjP3">描述（可选）</label><input id="netDesc" placeholder="" data-page-node-id="skDsSAa9xSXavWVVZJEA48"/></div>
+            <button id="createNet" data-page-node-id="1pjcEFGBTtFRFkm2mLW8hS">创建</button>
           </div>
-          <div id="newToken" class="token-box hidden"></div>
-          <div class="hint">⚠ Token 已持久化保存，可在网络明细页随时查看并复制。</div>
+          <div id="newToken" class="token-box hidden" data-page-node-id="OTFf3pN7kIcdbBYLqyTXGg"></div>
+          <div class="hint" data-page-node-id="bclKHGduVhuZZFAFcoD6J8">⚠ Token 已持久化保存，可在网络明细页随时查看并复制。</div>
         </div>
 
-        <div id="netList" class="net-grid"></div>
+        <div id="netList" class="net-grid" data-page-node-id="3CToDRnVPiYZBGWchysjQC"></div>
 
         <!-- ===== 客户端更新托管 ===== -->
-        <div class="panel" style="margin-top:16px">
-          <div class="panel-title">CLIENT UPDATE <span class="n" id="updVer"></span></div>
-          <div id="updInfo" class="hint" style="margin:0 0 12px">加载中…</div>
-          <div class="form-row" style="margin-bottom:10px">
-            <div class="fld" style="min-width:260px"><label>latest.json（更新清单）</label><input type="file" id="updManifest" accept=".json,application/json"/></div>
+        <div class="panel" style="margin-top:16px" data-page-node-id="Kflb6G9ltrm98svDDfRD4Z">
+          <div class="panel-title" data-page-node-id="AOptbUDbzrdPK0hwaDCMmx">CLIENT UPDATE <span class="n" id="updVer" data-page-node-id="r0VgL90bedfHo1lONCgcko"></span></div>
+          <div id="updInfo" class="hint" style="margin:0 0 12px" data-page-node-id="48CO1f5qZ4DKBF4fa4Duke">加载中…</div>
+          <div class="form-row" style="margin-bottom:10px" data-page-node-id="slFUft9ybDYRttaSbfz0Tq">
+            <div class="fld" style="min-width:150px" data-page-node-id="M0L6CiQBuIAAcumuws2b4G"><label data-page-node-id="sL5l4UVn44m1P9XckkML5T">版本号（自动从安装包文件名提取，可改）</label><input id="updVersion" placeholder="如 0.1.2" data-page-node-id="urxr1CvxyI6zf1WXqJtgVb"/></div>
+            <div class="fld" style="min-width:280px" data-page-node-id="ZkgwGmQukgey9IPmLkguLG"><label data-page-node-id="3J83MsgvzELNggu1ndWrUh">更新说明（留空则不改动线上描述）</label><input id="updNotes" placeholder="" data-page-node-id="W8MQ9wE5VdI7tMMMBGBzn5"/></div>
           </div>
-          <div id="updFiles"></div>
-          <div class="form-row" style="margin-top:10px">
-            <button class="ghost sm" id="updAddFile" type="button">+ 添加平台安装包</button>
-            <button id="updSubmit" type="button">发布更新</button>
+          <div id="updVerSrc" class="hint" style="margin:0 0 10px" data-page-node-id="FWAHpkAJK0GzEMNa2dumOo"></div>
+          <div id="updFiles" data-page-node-id="92tVJwpz5Fu8pEjpkCfuJH"></div>
+          <div class="form-row" style="margin-top:10px" data-page-node-id="1WaoOWADZQvpkcyui0ws4j">
+            <button class="ghost sm" id="updAddFile" type="button" data-page-node-id="qfO0bZmZIS2D4ft9KUCEXJ">+ 添加平台安装包</button>
+            <button id="updSubmit" type="button" data-page-node-id="bfnXa4NyOGuAghY9a13vaG">发布更新</button>
           </div>
-          <div class="hint">每个安装包选对应平台键（windows-x86_64 / darwin-aarch64 / linux-x86_64 …）。服务端收到完整 manifest 后才原子切换线上版本，传齐再发布。</div>
+          <div class="hint" data-page-node-id="eQ97gcqmSmZYR43VP4BRmZ">选好各平台安装包即可，更新清单（含 sha256）由本页面自动生成。服务端按<b data-page-node-id="p01iWwZwb0r0xjmSu2BQP1">平台键合并</b>进线上 latest.json：本次上传的平台覆盖更新，未涉及的平台原样保留，无需一次传齐。</div>
         </div>
       </section>
 
       <!-- ===== 视图 2：网络明细 ===== -->
-      <section id="viewDetail" class="hidden">
-        <button class="ghost sm back-btn" id="backBtn">‹ 网络列表</button>
+      <section id="viewDetail" class="hidden" data-page-node-id="snRJ8PuwoizHD9oU1zqfIf">
+        <button class="ghost sm back-btn" id="backBtn" data-page-node-id="f9Ia1xZVJ43XfD6XwFZttq">‹ 网络列表</button>
 
-        <div class="panel">
-          <div class="meta-head">
-            <div style="min-width:0">
-              <h2 id="dName"></h2>
-              <div class="meta-desc" id="dDesc"></div>
+        <div class="panel" data-page-node-id="UEXeXeuhVDzSsBMI6nSDdZ">
+          <div class="meta-head" data-page-node-id="nEHk11WTFN4qaTewJZv84V">
+            <div style="min-width:0" data-page-node-id="QIFUCKirPQ2PQOS8NeQvRX">
+              <h2 id="dName" data-page-node-id="F60Kp15IrmSEVigbTwIY4w"></h2>
+              <div class="meta-desc" id="dDesc" data-page-node-id="iGQP0mClQI8FqUTjx62dkj"></div>
             </div>
-            <button class="ghost sm" id="renameBtn">重命名</button>
+            <button class="ghost sm" id="renameBtn" data-page-node-id="xZ3TTSueIfzRC6C6xXnj5j">重命名</button>
           </div>
-          <div class="meta-grid">
-            <div class="meta-item"><div class="k">Network ID</div><div class="v" id="dId"></div></div>
-            <div class="meta-item"><div class="k">Created</div><div class="v" id="dCreated"></div></div>
-            <div class="meta-item"><div class="k">Access Token</div>
-              <div class="tok">
-                <code id="tok-val" class="tok-val" data-token="">••••••••••••••••</code>
-                <button class="ghost sm" id="tokEye">显示</button>
-                <button class="ghost sm hidden" id="tokCopy">复制</button>
+          <div class="meta-grid" data-page-node-id="S3x1C6Wqj2hXGzCmr5Co0H">
+            <div class="meta-item" data-page-node-id="jU2Yd2hl1VA7gBHPMkAGNW"><div class="k" data-page-node-id="rlD9mzzCztiBFYBUoQplBn">Network ID</div><div class="v" id="dId" data-page-node-id="JALAzhUNoG7riCjtJDB7Bu"></div></div>
+            <div class="meta-item" data-page-node-id="M80dl86ORGYdIRiPfI4xYF"><div class="k" data-page-node-id="h9d2H8LSGWDh2HoYJXT231">Created</div><div class="v" id="dCreated" data-page-node-id="kRqgd8wbrI6QQJ07uGUXOo"></div></div>
+            <div class="meta-item" data-page-node-id="OEL84lFHgFGhAgdgRjnDSw"><div class="k" data-page-node-id="e1TbVPWHfanwZnFnuyxTOG">Access Token</div>
+              <div class="tok" data-page-node-id="Tcs8fc45BIOpA2HG1baJsK">
+                <code id="tok-val" class="tok-val" data-token="" data-page-node-id="YCflLAsqOAvcCyopPodFzx">••••••••••••••••</code>
+                <button class="ghost sm" id="tokEye" data-page-node-id="FTMlMQJy9qjonKcll8qKkw">显示</button>
+                <button class="ghost sm hidden" id="tokCopy" data-page-node-id="0bGikQCz9IblD9IFurOXfq">复制</button>
               </div>
             </div>
           </div>
         </div>
 
-        <div class="panel">
-          <div class="panel-title">NODES <span class="n" id="nodeCount"></span></div>
-          <div id="devList" class="empty">加载中…</div>
+        <div class="panel" data-page-node-id="Gqhx4PqSYGhUB7PR06WhPP">
+          <div class="panel-title" data-page-node-id="0vnQl00hkRv8bKf7bC8EOz">NODES <span class="n" id="nodeCount" data-page-node-id="5bzgAKypvZHzFevhNiD49H"></span></div>
+          <div id="devList" class="empty" data-page-node-id="Bjd5qisVuowL0txfxNXv8S">加载中…</div>
         </div>
 
-        <div class="panel">
-          <div class="panel-title">BLOCKED <span class="n" id="removedCount"></span></div>
-          <div class="hint" style="margin:0 0 10px">已移除设备被永久拒绝入网；「恢复」后可重新配对。</div>
-          <div id="removedList" class="empty">加载中…</div>
+        <div class="panel" data-page-node-id="wYFNJUVZdFzaePR3YdoX8H">
+          <div class="panel-title" data-page-node-id="uifHR010xo7gn0A06J2LD5">BLOCKED <span class="n" id="removedCount" data-page-node-id="PjHUuEJY86Ujzuo0nEJJZb"></span></div>
+          <div class="hint" style="margin:0 0 10px" data-page-node-id="ElFp7BG2KubqkDFt7kjx41">已移除设备被永久拒绝入网；「恢复」后可重新配对。</div>
+          <div id="removedList" class="empty" data-page-node-id="AVC4AlGV4cmPTHAoiauB9d">加载中…</div>
         </div>
       </section>
 
     </div>
   </div>
 
-  <div id="toast" class="toast"></div>
+  <div id="toast" class="toast" data-page-node-id="rB0dj1obCcEBxxhIkpzdbO"></div>
 
 <script>
 const $ = (s)=>document.querySelector(s);
@@ -609,11 +611,19 @@ function fmtSize(n){
   return (n/1048576).toFixed(1)+'MB';
 }
 
+async function sha256Hex(file){
+  if(!(globalThis.crypto&&crypto.subtle)) throw new Error('当前环境不支持 Web Crypto（需 https 或 localhost）');
+  const dig=await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+  return [...new Uint8Array(dig)].map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+
 async function loadUpdateInfo(){
   const box=$('#updInfo');
   try{
     const r=await api('/api/admin/update');
     $('#updVer').textContent='['+r.version+']';
+    const verEl=$('#updVersion');
+    if(!verEl.value) verEl.value=r.version; // 预填线上版本：补传平台时无需改号
     const plats=Object.entries(r.platforms||{}).map(([p,v])=>
       `${esc(p)}：${v.uploaded?`已上传(${fmtSize(v.size)})`:'<span style="color:var(--amber)">缺文件</span>'}`
     ).join('　·　');
@@ -621,7 +631,7 @@ async function loadUpdateInfo(){
       (plats?`<br>${plats}`:'')+(r.notes?`<br>${esc(r.notes)}`:'');
   }catch(e){
     $('#updVer').textContent='';
-    box.innerHTML='尚未发布更新。用下方表单上传 latest.json + 安装包。';
+    box.innerHTML='尚未发布更新。填版本号 + 选安装包即可发布。';
   }
 }
 
@@ -635,32 +645,108 @@ function updAddRow(){
     </div>
     <div class="fld" style="min-width:240px"><label>安装包文件</label><input type="file" class="upd-file"/></div>
     <button class="ghost sm upd-del" type="button">移除</button>`;
-  row.querySelector('.upd-del').onclick=()=>row.remove();
+  row.querySelector('.upd-del').onclick=()=>{ row.remove(); syncVersionFromFiles(); };
   $('#updFiles').appendChild(row);
 }
 $('#updAddFile').onclick=updAddRow;
 
+// 从安装包文件名提取版本号。Tauri 产物命名恒为 `<Product>_<version>_<arch>[-setup].<ext>`
+// （如 ClipSync_0.1.0_aarch64.dmg / ClipSync_0.1.0_x64-setup.exe），semver 正则足够可靠；
+// 架构段形如 x64/aarch64/amd64 不含点结构，不会被误匹配。
+function versionFromFile(name){
+  const m=String(name).match(/(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)/);
+  return m?m[1]:'';
+}
+
+// 任一安装包文件名变化时重算版本号来源提示；多份版本冲突时报警但不擅自决定。
+function syncVersionFromFiles(){
+  const src=$('#updVerSrc');
+  const rows=[...document.querySelectorAll('#updFiles .form-row')]
+    .filter(r=>r.querySelector('.upd-file')&&r.querySelector('.upd-file').files.length);
+  if(!rows.length){ src.textContent=''; return; }
+  const names=rows.map(r=>r.querySelector('.upd-file').files[0].name);
+  const msgs=[];
+
+  const vers=[...new Set(names.map(versionFromFile))].filter(Boolean);
+  if(!vers.length){
+    msgs.push('⚠ 文件名里没有形如 0.1.0 的版本号，请手动填写（推荐用 Tauri 默认产物名：ClipSync_<版本>_<架构>.<ext>）');
+  }else if(vers.length>1){
+    msgs.push('⚠ 各安装包文件名中的版本号不一致：'+vers.join(' / ')+'，请手动确认');
+  }else{
+    $('#updVersion').value=vers[0];
+    msgs.push('版本号 '+vers[0]+' ← 提取自安装包文件名');
+  }
+
+  const miss=names.filter(n=>!platformFromFile(n));
+  if(miss.length) msgs.push('平台架构未能自动识别，请手选：'+miss.join('、'));
+
+  src.textContent=msgs.join('；');
+}
+// 同一次上传顺带推断平台键：扩展名定系统、文件名里的架构段定 CPU。
+// Tauri 产物自带架构段（x64 / x86_64 / amd64 / aarch64 / arm64），够可靠；
+// 任一维推断不出（如手打的 ClipSync.dmg 没有架构段）就返回空，留给人工选。
+const UPD_OS_RULES=[[/\.(exe|msi)$/i,'windows'],[/\.(dmg|pkg|app)(\.tar\.gz)?$|\.tar\.gz$/i,'darwin'],[/\.(appimage|deb|rpm)$/i,'linux']];
+const UPD_ARCH_RULES=[[/(?:x64|x86_64|amd64)/i,'x86_64'],[/(?:aarch64|arm64)/i,'aarch64']];
+function platformFromFile(name){
+  const n=String(name);
+  const os=UPD_OS_RULES.find(([re])=>re.test(n))?.[1];
+  // 架构段常见后缀...-setup/_<arch>.<ext>：先剥掉扩展名再找，避免 .tar.gz 干扰
+  let arch='';
+  for(const [re,val] of UPD_ARCH_RULES){ if(re.test(n)){ arch=val; break; } }
+  return (os&&arch)?`${os}-${arch}`:'';
+}
+
+$('#updFiles').addEventListener('change', e=>{
+  if(!e.target.classList.contains('upd-file')) return;
+  const f=e.target.files[0];
+  if(f){
+    const p=platformFromFile(f.name);
+    if(p) e.target.closest('.form-row').querySelector('.upd-platform').value=p;
+  }
+  syncVersionFromFiles();
+});
+
 $('#updSubmit').onclick=async()=>{
-  const manifestEl=$('#updManifest');
-  if(!manifestEl.files.length){ toast('请选择 latest.json'); return; }
+  const version=$('#updVersion').value.trim();
+  if(!version){ toast('请填写版本号'); return; }
   const rows=[...document.querySelectorAll('#updFiles .form-row')].filter(r=>r.querySelector('.upd-file').files.length);
   if(!rows.length){ toast('请至少添加一个平台安装包'); return; }
-  const fd=new FormData();
-  fd.append('manifest', manifestEl.files[0]);
-  for(const r of rows){
-    fd.append('platform', r.querySelector('.upd-platform').value);
-    fd.append('filename', r.querySelector('.upd-file').files[0].name);
-    fd.append('file', r.querySelector('.upd-file').files[0]);
-  }
   $('#updSubmit').disabled=true;
   try{
+    // 清单不再让用户手选：按所选安装包现场生成（含 sha256），
+    // 服务端只负责按平台键合并，故此处只带本次涉及的平台。
+    const platforms={};
+    const picked=[];
+    for(const r of rows){
+      const p=r.querySelector('.upd-platform').value;
+      const f=r.querySelector('.upd-file').files[0];
+      let hash;
+      try{ hash=await sha256Hex(f); }
+      catch(e){ toast(p+' 的 sha256 计算失败：'+e.message); return; }
+      platforms[p]={url:f.name, sha256:hash};
+      picked.push([p,f]);
+    }
+    const manifest={
+      version,
+      notes:$('#updNotes').value.trim(),
+      pub_date:new Date().toISOString(),
+      platforms,
+    };
+    const fd=new FormData();
+    for(const [p,f] of picked){
+      fd.append('platform', p);
+      fd.append('filename', f.name);
+      fd.append('file', f);
+    }
+    fd.append('manifest', new Blob([JSON.stringify(manifest)],{type:'application/json'}), 'latest.json');
     // multipart：不能用 api()（其默认 Content-Type: json），只带 Authorization
     const res=await fetch('/api/admin/update',{method:'POST',headers:{'Authorization':'Bearer '+token},body:fd});
     const d=await res.json().catch(()=>({}));
     if(!res.ok){ toast('发布失败: '+(d.error||('HTTP '+res.status))); return; }
-    toast('已发布 v'+d.version);
-    manifestEl.value='';
+    toast(`已发布 v${d.version}（${picked.length} 个平台）`+(d.merged?'，已与线上清单合并':''));
+    $('#updNotes').value='';
     $('#updFiles').innerHTML='';
+    syncVersionFromFiles();
     loadUpdateInfo();
   }catch(e){ toast('发布失败: '+e.message); }
   finally{ $('#updSubmit').disabled=false; }
