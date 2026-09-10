@@ -423,8 +423,10 @@ impl ConnectionHub {
         max: usize,
         label: &str,
     ) {
-        let mut m = map.lock().unwrap();
-        let mut o = order.lock().unwrap();
+        // 锁中毒（持锁线程 panic 过）时取回守卫继续用，而不是跟着 panic：
+        // 这里登记的都是内存态，数据本身不会因中毒而损坏，整条链路中断反而更糟。
+        let mut m = map.lock().unwrap_or_else(|e| e.into_inner());
+        let mut o = order.lock().unwrap_or_else(|e| e.into_inner());
         o.push_back(key.to_string());
         while o.len() > max {
             let Some(oldest) = o.pop_front() else { break };
@@ -447,8 +449,8 @@ impl ConnectionHub {
         order: &Mutex<VecDeque<String>>,
         key: &str,
     ) {
-        map.lock().unwrap().remove(key);
-        order.lock().unwrap().retain(|k| k != key);
+        map.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
+        order.lock().unwrap_or_else(|e| e.into_inner()).retain(|k| k != key);
     }
 
     /// 本地拷贝了文件/目录：生成传输 ID，展开为文件清单，向所有已连接对端广播「可拉取」。
@@ -675,14 +677,16 @@ impl ConnectionHub {
                         // 已经漂移的内容（否则对端拿到的是与元数据不匹配的文件）。
                         if let Ok(md) = std::fs::metadata(path) {
                             if let Some(e) = expect {
+                                // 取不到修改时间（极罕见）时**跳过** mtime 这项校验：
+                                // 不能因为读不到 mtime（此时若兜底成 0）就把文件误判成
+                                // 「已被修改」而拒发——宁可放行，也不误伤正常文件。
                                 let mtime = md
                                     .modified()
                                     .ok()
                                     .and_then(|t| {
                                         t.duration_since(std::time::UNIX_EPOCH).ok()
                                     })
-                                    .map(|d| d.as_secs())
-                                    .unwrap_or(0);
+                                    .map(|d| d.as_secs());
                                 if md.len() != e.file_size {
                                     failed.push((
                                         idx,
@@ -694,12 +698,14 @@ impl ConnectionHub {
                                     ));
                                     continue;
                                 }
-                                if e.modified_at > 0 && mtime != e.modified_at {
-                                    failed.push((
-                                        idx,
-                                        "文件在复制后被修改，已拒绝发送".to_string(),
-                                    ));
-                                    continue;
+                                if let Some(mtime) = mtime {
+                                    if e.modified_at > 0 && mtime != e.modified_at {
+                                        failed.push((
+                                            idx,
+                                            "文件在复制后被修改，已拒绝发送".to_string(),
+                                        ));
+                                        continue;
+                                    }
                                 }
                             }
                         } else {
