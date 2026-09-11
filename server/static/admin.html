@@ -603,6 +603,8 @@ $('#createNet').onclick=async()=>{
 
 /* ================= 客户端更新托管 ================= */
 const UPD_PLATFORMS=['windows-x86_64','windows-aarch64','darwin-x86_64','darwin-aarch64','linux-x86_64','linux-aarch64'];
+// 线上已发布的平台键，用于「架构推不出时」的兜底（见 applyPlatformHints）
+let latestPlatformKeys=[];
 
 function fmtSize(n){
   if(n===null||n===undefined) return '?';
@@ -622,6 +624,7 @@ async function loadUpdateInfo(){
   try{
     const r=await api('/api/admin/update');
     $('#updVer').textContent='['+r.version+']';
+    latestPlatformKeys=Object.keys(r.platforms||{});
     const verEl=$('#updVersion');
     if(!verEl.value) verEl.value=r.version; // 预填线上版本：补传平台时无需改号
     const plats=Object.entries(r.platforms||{}).map(([p,v])=>
@@ -631,8 +634,10 @@ async function loadUpdateInfo(){
       (plats?`<br>${plats}`:'')+(r.notes?`<br>${esc(r.notes)}`:'');
   }catch(e){
     $('#updVer').textContent='';
+    latestPlatformKeys=[];
     box.innerHTML='尚未发布更新。填版本号 + 选安装包即可发布。';
   }
+  refreshUpdateHints(); // 线上平台键拿到后，可给已选文件补一次架构兜底
 }
 
 function updAddRow(){
@@ -641,11 +646,11 @@ function updAddRow(){
   row.style.marginBottom='8px';
   row.innerHTML=`
     <div class="fld" style="min-width:190px"><label>平台</label>
-      <select class="upd-platform">${UPD_PLATFORMS.map(p=>`<option>${p}</option>`).join('')}</select>
+      <select class="upd-platform"><option value="">请选择平台</option>${UPD_PLATFORMS.map(p=>`<option value="${p}">${p}</option>`).join('')}</select>
     </div>
     <div class="fld" style="min-width:240px"><label>安装包文件</label><input type="file" class="upd-file"/></div>
     <button class="ghost sm upd-del" type="button">移除</button>`;
-  row.querySelector('.upd-del').onclick=()=>{ row.remove(); syncVersionFromFiles(); };
+  row.querySelector('.upd-del').onclick=()=>{ row.remove(); refreshUpdateHints(); };
   $('#updFiles').appendChild(row);
 }
 $('#updAddFile').onclick=updAddRow;
@@ -658,16 +663,63 @@ function versionFromFile(name){
   return m?m[1]:'';
 }
 
-// 任一安装包文件名变化时重算版本号来源提示；多份版本冲突时报警但不擅自决定。
-function syncVersionFromFiles(){
+// 把「平台键列表」按系统分组统计架构：同系统内架构唯一才敢复用，多于一个说明
+// 存在交叉编译/多架构产物，宁可让用户手选也不猜。
+function archCandidates(keys){
+  const m={};
+  for(const k of keys){
+    const i=k.indexOf('-'); if(i<0) continue;
+    const os=k.slice(0,i), arch=k.slice(i+1);
+    if(os&&arch) (m[os]=m[os]||new Set()).add(arch);
+  }
+  return m;
+}
+const soleArch=(set)=>(set&&set.size===1)?[...set][0]:'';
+
+// 逐行补齐平台键，返回提示文案。行状态记在 select.dataset.state 上：
+//   'auto'   页面推断所得，下一轮可被重新推断覆盖或清空
+//   'manual' 用户手选，除非该行换了文件，否则一律尊重
+// 推不出架构（含两级兜底都失败）→ 该行回到「请选择平台」，不留上一轮的残值。
+function applyPlatformHints(rows){
+  const fileArch=archCandidates(rows.map(it=>platformFromFile(it.name)).filter(Boolean));
+  const onlineArch=archCandidates(latestPlatformKeys);
+  const matched=[], missed=[], manual=[];
+  for(const it of rows){
+    const sel=it.row.querySelector('.upd-platform');
+    if(sel.dataset.state==='manual'&&sel.value){ manual.push(`${it.name} → ${sel.value}`); continue; }
+    const p=platformParts(it.name);
+    let arch=p.arch, from='';
+    if(p.os&&!arch){
+      const b=soleArch(fileArch[p.os]), o=soleArch(onlineArch[p.os]);
+      if(b){ arch=b; from='同批产物'; }
+      else if(o){ arch=o; from='线上已有平台'; }
+    }
+    if(p.os&&arch){
+      const key=`${p.os}-${arch}`;
+      sel.value=key; sel.dataset.state='auto';
+      matched.push(from?`${it.name} → ${key}（架构取自${from}）`:`${it.name} → ${key}`);
+    }else{
+      sel.value=''; delete sel.dataset.state; // 退回「请选择平台」
+      missed.push(it.name);
+    }
+  }
+  let s='';
+  if(matched.length) s+='平台已自动匹配：'+matched.join('、');
+  if(manual.length) s+=(s?'；':'')+'平台沿用你的选择：'+manual.join('、');
+  if(missed.length) s+=(s?'；':'')+'平台架构无法自动识别，请手选：'+missed.join('、');
+  return s;
+}
+
+// 版本号 + 平台键的统一提示入口；版本冲突/缺失时报警但不擅自决定。
+function refreshUpdateHints(){
   const src=$('#updVerSrc');
   const rows=[...document.querySelectorAll('#updFiles .form-row')]
-    .filter(r=>r.querySelector('.upd-file')&&r.querySelector('.upd-file').files.length);
+    .filter(r=>r.querySelector('.upd-file')&&r.querySelector('.upd-file').files.length)
+    .map(r=>({row:r, name:r.querySelector('.upd-file').files[0].name}));
   if(!rows.length){ src.textContent=''; return; }
-  const names=rows.map(r=>r.querySelector('.upd-file').files[0].name);
   const msgs=[];
 
-  const vers=[...new Set(names.map(versionFromFile))].filter(Boolean);
+  const vers=[...new Set(rows.map(it=>versionFromFile(it.name)))].filter(Boolean);
   if(!vers.length){
     msgs.push('⚠ 文件名里没有形如 0.1.0 的版本号，请手动填写（推荐用 Tauri 默认产物名：ClipSync_<版本>_<架构>.<ext>）');
   }else if(vers.length>1){
@@ -677,33 +729,43 @@ function syncVersionFromFiles(){
     msgs.push('版本号 '+vers[0]+' ← 提取自安装包文件名');
   }
 
-  const miss=names.filter(n=>!platformFromFile(n));
-  if(miss.length) msgs.push('平台架构未能自动识别，请手选：'+miss.join('、'));
-
+  const p=applyPlatformHints(rows);
+  if(p) msgs.push(p);
   src.textContent=msgs.join('；');
 }
 // 同一次上传顺带推断平台键：扩展名定系统、文件名里的架构段定 CPU。
-// Tauri 产物自带架构段（x64 / x86_64 / amd64 / aarch64 / arm64），够可靠；
-// 任一维推断不出（如手打的 ClipSync.dmg 没有架构段）就返回空，留给人工选。
+// Tauri 的 dmg/nsis/AppImage 产物名自带架构段（x64 / x86_64 / amd64 / aarch64 / arm64）；
+// 但 macOS 的 .app bundle 名叫 `ClipSync.app`（含压成 .app.tar.gz 的），
+// 既无版本也无架构——架构只存在于包体（`lipo -archs`），浏览器拿到文件也解不开。
+// 故这类名字只能推出系统、推不出 CPU，靠下面两条兜底（同批产物 / 线上已有平台键）。
 const UPD_OS_RULES=[[/\.(exe|msi)$/i,'windows'],[/\.(dmg|pkg|app)(\.tar\.gz)?$|\.tar\.gz$/i,'darwin'],[/\.(appimage|deb|rpm)$/i,'linux']];
 const UPD_ARCH_RULES=[[/(?:x64|x86_64|amd64)/i,'x86_64'],[/(?:aarch64|arm64)/i,'aarch64']];
-function platformFromFile(name){
+function platformParts(name){
   const n=String(name);
-  const os=UPD_OS_RULES.find(([re])=>re.test(n))?.[1];
-  // 架构段常见后缀...-setup/_<arch>.<ext>：先剥掉扩展名再找，避免 .tar.gz 干扰
-  let arch='';
-  for(const [re,val] of UPD_ARCH_RULES){ if(re.test(n)){ arch=val; break; } }
+  return {
+    os:(UPD_OS_RULES.find(([re])=>re.test(n))||[])[1]||'',
+    arch:(UPD_ARCH_RULES.find(([re])=>re.test(n))||[])[1]||'',
+  };
+}
+function platformFromFile(name){
+  const {os,arch}=platformParts(name);
   return (os&&arch)?`${os}-${arch}`:'';
 }
 
 $('#updFiles').addEventListener('change', e=>{
-  if(!e.target.classList.contains('upd-file')) return;
-  const f=e.target.files[0];
-  if(f){
-    const p=platformFromFile(f.name);
-    if(p) e.target.closest('.form-row').querySelector('.upd-platform').value=p;
+  const t=e.target;
+  // 用户手选平台 → 标记 manual，之后的自动推断不再动它
+  if(t.classList.contains('upd-platform')){ t.dataset.state='manual'; return; }
+  if(!t.classList.contains('upd-file')) return;
+  // 换了文件 = 重新分析：清掉该行的 auto/manual 状态，
+  // 这样上一轮自动填入或手选的架构都会按新文件重算（推不出就退回「请选择平台」）
+  const row=t.closest('.form-row');
+  const sel=row&&row.querySelector('.upd-platform');
+  if(sel){
+    delete sel.dataset.state;
+    if(!t.files.length) sel.value=''; // 清空文件 → 平台也退回「请选择平台」
   }
-  syncVersionFromFiles();
+  refreshUpdateHints();
 });
 
 $('#updSubmit').onclick=async()=>{
@@ -720,6 +782,8 @@ $('#updSubmit').onclick=async()=>{
     for(const r of rows){
       const p=r.querySelector('.upd-platform').value;
       const f=r.querySelector('.upd-file').files[0];
+      if(!p){ toast('请为「'+f.name+'」选择平台（未能自动识别）'); return; }
+      if(platforms[p]){ toast('平台 '+p+' 被多个安装包重复选中，请检查'); return; }
       let hash;
       try{ hash=await sha256Hex(f); }
       catch(e){ toast(p+' 的 sha256 计算失败：'+e.message); return; }
@@ -746,7 +810,7 @@ $('#updSubmit').onclick=async()=>{
     toast(`已发布 v${d.version}（${picked.length} 个平台）`+(d.merged?'，已与线上清单合并':''));
     $('#updNotes').value='';
     $('#updFiles').innerHTML='';
-    syncVersionFromFiles();
+    refreshUpdateHints();
     loadUpdateInfo();
   }catch(e){ toast('发布失败: '+e.message); }
   finally{ $('#updSubmit').disabled=false; }
