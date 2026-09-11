@@ -174,7 +174,7 @@
 
 - 新增一个"客户端更新"区域：
   - 顶部 `GET /api/admin/update` 拉当前线上版本并展示（版本号 / 发布时间 / 各平台是否已上传）。
-  - 一个 multipart 表单：**不需要用户手选 `latest.json`，也不需要手填版本号**——版本号由页面按 semver 正则从安装包文件名自动提取（Tauri 产物恒为 `<Product>_<版本>_<架构>[-setup].<ext>`，如 `ClipSync_0.1.0_aarch64.dmg`；架构段无点结构不会误匹配；提不到或各包不一致时提示人工确认，仍可手工覆盖）+ 更新说明（留空=不改动）+ 多平台安装包文件选择——**平台键也自动识别**（扩展名定系统：exe/msi→windows、dmg/pkg/app(+.tar.gz)→darwin、appimage/deb/rpm→linux；文件名里的 `x64|x86_64|amd64`→x86_64、`aarch64|arm64`→aarch64；任一维识别不出就在提示行点名该文件，留人工选）；提交时页面用 Web Crypto 逐个算安装包 sha256 并**自动生成 manifest**（以 Blob 随 `manifest` 字段提交）到 `POST /api/admin/update`。服务端按平台键合并，故一次不必传齐所有平台。
+  - 一个 multipart 表单：**不需要用户手选 `latest.json`，也不需要手填版本号**——版本号由页面按 semver 正则从安装包文件名自动提取（Tauri 产物恒为 `<Product>_<版本>_<架构>[-setup].<ext>`，如 `ClipSync_0.1.0_aarch64.dmg`；架构段无点结构不会误匹配；提不到或各包不一致时提示人工确认，仍可手工覆盖）+ 更新说明（留空=不改动）+ 多平台安装包文件选择——**平台键也自动识别**（扩展名定系统：exe/msi→windows、dmg/pkg/app(+.tar.gz)→darwin、appimage/deb/rpm→linux；文件名里的 `x64|x86_64|amd64`→x86_64、`aarch64|arm64`→aarch64；任一维识别不出就在提示行点名该文件，留人工选）；架构的三级兜底顺序 = **文件名架构段 → 同批其它产物（同系统内唯一）→ 线上已有同系统平台键（唯一才用）**，都取不到则该行下拉保持「请选择平台」并在提交时报错，不会静默落到列表第一项；同一平台被多行重复选中也会拦下。行状态机：**换了文件即重新分析**（上一轮的自动值/手选值都会按新文件重算，推不出就退回「请选择平台」），而用户手选的值在未换文件时一律尊重、不被其它行的变化冲掉；提交时页面用 Web Crypto 逐个算安装包 sha256 并**自动生成 manifest**（以 Blob 随 `manifest` 字段提交）到 `POST /api/admin/update`。服务端按平台键合并，故一次不必传齐所有平台。
 - 实现方式二选一（实现时定）：
   - (a) 在现有内嵌 admin HTML 里加一段 section；
   - (b) 新增内嵌页 `admin_update.html` + 路由 `GET /admin/update` 单独展示。

@@ -70,19 +70,28 @@ npm run tauri build -- --bundles app
 
 ```
 /Volumes/ssd/DMZ/Work/DmzClipSync/client/src-tauri/target/release/bundle/macos/
-├── ClipSync.app   # 正式签名客户端（双击/拖到 Applications 即可运行）
-└── ClipSync.dmg   # 已签名磁盘镜像（4.54 MB，可直接分发）
+├── ClipSync.app                 # 正式签名客户端（双击/拖到 Applications 即可运行）
+└── ClipSync_0.1.0_aarch64.dmg   # 已签名磁盘镜像（可直接分发；版本/架构按下方规范命名）
 ```
 
 > **签名钥匙串注意**：自签名证书 `ClipSync Dev` 同时存在于 `login.keychain-db` 与密码已遗失的 `build.keychain-db`。打包前必须把钥匙串搜索顺序调成 `login` 置首，否则 codesign 会卡在未知密码的 `build` 钥匙串（报 `errSecInternalComponent`）：
 > ```bash
 > security list-keychains -s ~/Library/Keychains/login.keychain-db ~/.clipsync/build.keychain-db /Library/Keychains/System.keychain
 > ```
-> `bundle_dmg.sh` 末段 `osascript` 在本机会被系统拦截（`-10004`），请改用：
+> `bundle_dmg.sh` 末段 `osascript` 在本机会被系统拦截（`-10004`），请改用下面的手工命令。
+>
+> **dmg 命名务必带版本与架构**（与 Tauri 官方产物一致，如 `ClipSync_0.1.0_aarch64.dmg`）。
+> 管理后台上传时会从文件名自动识别版本号与平台架构，缺了这两段就只能手填：
 > ```bash
-> hdiutil create -volname ClipSync -srcfolder ClipSync.app -ov -format UDZO ClipSync.dmg
-> codesign --sign "ClipSync Dev" ClipSync.dmg
+> # 在仓库根执行
+> V=$(node -pe "require('./client/src-tauri/tauri.conf.json').version")
+> A=$(uname -m); [ "$A" = "arm64" ] && A=aarch64   # arm64→aarch64；x86_64 原样保留
+> cd client/src-tauri/target/release/bundle/macos
+> hdiutil create -volname ClipSync -srcfolder ClipSync.app -ov -format UDZO "ClipSync_${V}_${A}.dmg"
+> codesign --sign "ClipSync Dev" "ClipSync_${V}_${A}.dmg"
 > ```
+> 注：macOS 的 `.app` 目录名固定为 `ClipSync.app`（不含版本/架构，架构只在包体 `lipo -archs` 里），
+> 浏览器端无法解析，故分发请给 dmg 用上面的规范命名。
 
 安装方式见下方「下载安装 → macOS」。
 
