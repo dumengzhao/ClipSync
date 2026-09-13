@@ -96,6 +96,16 @@ export async function pullFiles(transferId: string): Promise<void> {
   return invoke<void>('pull_files', { transferId });
 }
 
+/** 取消本端发起的 P2P 拉取：立即终止落盘任务并通知发送方停止发分片 */
+export async function cancelPull(transferId: string): Promise<void> {
+  return invoke<void>('cancel_pull', { transferId });
+}
+
+/** 取消跨 LAN 拉取：下载循环在下一个分片边界中止 */
+export async function cancelPullCrossLan(pullId: string): Promise<void> {
+  return invoke<void>('cancel_pull_cross_lan', { pullId });
+}
+
 /** 查询当前待拉取清单（挂载时回填，兜底事件丢失） */
 export async function listPendingOffers(): Promise<PendingOffer[]> {
   return invoke<PendingOffer[]>('list_pending_offers');

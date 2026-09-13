@@ -27,6 +27,38 @@ import SettingsPage from './SettingsPage';
 import TitleBar from './TitleBar';
 import { applyTheme } from './theme';
 
+/** 通用确认弹窗：title 为标题，body 为说明文字，confirm 为确认按钮文案 */
+function ConfirmModal({
+  title,
+  body,
+  confirm,
+  onConfirm,
+  onCancel,
+}: {
+  title: string;
+  body: string;
+  confirm: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="modal-overlay" onClick={onCancel}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <h3 className="modal-title">{title}</h3>
+        <p className="modal-body">{body}</p>
+        <div className="modal-actions">
+          <button className="btn btn-ghost" onClick={onCancel}>
+            取消
+          </button>
+          <button className="btn btn-danger" onClick={onConfirm}>
+            {confirm}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /**
  * 主窗口。设置视图在主窗口内嵌显示（dev 模式下 Tauri 额外窗口加载前端不可靠，
  * 会白屏；主窗口自身渲染稳定），因此 dev 下点「打开设置」或托盘「设置」都切换到
@@ -42,6 +74,8 @@ export default function App() {
   // 局域网发现设备配对时输入的对方配对码
   const [pairingTarget, setPairingTarget] = useState<DiscoveredPeer | null>(null);
   const [pairInput, setPairInput] = useState('');
+  // 取消配对确认弹窗的目标设备（非 null 时显示确认框）
+  const [unpairTarget, setUnpairTarget] = useState<PairedDeviceInfo | null>(null);
   // 「待拉取」文件清单（对端拷贝后广播过来，本端显示，用户点「拉取」才下载）
   const [pendingOffers, setPendingOffers] = useState<PendingOffer[]>([]);
   // 正在拉取中的传输 ID 集合（拉取中禁用按钮、显示「拉取中…」）
@@ -370,7 +404,14 @@ export default function App() {
     };
   }, []);
 
-  const removePairing = async (p: PairedDeviceInfo) => {
+  // 点击「取消配对」：先弹确认框（removePairing 现在只是打开弹窗），
+  // 用户在弹窗里点「取消配对」才真正执行解配（confirmUnpair）。
+  const removePairing = (p: PairedDeviceInfo) => {
+    setUnpairTarget(p);
+  };
+
+  const confirmUnpair = async (p: PairedDeviceInfo) => {
+    setUnpairTarget(null);
     try {
       await unpair(p.id);
       flash(`已取消与「${p.name}」的配对`);
@@ -566,72 +607,21 @@ export default function App() {
                 <p className="hint">局域网内未发现其它 ClipSync 设备</p>
               ) : (
                 <ul className="peer-list">
-                  {discoveredOnly.map((p) => {
-                    const isPairing = pairingTarget?.device_id === p.device_id;
-                    return (
-                      <li
-                        key={p.device_id}
-                        className="peer-item peer-item-action"
-                        style={{
-                          flexDirection: isPairing ? 'column' : 'row',
-                          alignItems: isPairing ? 'stretch' : 'center',
+                  {discoveredOnly.map((p) => (
+                    <li key={p.device_id} className="peer-item peer-item-action">
+                      <span className="peer-name">{p.device_name}</span>
+                      <span className="peer-addr">{p.addr}:{p.port}</span>
+                      <button
+                        className="btn btn-sm"
+                        onClick={() => {
+                          setPairingTarget(p);
+                          setPairInput('');
                         }}
                       >
-                        <span className="peer-name">{p.device_name}</span>
-                        <span className="peer-addr">{p.addr}:{p.port}</span>
-                        {isPairing ? (
-                          <div
-                            style={{
-                              display: 'flex',
-                              flexWrap: 'wrap',
-                              gap: '0.5rem',
-                              marginTop: '0.4rem',
-                              width: '100%',
-                            }}
-                          >
-                            <input
-                              className="pair-input"
-                              autoFocus
-                              placeholder="输入对方显示的配对码"
-                              value={pairInput}
-                              onChange={(e) => setPairInput(e.target.value)}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter') startPair(p, pairInput);
-                              }}
-                              style={{ flex: '1 1 100%', minWidth: 0 }}
-                            />
-                            <button
-                              className="btn btn-sm"
-                              style={{ flex: 1 }}
-                              onClick={() => startPair(p, pairInput)}
-                            >
-                              确认
-                            </button>
-                            <button
-                              className="btn btn-sm btn-ghost"
-                              style={{ flex: 1 }}
-                              onClick={() => {
-                                setPairingTarget(null);
-                                setPairInput('');
-                              }}
-                            >
-                              取消
-                            </button>
-                          </div>
-                        ) : (
-                          <button
-                            className="btn btn-sm"
-                            onClick={() => {
-                              setPairingTarget(p);
-                              setPairInput('');
-                            }}
-                          >
-                            配对
-                          </button>
-                        )}
-                      </li>
-                    );
-                  })}
+                        配对
+                      </button>
+                    </li>
+                  ))}
                 </ul>
               )}
             </section>
@@ -808,6 +798,68 @@ export default function App() {
           </span>
         </div>
       </div>
+      {/* 配对弹窗：输入对方显示的配对码，确认或取消 */}
+      {pairingTarget && (
+        <div
+          className="modal-overlay"
+          onClick={() => {
+            setPairingTarget(null);
+            setPairInput('');
+          }}
+        >
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3 className="modal-title">与「{pairingTarget.device_name}」配对</h3>
+            <p className="modal-body">
+              请输入对方界面上显示的配对码。双方配对码各自独立，仅本次握手需一致。
+            </p>
+            <input
+              className="pair-input"
+              autoFocus
+              placeholder="输入对方显示的配对码"
+              value={pairInput}
+              onChange={(e) => setPairInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  const p = pairingTarget;
+                  setPairingTarget(null);
+                  startPair(p, pairInput);
+                }
+              }}
+            />
+            <div className="modal-actions">
+              <button
+                className="btn btn-ghost"
+                onClick={() => {
+                  setPairingTarget(null);
+                  setPairInput('');
+                }}
+              >
+                取消
+              </button>
+              <button
+                className="btn"
+                onClick={() => {
+                  const p = pairingTarget;
+                  setPairingTarget(null);
+                  startPair(p, pairInput);
+                }}
+              >
+                确认
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* 取消配对确认弹窗 */}
+      {unpairTarget && (
+        <ConfirmModal
+          title="取消配对"
+          body={`确定要取消与「${unpairTarget.name}」的配对吗？取消后双方将停止同步，需重新配对才能恢复。`}
+          confirm="取消配对"
+          onConfirm={() => confirmUnpair(unpairTarget)}
+          onCancel={() => setUnpairTarget(null)}
+        />
+      )}
       </>
       )}
     </div>

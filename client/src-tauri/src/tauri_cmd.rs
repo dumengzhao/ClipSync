@@ -311,6 +311,12 @@ pub fn pull_files(state: State<AppState>, transfer_id: String) {
     });
 }
 
+/// 取消本端发起的 P2P 拉取：立即终止落盘任务并通知发送方停止发分片。
+#[tauri::command]
+pub fn cancel_pull(state: State<AppState>, transfer_id: String) {
+    state.hub.cancel_pull(&transfer_id);
+}
+
 /// 返回当前接收到的「待拉取」文件清单（前端挂载时主动拉取一次，兜底事件丢失）。
 #[tauri::command]
 pub fn list_pending_offers(state: State<AppState>) -> Vec<serde_json::Value> {
@@ -613,6 +619,15 @@ pub async fn pull_cross_lan(
         .pull_cross_lan(&pull_id, &from, &ext_file_ep, manifest)
         .await
         .map_err(|e| e.to_string());
+    // 用户主动取消：以专属事件收口（带 cancelled 标记），不走失败补发，
+    // 避免前端把「用户取消」误显示成「拉取失败」。
+    if matches!(&r, Err(e) if e == "__CANCELLED__") {
+        let _ = app.emit(
+            "file-pull-cancelled",
+            serde_json::json!({ "transfer_id": pull_id, "kind": "cross" }),
+        );
+        return Ok(());
+    }
     // 拉取过程由 server_conn 实时上报 file-pull-progress / file-pull-complete(ok:true)。
     // 仅当整条拉取失败（如网络不可达）时在此补发一次失败完成事件，便于前端提示。
     if let Err(e) = &r {
@@ -626,4 +641,33 @@ pub async fn pull_cross_lan(
         );
     }
     r
+}
+
+/// 取消跨 LAN 拉取：置位取消标记，下载循环在下一个分片边界检测到后立即中止。
+///
+/// 与 P2P 取消不同：跨 LAN 的落盘循环就在 `pull_cross_lan` 命令自己的 await 里，
+/// 发出的 Err 会被上方 `pull_cross_lan` 的失败补发逻辑捕获吗？不会——此处标记
+/// 导致循环以 `Err("已取消")` 退出，`pull_cross_lan` 命令会照常补发
+/// `file-pull-complete(ok:false)`，前端把它当作一次失败收口（文案区分取消与失败）。
+#[tauri::command]
+pub fn cancel_pull_cross_lan(
+    state: State<AppState>,
+    app: AppHandle,
+    pull_id: String,
+) {
+    let sc = state.server_conn.lock().clone();
+    let Some(sc) = sc else { return };
+    let cancelled = sc.cancel_cross_pull(&pull_id);
+    if cancelled {
+        let _ = app.emit(
+            "file-pull-progress",
+            serde_json::json!({
+                "transfer_id": pull_id,
+                "received": 0,
+                "total": 0,
+                "percent": 0,
+                "route": "lan",
+            }),
+        );
+    }
 }

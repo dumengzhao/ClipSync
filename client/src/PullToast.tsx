@@ -5,6 +5,8 @@ import { invoke } from '@tauri-apps/api/core';
 import {
   listPendingOffers,
   pullFiles,
+  cancelPull,
+  cancelPullCrossLan,
   PendingOffer,
   listCrossLanOffers,
   pullCrossLan,
@@ -106,6 +108,14 @@ export default function PullToast() {
   const [session, setSession] = useState(0);
   const pullingRef = useRef<Item[]>([]);
   pullingRef.current = pulling;
+  /** 正在拉取条目的「取消」操作回调：键为条目 id，由 onPull 时按 kind 填充 */
+  const cancelFnRef = useRef<Record<string, () => void>>({});
+
+  /** 用户点「取消」：调用对应的后端取消命令，前端状态由 file-pull-cancelled 事件统一收口 */
+  const onCancel = (it: Item) => {
+    setUserActed(true);
+    cancelFnRef.current[it.id]?.();
+  };
 
   /**
    * 对端报告的「部分文件传输失败」原因，键为条目 id。
@@ -376,6 +386,38 @@ export default function PullToast() {
           }));
         },
       ),
+
+      // 用户主动取消拉取（P2P 与跨 LAN 共用此事件）。此处统一收口：
+      // 移出「拉取中」、清进度、展示「已取消」结果，行为与失败类似但文案区分。
+      listen<{ transfer_id: string }>('file-pull-cancelled', (e) => {
+        const id = `local:${e.payload.transfer_id}`;
+        log(`file-pull-cancelled: ${id}`);
+        delete cancelFnRef.current[id];
+        // 从「拉取中」摘除条目（若还在）：保留一份引用给结果展示
+        setPulling((prev) => {
+          const it = prev.find((x) => x.id === id);
+          if (it) {
+            window.setTimeout(() => {
+              setResults((prev) => ({
+                ...prev,
+                [id]: { ok: false, msg: '已取消拉取' },
+              }));
+              setProgress((prev) => {
+                const n = { ...prev };
+                delete n[id];
+                return n;
+              });
+            }, 0);
+          }
+          return prev.filter((x) => x.id !== id);
+        });
+        setItems((prev) => prev.filter((x) => x.id !== id));
+        setProgress((prev) => {
+          const n = { ...prev };
+          delete n[id];
+          return n;
+        });
+      }),
     ];
 
     return () => {
@@ -510,6 +552,11 @@ export default function PullToast() {
           [it.id]: { ok: false, msg: '拉取失败，可重试' },
         }));
       });
+      // 登记取消回调：后端 remove active_pulls（写盘任务自然退出）+ 发 PullCancel 帧，
+      // 前端状态由 file-pull-cancelled 事件统一收口
+      cancelFnRef.current[it.id] = () => {
+        void cancelPull(tid);
+      };
     } else {
       const o = it.offer;
       setPulling((prev) => (prev.some((x) => x.id === it.id) ? prev : [...prev, it]));
@@ -529,6 +576,11 @@ export default function PullToast() {
           [it.id]: { ok: false, msg: '拉取失败，可重试' },
         }));
       });
+      // 跨 LAN 取消：后端置取消标记，下载循环在下一个分片边界中止；
+      // 随后 pull_cross_lan 命令以 Err 退出并 emit file-pull-cancelled 收口
+      cancelFnRef.current[it.id] = () => {
+        void cancelPullCrossLan(crossItemBase(o));
+      };
     }
   };
 
@@ -573,6 +625,9 @@ export default function PullToast() {
                   <div className="pt-bar-fill" style={{ width: `${pct}%` }} />
                   <span className="pt-pct">{pct}%</span>
                 </div>
+                <button className="pt-cancel" onClick={() => onCancel(it)} title="取消拉取">
+                  取消
+                </button>
               </div>
             </div>
           );
