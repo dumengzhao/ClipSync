@@ -1658,21 +1658,46 @@ impl ConnectionHub {
                                 Ok((sock, _)) => {
                                     let ra =
                                         sock.peer_addr().map(|a| a.to_string()).unwrap_or_default();
-                                    // 嗅探请求行：文件拉取走 HTTP 文件服务，其余升级为 WS
+                                    // 嗅探请求行：连通性探测 → 文件拉取 → 其余升级为 WS。
+                                    // 三类路径互斥（都以前缀区分），先匹配最具体的。
                                     let mut peek_buf = [0u8; 512];
                                     let n = sock.peek(&mut peek_buf).await.unwrap_or(0);
-                                    let is_file = {
+                                    let req_line = {
                                         let slice = &peek_buf[..n];
                                         if let Some(lf) =
                                             slice.windows(2).position(|w| w == b"\r\n")
                                         {
-                                            String::from_utf8_lossy(&slice[..lf])
-                                                .starts_with("GET /file/")
+                                            String::from_utf8_lossy(&slice[..lf]).to_string()
                                         } else {
-                                            false
+                                            String::new()
                                         }
                                     };
-                                    if is_file {
+                                    if req_line.starts_with("GET /clipsync/ping") {
+                                        // 对外文件地址连通性探测：返回本机身份 + 版本号。
+                                        // 不携带任何密钥/敏感信息（仅供探测端校验
+                                        // 「连到的就是 ClipSync、对端确实是配置里那个设备」）。
+                                        let my_id = hub.identity.id.0.clone();
+                                        let my_name = hub.identity.name.clone();
+                                        let my_ver = env!("CARGO_PKG_VERSION").to_string();
+                                        let body = serde_json::json!({
+                                            "device_id": my_id,
+                                            "device_name": my_name,
+                                            "version": my_ver,
+                                        })
+                                        .to_string();
+                                        let resp = format!(
+                                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                            body.len(),
+                                            body
+                                        );
+                                        use tokio::io::AsyncWriteExt;
+                                        let mut s = sock;
+                                        let _ = s.write_all(resp.as_bytes()).await;
+                                        let _ = s.shutdown().await;
+                                        tracing::debug!("ping 探测来自 {ra}");
+                                        continue;
+                                    }
+                                    if req_line.starts_with("GET /file/") {
                                         let fs = file_share.clone();
                                         let nk = network_key.clone();
                                         tauri::async_runtime::spawn(async move {

@@ -10,8 +10,10 @@ import {
   installUpdate,
   isInstalledBuild,
   getVersion,
+  probeExtFileEp,
   type AppConfig,
   type UpdateInfo,
+  type ProbeResult,
 } from './api/tauri';
 import { open } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
@@ -90,6 +92,13 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
   const [maLabel, setMaLabel] = useState('');
   const [maAddr, setMaAddr] = useState('');
   const [maPort, setMaPort] = useState('');
+  // 对外文件地址弹窗：探测通过才允许保存
+  const [extEpModal, setExtEpModal] = useState<{
+    open: boolean;
+    value: string;
+    probing: boolean;
+    probe: ProbeResult | null;
+  }>({ open: false, value: '', probing: false, probe: null });
   // 手动地址配对时输入的对方配对码（按当前正在配对的那条地址记录）
   const [manualPairing, setManualPairing] = useState<{ addr: string; port: number } | null>(null);
   const [manualPairCode, setManualPairCode] = useState('');
@@ -251,23 +260,70 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
     };
   };
 
-  // 对外文件地址允许 IPv4[:port]：端口可省（默认 20071，跨 LAN 拉取端按完整地址直连）。
-  // 校验失败阻止落盘，错误统一走 toast 提示（注意：R2 阶段会把输入搬到弹窗，本处保留
-  // 仅作失焦兜底校验，确保后端拒绝的非法值不会从其它途径写入）。
-  const isValidExtEp = (v: string): boolean => {
-    if (v === '') return true; // 空 = 不设置，合法
-    return isIpv4WithPort(v);
+  // 对外文件地址：必须经过连通性探测才允许保存。空字符串「不设置」是合法状态。
+  // 流程：打开弹窗 → 输入 → 点「测试并保存」→ 调 probe_ext_file_ep → 通过则落盘并关闭；
+  // 探测失败不写盘，toast 显示原因。探测可能耗时（最多 5s），按钮显示 loading。
+  const openExtEpModal = () => {
+    setExtEpModal({
+      open: true,
+      value: cfg.ext_file_ep ?? '',
+      probing: false,
+      probe: null,
+    });
   };
-  const commitExtEp = () => {
-    const v = cfg.ext_file_ep ?? '';
-    if (!isValidExtEp(v)) {
-      // 不合法：阻止落盘，并通过统一的 toast 弹出错误提示（显式 err 红框，避免文案误判为成功）
-      setMsg('请输入有效的 IPv4[:port]，端口 1-65535 可省', 'err');
+  const cancelExtEpModal = () => {
+    if (extEpModal.probing) return;
+    setExtEpModal({ open: false, value: '', probing: false, probe: null });
+  };
+  const probeAndSaveExtEp = async () => {
+    const v = extEpModal.value.trim();
+    if (!isIpv4WithPort(v)) {
+      setExtEpModal((s) => ({
+        ...s,
+        probe: {
+          ok: false,
+          device_id: null,
+          device_name: null,
+          version: null,
+          error: '请输入合法 IPv4[:port]，端口 1-65535 可省',
+        },
+      }));
       return;
     }
+    setExtEpModal((s) => ({ ...s, probing: true, probe: null }));
+    try {
+      const r = await probeExtFileEp(v);
+      setExtEpModal((s) => ({ ...s, probing: false, probe: r }));
+      if (r.ok) {
+        const cur = persistedRef.current?.ext_file_ep ?? '';
+        if (v !== cur) {
+          await persist({ ext_file_ep: v }, '已保存对外文件地址');
+        } else {
+          setMsg('对外文件地址未变化');
+        }
+        setExtEpModal({ open: false, value: '', probing: false, probe: null });
+      }
+    } catch (e) {
+      setExtEpModal((s) => ({
+        ...s,
+        probing: false,
+        probe: {
+          ok: false,
+          device_id: null,
+          device_name: null,
+          version: null,
+          error: String(e),
+        },
+      }));
+    }
+  };
+  const clearExtEp = async () => {
     const cur = persistedRef.current?.ext_file_ep ?? '';
-    if (v === cur) return; // 无变化不写盘
-    persist({ ext_file_ep: v });
+    if (cur === '') {
+      setMsg('对外文件地址已为空');
+      return;
+    }
+    await persist({ ext_file_ep: '' }, '已清空对外文件地址');
   };
 
   // 服务端地址：失焦即把「协议 + 主机:端口」拼回完整 ws(s)://host:port/ws 落盘
@@ -655,28 +711,29 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
       </div>
       <div className="row">
         <label>对外文件地址</label>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flex: '0 0 auto' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flex: '0 0 auto' }}>
           <input
             type="text"
-            style={{ width: '200px' }}
-            placeholder="例如 1.2.3.4"
+            readOnly
+            style={{ width: '220px', background: 'var(--readonly-bg, transparent)' }}
+            placeholder="（未设置）"
             value={cfg.ext_file_ep ?? ''}
-            onChange={(e) => {
-              // 输入框只允许 IPv4 字符（数字与点），端口/字母/空格等一律剔除
-              const ip = e.target.value.replace(/[^0-9.]/g, '');
-              update('ext_file_ep', ip);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-            }}
-            onBlur={() => commitExtEp()}
           />
-          <span className="ext-ep-port">:{cfg.listen_port}</span>
+          <button className="btn btn-sm" onClick={openExtEpModal}>
+            设置…
+          </button>
+          <button
+            className="btn btn-sm btn-ghost"
+            onClick={clearExtEp}
+            disabled={!cfg.ext_file_ep}
+          >
+            清空
+          </button>
         </div>
       </div>
       <p className="hint">
-        输入框只填本机对外可达的 IPv4 地址，右侧端口自动取监听端口，无需填写；
-        对端将按「ip:{cfg.listen_port}」拉取文件。
+        对外可达的文件地址 `IPv4[:port]`（端口可省，默认 {cfg.listen_port}）。
+        点击「设置…」在弹窗中输入并测试连通性，探测通过后才会保存。
       </p>
       <div className="row">
         <label>局域网分组 (lanGroup，可选)</label>
@@ -817,6 +874,63 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         <>
           <p className="hint">当前版本{appVersion ? ` v${appVersion}` : ''}（免安装版，不支持在线更新，请使用 NSIS 安装版）</p>
         </>
+      )}
+
+      {/* 对外文件地址弹窗：探测通过才允许保存 */}
+      {extEpModal.open && (
+        <div className="modal-overlay" onClick={cancelExtEpModal}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3 className="modal-title">设置对外文件地址</h3>
+            <p className="modal-body">
+              输入本机对外可达的 IPv4[:port]（端口可省，默认 {cfg.listen_port}）。
+              点击「测试并保存」会向该地址发起连通性探测，收到 ClipSync 响应才会写入配置。
+            </p>
+            <input
+              className="pair-input"
+              autoFocus
+              placeholder={`例如 1.2.3.4 或 1.2.3.4:${cfg.listen_port}`}
+              value={extEpModal.value}
+              onChange={(e) =>
+                setExtEpModal((s) => ({ ...s, value: e.target.value, probe: null }))
+              }
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !extEpModal.probing) {
+                  probeAndSaveExtEp();
+                }
+              }}
+              disabled={extEpModal.probing}
+            />
+            {extEpModal.probe && (
+              <p
+                className="modal-body"
+                style={{
+                  color: extEpModal.probe.ok ? '#16a34a' : '#dc2626',
+                  marginBottom: '0.6rem',
+                }}
+              >
+                {extEpModal.probe.ok
+                  ? `✓ 已连通：${extEpModal.probe.device_name ?? '?'}（${extEpModal.probe.device_id ?? '?'}）v${extEpModal.probe.version ?? '?'}`
+                  : `✗ ${extEpModal.probe.error ?? '探测失败'}`}
+              </p>
+            )}
+            <div className="modal-actions">
+              <button
+                className="btn btn-ghost"
+                onClick={cancelExtEpModal}
+                disabled={extEpModal.probing}
+              >
+                取消
+              </button>
+              <button
+                className="btn"
+                onClick={probeAndSaveExtEp}
+                disabled={extEpModal.probing}
+              >
+                {extEpModal.probing ? '探测中…' : '测试并保存'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {toast && (

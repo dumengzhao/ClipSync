@@ -425,6 +425,7 @@ pub fn run() {
             tauri_cmd::list_cross_lan_offers,
             tauri_cmd::pull_cross_lan,
             tauri_cmd::cancel_pull_cross_lan,
+            tauri_cmd::probe_ext_file_ep,
             tauri_cmd::show_pull_toast,
             tauri_cmd::hide_pull_toast,
             #[cfg(debug_assertions)]

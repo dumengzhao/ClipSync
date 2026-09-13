@@ -252,6 +252,20 @@ export function crossItemId(o: CrossLanOffer): string {
   return `local:${crossItemBase(o)}`;
 }
 
+/** 对外文件地址探测结果（Rust 端 `ProbeResult`） */
+export interface ProbeResult {
+  ok: boolean;
+  device_id: string | null;
+  device_name: string | null;
+  version: string | null;
+  error: string | null;
+}
+
+/** 探测 `IPv4[:port]` 是否指向一台运行中的 ClipSync（用于设置页「对外文件地址」落盘前校验） */
+export async function probeExtFileEp(ep: string): Promise<ProbeResult> {
+  return invoke<ProbeResult>('probe_ext_file_ep', { ep });
+}
+
 
 /* ================= 客户端自更新（无签名自托管，见 server/UPDATE_MODULE_PLAN.md） ================= */
 

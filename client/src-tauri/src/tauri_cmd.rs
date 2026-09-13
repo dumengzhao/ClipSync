@@ -666,3 +666,122 @@ pub fn cancel_pull_cross_lan(
         );
     }
 }
+
+/// 对外文件地址连通性探测结果（含对端身份，用于前端展示）。
+#[derive(serde::Serialize)]
+pub struct ProbeResult {
+    /// 是否收到合法的 ClipSync ping 响应
+    pub ok: bool,
+    /// 对端 device_id（探测到 ClipSync 才有）
+    pub device_id: Option<String>,
+    /// 对端 device_name（同上）
+    pub device_name: Option<String>,
+    /// 对端版本（同上）
+    pub version: Option<String>,
+    /// 失败原因（ok=false 时给出可读消息）
+    pub error: Option<String>,
+}
+
+/// 探测 `IPv4[:port]` 是否指向一台运行中的 ClipSync（即本机的对外文件地址可连通性）。
+///
+/// 设计要点：
+/// - 走 HTTP `GET /clipsync/ping`，固定 5s connect+read 超时，对端要返回
+///   `{device_id, device_name, version}` 三元组才算通过；
+/// - 不携带任何凭据，探测端收到响应后用对端 device_id 与「本机已配对设备」或
+///   「本机自身 device_id」做提示性比对（不在此函数内做强制校验，仅展示给用户）；
+/// - 端口可省略（默认 20071 = listen_port）；空 ep 直接报错。
+#[tauri::command]
+pub async fn probe_ext_file_ep(
+    state: State<'_, AppState>,
+    ep: String,
+) -> Result<ProbeResult, String> {
+    let ep = ep.trim().to_string();
+    if ep.is_empty() {
+        return Ok(ProbeResult {
+            ok: false,
+            device_id: None,
+            device_name: None,
+            version: None,
+            error: Some("地址为空".to_string()),
+        });
+    }
+    let default_port = state.config.lock().listen_port;
+    let url = if ep.contains(':') {
+        format!("http://{ep}/clipsync/ping")
+    } else {
+        format!("http://{ep}:{default_port}/clipsync/ping")
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok(ProbeResult {
+                ok: false,
+                device_id: None,
+                device_name: None,
+                version: None,
+                error: Some(format!("无法连接 {ep}：{e}")),
+            });
+        }
+    };
+    let status = resp.status();
+    let body = match resp.text().await {
+        Ok(t) => t,
+        Err(e) => {
+            return Ok(ProbeResult {
+                ok: false,
+                device_id: None,
+                device_name: None,
+                version: None,
+                error: Some(format!("读取响应失败：{e}")),
+            });
+        }
+    };
+    if !status.is_success() {
+        return Ok(ProbeResult {
+            ok: false,
+            device_id: None,
+            device_name: None,
+            version: None,
+            error: Some(format!(
+                "HTTP {status}；请确认对端是运行中的 ClipSync 且端口可访问"
+            )),
+        });
+    }
+    // 解析 JSON：缺字段也判失败（避免客户端拼错格式后误判为通过）
+    let v: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            return Ok(ProbeResult {
+                ok: false,
+                device_id: None,
+                device_name: None,
+                version: None,
+                error: Some("响应不是合法 JSON".to_string()),
+            });
+        }
+    };
+    let id = v.get("device_id").and_then(|x| x.as_str()).map(String::from);
+    let name = v.get("device_name").and_then(|x| x.as_str()).map(String::from);
+    let ver = v.get("version").and_then(|x| x.as_str()).map(String::from);
+    if id.is_none() || name.is_none() || ver.is_none() {
+        return Ok(ProbeResult {
+            ok: false,
+            device_id: id,
+            device_name: name,
+            version: ver,
+            error: Some("响应缺少 device_id/device_name/version".to_string()),
+        });
+    }
+    Ok(ProbeResult {
+        ok: true,
+        device_id: id,
+        device_name: name,
+        version: ver,
+        error: None,
+    })
+}
