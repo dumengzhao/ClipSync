@@ -38,8 +38,8 @@ use crate::sync::engine::SyncEngine;
 use crate::transfer::manager::ConnectionHub;
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 use tauri::image::Image;
@@ -86,20 +86,20 @@ impl AppState {
         let cache = FileCache::new(256, config.cache_ttl_hours);
 
         Self {
-                identity,
-                config: Mutex::new(config),
-                engine,
-                hub,
-                registry: Mutex::new(DeviceRegistry::new()),
-                manual: Mutex::new(manual),
-                cache,
-                discovery: MdnsDiscovery::new(),
-                discovered: Mutex::new(HashMap::new()),
-                file_share: Arc::new(FileShare::new()),
-                server_conn: Mutex::new(None),
-                cross_lan_offers: Mutex::new(Vec::new()),
-                network_key: Arc::new(std::sync::Mutex::new(None)),
-            }
+            identity,
+            config: Mutex::new(config),
+            engine,
+            hub,
+            registry: Mutex::new(DeviceRegistry::new()),
+            manual: Mutex::new(manual),
+            cache,
+            discovery: MdnsDiscovery::new(),
+            discovered: Mutex::new(HashMap::new()),
+            file_share: Arc::new(FileShare::new()),
+            server_conn: Mutex::new(None),
+            cross_lan_offers: Mutex::new(Vec::new()),
+            network_key: Arc::new(std::sync::Mutex::new(None)),
+        }
     }
 }
 
@@ -118,7 +118,13 @@ fn ensure_mdns_firewall_rule() {
     use std::process::Command;
     let rule_name = "ClipSync mDNS (UDP 5353)";
     let exists = Command::new("netsh")
-        .args(["advfirewall", "firewall", "show", "rule", &format!("name={rule_name}")])
+        .args([
+            "advfirewall",
+            "firewall",
+            "show",
+            "rule",
+            &format!("name={rule_name}"),
+        ])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
@@ -174,7 +180,6 @@ pub fn run() {
         .manage(AppState::new())
         .setup(|app| {
             build_tray(app)?;
-
 
             // 加载持久化配置（覆盖默认），使改过的端口等设置重启后仍生效
             let handle = app.handle().clone();
@@ -258,7 +263,8 @@ pub fn run() {
                                     } else {
                                         tracing::info!(
                                             "配置未设默认宽高，已写入当前窗口尺寸默认值：{}x{}",
-                                            dw, dh
+                                            dw,
+                                            dh
                                         );
                                     }
                                 }
@@ -277,7 +283,9 @@ pub fn run() {
                 let code = app.state::<AppState>().config.lock().pairing_code.clone();
                 app.state::<AppState>().hub.set_pairing_code(code);
                 let max_folder_files = app.state::<AppState>().config.lock().max_folder_files;
-                app.state::<AppState>().hub.set_max_folder_files(max_folder_files);
+                app.state::<AppState>()
+                    .hub
+                    .set_max_folder_files(max_folder_files);
             }
             let state = app.state::<AppState>();
             let (enable_mdns, listen_port) = {
@@ -346,10 +354,8 @@ pub fn run() {
 
             // 启动跨局域网服务端连接（常连 + 心跳 + 中继路由）；失败仅记录不阻断启动
             {
-                let sc = ServerConn::new(
-                    app.handle().clone(),
-                    app.state::<AppState>().engine.clone(),
-                );
+                let sc =
+                    ServerConn::new(app.handle().clone(), app.state::<AppState>().engine.clone());
                 sc.start();
                 *app.state::<AppState>().server_conn.lock() = Some(sc);
             }
@@ -361,9 +367,7 @@ pub fn run() {
             {
                 let app_handle = app.handle().clone();
                 let _ = app_handle.clone().listen("cross-lan-file", move |event| {
-                    if let Ok(o) =
-                        serde_json::from_str::<CrossLanOffer>(event.payload())
-                    {
+                    if let Ok(o) = serde_json::from_str::<CrossLanOffer>(event.payload()) {
                         app_handle
                             .state::<AppState>()
                             .cross_lan_offers
@@ -667,7 +671,7 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
                     let now = std::time::Instant::now();
                     let mut guard = last_left_click.lock().unwrap();
                     let is_double = guard
-                        .map_or(false, |t| now.duration_since(t) <= std::time::Duration::from_millis(500));
+                        .is_some_and(|t| now.duration_since(t) <= std::time::Duration::from_millis(500));
                     if is_double {
                         *guard = None;
                         show_main_window(tray.app_handle());

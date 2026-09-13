@@ -19,20 +19,20 @@ use crate::clipboard::types::ClipboardContent;
 use crate::clipboard::ClipboardProvider;
 use crate::config::settings::ManualAddress;
 use crate::device::registry::{PairedDevice, TrustLevel};
-use crate::discovery::DiscoveredPeer;
 use crate::discovery::manual::ManualAddressBook;
+use crate::discovery::DiscoveredPeer;
 use crate::AppState;
 
 #[cfg(debug_assertions)]
-use crate::transfer::websocket::FileFrame;
+use crate::clipboard::types::FileMeta;
 #[cfg(debug_assertions)]
 use crate::transfer::manager::Outgoing;
 #[cfg(debug_assertions)]
-use crate::clipboard::types::FileMeta;
-#[cfg(debug_assertions)]
-use tokio::sync::mpsc;
+use crate::transfer::websocket::FileFrame;
 #[cfg(debug_assertions)]
 use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(debug_assertions)]
+use tokio::sync::mpsc;
 
 #[tauri::command]
 pub fn get_version() -> &'static str {
@@ -129,7 +129,11 @@ pub fn set_config(
     // 开机自启：配置切换立即注册/移除系统自启条目（与启动时对齐逻辑一致）
     {
         let mgr = app.autolaunch();
-        if let Err(e) = if cfg.auto_start { mgr.enable() } else { mgr.disable() } {
+        if let Err(e) = if cfg.auto_start {
+            mgr.enable()
+        } else {
+            mgr.disable()
+        } {
             tracing::warn!("autostart 切换失败: {e}");
         }
     }
@@ -245,7 +249,8 @@ pub fn pair_with(state: State<AppState>, device_id: String, code: String) -> Res
         let g = state.discovered.lock();
         g.get(&device_id).cloned()
     };
-    let peer = peer.ok_or_else(|| format!("未发现设备 {device_id}（请确认对方已上线且在局域网内）"))?;
+    let peer =
+        peer.ok_or_else(|| format!("未发现设备 {device_id}（请确认对方已上线且在局域网内）"))?;
     let hub = state.hub.clone();
     tauri::async_runtime::spawn(async move {
         hub.pair_with(peer, code).await;

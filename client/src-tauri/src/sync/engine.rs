@@ -25,9 +25,7 @@ pub enum SyncEvent {
     },
     /// 本地拷贝了文件/目录：携带绝对路径（仅本端使用，绝不外传），
     /// 由传输层广播「可拉取」清单给对端，而非把路径塞进远端剪贴板。
-    LocalFilesCopied {
-        paths: Vec<PathBuf>,
-    },
+    LocalFilesCopied { paths: Vec<PathBuf> },
     /// 对端传来的剪贴板更新已写入本机剪贴板。用于驱动前端刷新（与本地变化走同一条
     /// 显示链路），但**不应再转发回对端**（回环由 `last_emitted` 哈希去重负责）。
     RemoteClipboardApplied {
@@ -271,8 +269,11 @@ impl SyncEngine {
                 if let SyncEvent::LocalClipboardChanged { mark, content }
                 | SyncEvent::RemoteClipboardApplied { mark, content } = ev
                 {
-                    let payload =
-                        ClipboardChangedPayload::from_content(&mark.sync_id, &mark.device_id, &content);
+                    let payload = ClipboardChangedPayload::from_content(
+                        &mark.sync_id,
+                        &mark.device_id,
+                        &content,
+                    );
                     let _ = app_handle.emit("clipboard-changed", payload);
                 }
             }
@@ -329,7 +330,10 @@ fn content_kind(content: &ClipboardContent) -> &'static str {
 /// 对一组路径排序后求哈希，用于判断「是否同一份文件拷贝」，避免轮询式监听重复广播。
 fn file_paths_hash(paths: &[PathBuf]) -> String {
     use std::hash::{Hash, Hasher};
-    let mut sorted: Vec<String> = paths.iter().map(|p| p.to_string_lossy().to_string()).collect();
+    let mut sorted: Vec<String> = paths
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
     sorted.sort();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     sorted.hash(&mut hasher);
@@ -344,7 +348,12 @@ fn normalized_file_paths_hash(paths: &[PathBuf]) -> String {
     use std::hash::{Hash, Hasher};
     let mut sorted: Vec<String> = paths
         .iter()
-        .map(|p| p.to_string_lossy().to_string().replace('\\', "/").to_lowercase())
+        .map(|p| {
+            p.to_string_lossy()
+                .to_string()
+                .replace('\\', "/")
+                .to_lowercase()
+        })
         .collect();
     sorted.sort();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();

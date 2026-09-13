@@ -139,6 +139,13 @@ export default function PullToast() {
       .catch((e: unknown) => log(`hide_pull_toast 失败: ${String(e)}`));
   };
 
+  // 事件监听/倒计时 useEffect 只在挂载时建立，直接引用会在闭包里捕获首帧的
+  // onNewItem / hideSelf。用 ref 桥接：回调始终调用最新一次渲染的闭包，行为与
+  // 「每次渲染重建监听」等价；且不能把它们加进 deps（每次渲染都是新引用，
+  // 会导致监听反复重挂、倒计时不断重启），这是 exhaustive-deps 警告的根因。
+  const hideSelfRef = useRef(hideSelf);
+  hideSelfRef.current = hideSelf;
+
   // 显隐统一收归 Rust：定位/置顶/提升都在 Rust 侧完成。
   // 每次调用都自增 session，确保倒计时一定重启。
   const showSelf = () => {
@@ -163,6 +170,9 @@ export default function PullToast() {
     }
     showSelf();
   };
+
+  const onNewItemRef = useRef(onNewItem);
+  onNewItemRef.current = onNewItem;
 
   useEffect(() => {
     log(`useEffect 挂载（label=${getCurrentWindow().label}）`);
@@ -226,7 +236,7 @@ export default function PullToast() {
       listen<PendingOffer>('file-offer', (e) => {
         const o = e.payload;
         log(`收到 file-offer: ${o.transfer_id}`);
-        onNewItem({
+        onNewItemRef.current({
           id: `local:${o.transfer_id}`,
           kind: 'local',
           ts: now(),
@@ -237,7 +247,7 @@ export default function PullToast() {
       listen<CrossLanOffer>('cross-lan-file', (e) => {
         const o = e.payload;
         log(`收到 cross-lan-file: from=${o.from_name || o.from} files=${(o.manifest || []).length}`);
-        onNewItem({ id: crossItemId(o), kind: 'cross', ts: now(), offer: o });
+        onNewItemRef.current({ id: crossItemId(o), kind: 'cross', ts: now(), offer: o });
       }),
 
       listen<{ transfer_id: string }>('file-pull-start', (e) => {
@@ -408,7 +418,7 @@ export default function PullToast() {
         if (left <= 0) {
           window.clearInterval(iv);
           log(`未操作超时（${autoHideMs}ms 内未点击拉取）→ 自动关闭`);
-          hideSelf();
+          hideSelfRef.current();
         }
       }, 1000);
       return () => window.clearInterval(iv);
@@ -418,7 +428,7 @@ export default function PullToast() {
     setCountdown(0);
     const t = window.setTimeout(() => {
       log(`结果反馈停留 ${RESULT_HOLD_MS}ms 结束 → 关闭`);
-      hideSelf();
+      hideSelfRef.current();
     }, RESULT_HOLD_MS);
     return () => window.clearTimeout(t);
   }, [ready, items, pulling, completed, results, userActed, autoHideMs, session]);

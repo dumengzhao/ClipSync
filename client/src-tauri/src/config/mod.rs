@@ -88,8 +88,8 @@ fn migrate_device_name(app: &tauri::AppHandle, mut cfg: AppConfig) -> AppConfig 
 /// 将配置写入磁盘（用户主目录下的 ClipSync/ 目录），供重启后依然生效。
 /// 该目录位于用户主目录、非应用包内，重装/升级均不影响配置。
 pub fn save_config(app: &tauri::AppHandle, cfg: &AppConfig) -> anyhow::Result<()> {
-    let path = config_path(app)
-        .ok_or_else(|| anyhow::anyhow!("无法确定用户主目录，无法写入配置"))?;
+    let path =
+        config_path(app).ok_or_else(|| anyhow::anyhow!("无法确定用户主目录，无法写入配置"))?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

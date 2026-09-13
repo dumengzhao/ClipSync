@@ -80,12 +80,7 @@ impl MdnsDiscovery {
 
         // TXT 记录携带设备标识；端口不在此写死，由对端从 SRV 记录读取。
         // 设备名取运行时配置（默认即本机机器名），改名后重广播即生效。
-        let device_name = app
-            .state::<AppState>()
-            .config
-            .lock()
-            .device_name
-            .clone();
+        let device_name = app.state::<AppState>().config.lock().device_name.clone();
         let mut props = HashMap::new();
         props.insert("device_id".to_string(), identity.id.0.clone());
         props.insert("device_name".to_string(), device_name);
@@ -152,19 +147,13 @@ impl MdnsDiscovery {
                             .lock()
                             .get(&crate::clipboard::types::DeviceId(peer.device_id.clone()))
                             .cloned();
-                        let existing_by_addr = st
-                            .registry
-                            .lock()
-                            .find_by_addr(&addr_key)
-                            .cloned();
+                        let existing_by_addr = st.registry.lock().find_by_addr(&addr_key).cloned();
                         // 兜底：对端重建身份后 device_id 变了、且历史记录没有 last_addr
                         // （无法按地址匹配），但设备名不变。按名字匹配以识别同一台设备。
                         let existing_by_name = match (&existing_by_id, &existing_by_addr) {
-                            (None, None) => st
-                                .registry
-                                .lock()
-                                .find_by_name(&peer.device_name)
-                                .cloned(),
+                            (None, None) => {
+                                st.registry.lock().find_by_name(&peer.device_name).cloned()
+                            }
                             _ => None,
                         };
 
@@ -201,8 +190,7 @@ impl MdnsDiscovery {
                                     // 按设备名兜底识别为同一台已配对设备（身份变更）
                                     let old_id = d.device_id.0.clone();
                                     let new_id = peer.device_id.clone();
-                                    let migrated =
-                                        st.hub.migrate_pairing(&app2, &old_id, &new_id);
+                                    let migrated = st.hub.migrate_pairing(&app2, &old_id, &new_id);
                                     migrated_old_id = Some(old_id.clone());
                                     let _ = app2.emit("peer-unpaired", &old_id);
                                     if !migrated {

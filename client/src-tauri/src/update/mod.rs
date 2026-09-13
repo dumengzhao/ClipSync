@@ -349,13 +349,13 @@ pub async fn download_update(
     use tokio::io::AsyncWriteExt;
     while let Some(chunk) = stream.next().await {
         let c = chunk.map_err(|e| {
-            let _ = tokio::fs::remove_file(&tmp);
+            let _ = std::fs::remove_file(&tmp);
             format!("下载中断: {e}")
         })?;
         hasher.update(&c);
         size += c.len() as u64;
         if let Err(e) = file.write_all(&c).await {
-            let _ = tokio::fs::remove_file(&tmp);
+            let _ = std::fs::remove_file(&tmp);
             return Err(format!("写入临时文件失败: {e}"));
         }
         // 节流：每变化 5% 才 emit 一次，避免高频事件刷爆前端
@@ -371,28 +371,24 @@ pub async fn download_update(
         }
     }
     if let Err(e) = file.sync_all().await {
-        let _ = tokio::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(&tmp);
         return Err(format!("落盘失败: {e}"));
     }
     drop(file);
-    emit(
-        "verifying",
-        size,
-        Some("正在校验文件完整性…".to_string()),
-    );
+    emit("verifying", size, Some("正在校验文件完整性…".to_string()));
     let got = hasher
         .finalize()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
     if got != sha256.trim().to_lowercase() {
-        let _ = tokio::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(&tmp);
         let msg = format!("sha256 校验失败（期望 {sha256}，实际 {got}）——已删除下载文件");
         emit("error", size, Some(msg.clone()));
         return Err(msg);
     }
     if let Err(e) = tokio::fs::rename(&tmp, &path).await {
-        let _ = tokio::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(&tmp);
         return Err(format!("重命名失败: {e}"));
     }
     emit(
@@ -442,22 +438,21 @@ pub async fn install_update(path: String) -> Result<(), String> {
     }
     #[cfg(target_os = "linux")]
     {
-        let s = path.to_string_lossy().into_owned();
+        let s = path.as_str();
         if s.ends_with(".AppImage") {
             use std::os::unix::fs::PermissionsExt;
             let mut perm = std::fs::metadata(&p)
                 .map_err(|e| format!("读取元数据失败: {e}"))?
                 .permissions();
             perm.set_mode(perm.mode() | 0o755);
-            std::fs::set_permissions(&p, perm)
-                .map_err(|e| format!("设置执行位失败: {e}"))?;
+            std::fs::set_permissions(&p, perm).map_err(|e| format!("设置执行位失败: {e}"))?;
             std::process::Command::new(&p)
                 .spawn()
                 .map_err(|e| format!("启动 AppImage 失败: {e}"))?;
             Ok(())
         } else if s.ends_with(".deb") {
             std::process::Command::new("pkexec")
-                .args(["dpkg", "-i", &s])
+                .args(["dpkg", "-i", s])
                 .spawn()
                 .map_err(|e| format!("启动 dpkg 失败: {e}"))?;
             Ok(())
@@ -505,8 +500,10 @@ mod tests {
             update_base_from_server_url("host:20070"),
             Some("http://host:20070".into())
         );
-        assert_eq!(update_base_from_server_url("127.0.0.1:20070"),
-            Some("http://127.0.0.1:20070".into()));
+        assert_eq!(
+            update_base_from_server_url("127.0.0.1:20070"),
+            Some("http://127.0.0.1:20070".into())
+        );
         // 空值
         assert_eq!(update_base_from_server_url(""), None);
         assert_eq!(update_base_from_server_url("   "), None);
@@ -607,9 +604,7 @@ mod tests {
             "裸可执行文件不算 bundle"
         );
         assert!(
-            !is_in_app_bundle(std::path::Path::new(
-                "/tmp/ClipSync.app/MacOS/clipsync"
-            )),
+            !is_in_app_bundle(std::path::Path::new("/tmp/ClipSync.app/MacOS/clipsync")),
             "缺少 Contents 层不算标准 bundle"
         );
     }
