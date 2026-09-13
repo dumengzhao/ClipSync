@@ -558,9 +558,12 @@ export default function PullToast() {
                   <span
                     style={{
                       fontSize: '0.72rem',
-                      color: '#9ca3af',
                       flexShrink: 0,
                       whiteSpace: 'nowrap',
+                      padding: '0.05rem 0.45rem',
+                      borderRadius: '999px',
+                      background: routes[it.id] === 'lan' ? '#16a34a' : '#d97706',
+                      color: '#fff',
                     }}
                   >
                     {routes[it.id] === 'lan' ? '内网' : '外网'}
@@ -589,9 +592,12 @@ export default function PullToast() {
                 <span
                   style={{
                     fontSize: '0.72rem',
-                    color: '#9ca3af',
                     flexShrink: 0,
                     whiteSpace: 'nowrap',
+                    padding: '0.05rem 0.45rem',
+                    borderRadius: '999px',
+                    background: routes[it.id] === 'lan' ? '#16a34a' : '#d97706',
+                    color: '#fff',
                   }}
                 >
                   {routes[it.id] === 'lan' ? '内网' : '外网'}
