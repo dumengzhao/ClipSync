@@ -553,24 +553,23 @@ export default function PullToast() {
                 <span className="pt-size">{fmtSize(itemSize(it))}</span>
               </div>
               <div className="pt-sub">{itemFrom(it)}</div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginTop: '0.5rem' }}>
                 {routes[it.id] && (
                   <span
                     style={{
                       fontSize: '0.72rem',
                       flexShrink: 0,
                       whiteSpace: 'nowrap',
-                      padding: '0 0.45rem',
-                      lineHeight: '1.1rem',
-                      borderRadius: '999px',
-                      background: routes[it.id] === 'lan' ? '#16a34a' : '#d97706',
-                      color: '#fff',
+                      height: '16px',
+                      lineHeight: '16px',
+                      fontWeight: 600,
+                      color: routes[it.id] === 'lan' ? '#2563eb' : '#fbbf24',
                     }}
                   >
                     {routes[it.id] === 'lan' ? '内网' : '外网'}
                   </span>
                 )}
-                <div className="pt-bar" style={{ flex: 1 }}>
+                <div className="pt-bar" style={{ flex: 1, marginTop: 0 }}>
                   <div className="pt-bar-fill" style={{ width: `${pct}%` }} />
                   <span className="pt-pct">{pct}%</span>
                 </div>
@@ -588,24 +587,23 @@ export default function PullToast() {
               <span className="pt-size">{fmtSize(itemSize(it))}</span>
             </div>
             <div className="pt-sub">{itemFrom(it)}</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginTop: '0.5rem' }}>
               {routes[it.id] && (
                 <span
                   style={{
                     fontSize: '0.72rem',
                     flexShrink: 0,
                     whiteSpace: 'nowrap',
-                    padding: '0 0.45rem',
-                    lineHeight: '1.1rem',
-                    borderRadius: '999px',
-                    background: routes[it.id] === 'lan' ? '#16a34a' : '#d97706',
-                    color: '#fff',
+                    height: '16px',
+                    lineHeight: '16px',
+                    fontWeight: 600,
+                    color: routes[it.id] === 'lan' ? '#2563eb' : '#fbbf24',
                   }}
                 >
                   {routes[it.id] === 'lan' ? '内网' : '外网'}
                 </span>
               )}
-              <div className="pt-bar" style={{ flex: 1 }}>
+              <div className="pt-bar" style={{ flex: 1, marginTop: 0 }}>
                 <div className="pt-bar-fill" style={{ width: '100%' }} />
                 <span className="pt-pct">100%</span>
               </div>
