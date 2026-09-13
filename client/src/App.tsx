@@ -64,6 +64,8 @@ export default function App() {
   const [refreshing, setRefreshing] = useState(false);
   // 服务端是否已将该设备移除（拉黑）：移除后停止重连并提示重新配对
   const [serverRemoved, setServerRemoved] = useState(false);
+  // 服务端拒绝鉴权（网络 token 失效）：提示用户更新 Token；入网成功后自动清除
+  const [serverAuthRejected, setServerAuthRejected] = useState(false);
   // 本机与服务端（跨 LAN 中继）连接状态：0 未连接 / 1 待审批 / 2 已启用（active）
   // 服务端节点不逐节点下发在线状态，以本机连接状态作为在线代理
   const [serverStatus, setServerStatus] = useState<number>(0);
@@ -263,7 +265,11 @@ export default function App() {
     // 跨局域网服务端连接状态（标题栏左侧展示）；本处仅需在重连成功时清除「被移除」提示
     const unlistenServerStatus = listen<number>('server-status', (e) => {
       setServerStatus(e.payload);
-      if (e.payload === 1 || e.payload === 2) setServerRemoved(false);
+      if (e.payload === 1 || e.payload === 2) {
+        setServerRemoved(false);
+        // 重新入网成功即清除「token 失效」提示
+        setServerAuthRejected(false);
+      }
       // 连接状态变为已连接/已启用时主动重新拉取节点列表，兜底广播事件偶发丢失，
       // 确保（重）连后设备信息（如对外文件地址）为最新，无需重启。
       if (e.payload === 1 || e.payload === 2) {
@@ -272,6 +278,9 @@ export default function App() {
     });
     const unlistenServerRemoved = listen('server-removed', () =>
       setServerRemoved(true),
+    );
+    const unlistenServerAuthRejected = listen('server-auth-rejected', () =>
+      setServerAuthRejected(true),
     );
     const unlistenServerNodes = listen<RemoteNode[]>('server-nodes', (e) =>
       setServerNodes(e.payload),
@@ -315,6 +324,7 @@ export default function App() {
       unlistenPullError.then((u) => u());
       unlistenServerStatus.then((u) => u());
       unlistenServerRemoved.then((u) => u());
+      unlistenServerAuthRejected.then((u) => u());
       unlistenServerNodes.then((u) => u());
       unlistenCrossLanFile.then((u) => u());
       unlistenUpdateProgress.then((u) => u());
@@ -453,6 +463,14 @@ export default function App() {
                   style={{ color: '#dc2626', marginBottom: '0.5rem' }}
                 >
                   设备已被服务端移除（拉黑）。如需重新使用，请在设置中重新填写服务端地址并保存以重新配对。
+                </div>
+              )}
+              {serverAuthRejected && (
+                <div
+                  className="msg"
+                  style={{ color: '#dc2626', marginBottom: '0.5rem' }}
+                >
+                  服务端拒绝接入：网络 Token 已失效。请在设置中更新服务端 Token 并保存。
                 </div>
               )}
               {paired.length === 0 && visibleServerNodes.length === 0 ? (

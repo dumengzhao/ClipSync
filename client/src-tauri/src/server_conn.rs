@@ -30,8 +30,7 @@ use tokio_tungstenite::WebSocketStream;
 
 use crate::AppState;
 
-type WsSink =
-    futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
+type WsSink = futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
 
 /// 接入状态：未启用(pending) / 已启用(active) / 未连接(disconnected)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -126,7 +125,12 @@ fn hardware_id() -> String {
     #[cfg(target_os = "windows")]
     {
         if let Ok(out) = std::process::Command::new("reg")
-            .args(["query", "HKLM\\SOFTWARE\\Microsoft\\Cryptography", "/v", "MachineGuid"])
+            .args([
+                "query",
+                "HKLM\\SOFTWARE\\Microsoft\\Cryptography",
+                "/v",
+                "MachineGuid",
+            ])
             .output()
         {
             let s = String::from_utf8_lossy(&out.stdout);
@@ -258,6 +262,18 @@ struct RelayPayload {
     content: ClipboardContent,
 }
 
+/// 一次 WS 连接的结束方式，供连接循环区分「网络故障」与「鉴权被拒」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectOutcome {
+    /// 曾成功入网（收到 Welcome）后断开：视为正常连接周期，复位退避。
+    Authed,
+    /// 鉴权被拒（bad_token）：属于配置错误而非网络故障，不复位退避，
+    /// 以长退避周期重试（服务端数据丢失等极端场景可自愈）。
+    AuthRejected,
+    /// 未经鉴权即断开（连接失败 / 网络中断 / Close 帧）。
+    Disconnected,
+}
+
 pub struct ServerConn {
     app: AppHandle,
     engine: Arc<SyncEngine>,
@@ -272,6 +288,9 @@ pub struct ServerConn {
     reconnect_notify: Notify,
     /// 被服务端移除（拉黑）标记：置位后仍周期性重试以便自愈，管理员后台恢复设备后下次连接即清除。
     removed: AtomicBool,
+    /// 鉴权失败（bad_token）提示去重标记：仅首次向前端发 server-auth-rejected，
+    /// 避免 60s 重试周期反复弹提示。入网成功或用户重存配置（reconnect）时复位。
+    auth_fail_notified: AtomicBool,
 }
 
 impl ServerConn {
@@ -287,6 +306,7 @@ impl ServerConn {
             ws_tx: Mutex::new(None),
             reconnect_notify: Notify::new(),
             removed: AtomicBool::new(false),
+            auth_fail_notified: AtomicBool::new(false),
         })
     }
 
@@ -356,9 +376,25 @@ impl ServerConn {
                 *conn.our_lan_group.lock().unwrap() =
                     infer_lan_group(&app.state::<AppState>().config.lock().lan_group);
                 match conn.connect_once(&url).await {
-                    Ok(()) => {
-                        backoff = 2;
-                    }
+                    Ok(outcome) => match outcome {
+                        ConnectOutcome::Authed => {
+                            backoff = 2;
+                            // 本轮曾成功入网：复位鉴权失败提示标记，之后再失败可重新提示
+                            conn.auth_fail_notified.store(false, Ordering::SeqCst);
+                        }
+                        ConnectOutcome::AuthRejected => {
+                            // token 失效是配置错误而非网络抖动：不复位退避，改用长退避周期
+                            // 重试（服务端数据丢失等极端场景可自愈）；用户重存配置会被
+                            // reconnect_notify 立即唤醒。提示只发一次，避免每个重试周期都弹。
+                            if !conn.auth_fail_notified.swap(true, Ordering::SeqCst) {
+                                let _ = app.emit("server-auth-rejected", ());
+                            }
+                            backoff = backoff.max(60);
+                        }
+                        ConnectOutcome::Disconnected => {
+                            tracing::warn!("服务端连接断开，{backoff}s 后重试");
+                        }
+                    },
                     Err(e) => {
                         tracing::warn!("服务端连接失败，{backoff}s 后重试: {e}");
                     }
@@ -394,6 +430,8 @@ impl ServerConn {
     /// 重连（Auth 携带更新后的 ext_file_ep 等），服务端 handle_auth 据此刷新节点信息。
     pub fn reconnect(&self) {
         self.removed.store(false, Ordering::SeqCst);
+        // 复位鉴权失败提示去重：用户刚改过配置，重试后若仍被拒应再次收到提示
+        self.auth_fail_notified.store(false, Ordering::SeqCst);
         {
             let mut tx = self.ws_tx.lock().unwrap();
             *tx = None;
@@ -401,8 +439,9 @@ impl ServerConn {
         self.reconnect_notify.notify_one();
     }
 
-    /// 建立一条 WS 连接并运行，直到断开返回。
-    async fn connect_once(self: &Arc<Self>, url: &str) -> anyhow::Result<()> {
+    /// 建立一条 WS 连接并运行，直到断开返回。返回本次连接的结束方式：
+    /// 网络层错误为 `Err`，连接建立后按是否入网 / 是否被拒给出 `ConnectOutcome`。
+    async fn connect_once(self: &Arc<Self>, url: &str) -> anyhow::Result<ConnectOutcome> {
         let (ws, _resp) = tokio_tungstenite::connect_async(url).await?;
         let (mut w_tx, mut w_rx) = ws.split();
         let (tx, mut rx) = mpsc::unbounded_channel::<ClientToServer>();
@@ -432,6 +471,7 @@ impl ServerConn {
 
         *self.ws_tx.lock().unwrap() = Some(tx);
 
+        let mut outcome = ConnectOutcome::Disconnected;
         let mut hb = tokio::time::interval(Duration::from_secs(25));
         loop {
             tokio::select! {
@@ -446,7 +486,7 @@ impl ServerConn {
                         Some(Ok(m)) => m,
                         Some(Err(_)) | None => break,
                     };
-                    if !self.handle_server_message(msg, &mut w_tx).await { break; }
+                    if !self.handle_server_message(msg, &mut w_tx, &mut outcome).await { break; }
                 }
                 _ = hb.tick() => {
                     if w_tx.send(Message::Text(serde_json::to_string(&ClientToServer::Heartbeat).unwrap())).await.is_err() { break; }
@@ -454,11 +494,18 @@ impl ServerConn {
             }
         }
         *self.ws_tx.lock().unwrap() = None;
-        Ok(())
+        Ok(outcome)
     }
 
     /// 收到服务端消息；返回 false 表示连接应断开。
-    async fn handle_server_message(self: &Arc<Self>, msg: Message, w_tx: &mut WsSink) -> bool {
+    /// `outcome` 随关键消息更新：Welcome → Authed，bad_token → AuthRejected；
+    /// 连接循环据此区分「曾入网后断开」（复位退避）与「鉴权被拒」（长退避 + 提示）。
+    async fn handle_server_message(
+        self: &Arc<Self>,
+        msg: Message,
+        w_tx: &mut WsSink,
+        outcome: &mut ConnectOutcome,
+    ) -> bool {
         let text = match msg {
             Message::Text(t) => t,
             Message::Close(_) => return false,
@@ -476,7 +523,12 @@ impl ServerConn {
             }
         };
         match parsed {
-            ServerToClient::Welcome { status, network, nodes } => {
+            ServerToClient::Welcome {
+                status,
+                network,
+                nodes,
+            } => {
+                *outcome = ConnectOutcome::Authed;
                 *self.network_id.lock().unwrap() = network.id.clone();
                 let key = derive_network_key(
                     &self.app.state::<AppState>().config.lock().network_token,
@@ -525,6 +577,7 @@ impl ServerConn {
             ServerToClient::Error { code, msg } => {
                 tracing::warn!("服务端错误 code={code} msg={msg}");
                 if code == "bad_token" {
+                    *outcome = ConnectOutcome::AuthRejected;
                     return false;
                 }
                 true
@@ -588,7 +641,9 @@ impl ServerConn {
                 return;
             }
         };
-        self.engine.apply_remote(payload.mark, payload.content).await;
+        self.engine
+            .apply_remote(payload.mark, payload.content)
+            .await;
     }
 
     /// 接收对端文件通知：推前端「待复制（跨 LAN）」。
@@ -652,7 +707,7 @@ impl ServerConn {
                 to: n.device_id.clone(),
                 ct,
             };
-            if let Some(tx)  = self.ws_tx.lock().unwrap().as_ref() {
+            if let Some(tx) = self.ws_tx.lock().unwrap().as_ref() {
                 let _ = tx.send(msg);
             }
         }
@@ -672,11 +727,7 @@ impl ServerConn {
         if !nodes.iter().any(|n| lan_differ(&our_lg, &n.lan_group)) {
             return;
         }
-        let manifest = self
-            .app
-            .state::<AppState>()
-            .file_share
-            .register(paths);
+        let manifest = self.app.state::<AppState>().file_share.register(paths);
         let msg = ClientToServer::FileNotify {
             manifest,
             ext_file_ep: cfg.ext_file_ep.clone(),
@@ -700,9 +751,12 @@ impl ServerConn {
         let state = self.app.state::<AppState>();
         let sync_dir = {
             let cfg = state.config.lock();
-            cfg.sync_dir
-                .clone()
-                .unwrap_or_else(|| std::env::temp_dir().join("clipsync").to_string_lossy().to_string())
+            cfg.sync_dir.clone().unwrap_or_else(|| {
+                std::env::temp_dir()
+                    .join("clipsync")
+                    .to_string_lossy()
+                    .to_string()
+            })
         };
         // ext_file_ep 仅为「对端对外可达 IP」通告，端口恒为对端 listen_port：
         // 去掉误填的 :port 后拼成 http://{ip}:{listen_port}/file/{hash}。
@@ -718,7 +772,7 @@ impl ServerConn {
         };
         let app = &self.app;
         // 总大小（明文，与前端 itemSize 对齐）用于进度百分比
-        let total_plain: u64 = files.iter().map(|f| f.file_size as u64).sum();
+        let total_plain: u64 = files.iter().map(|f| f.file_size).sum();
         let mut done_plain: u64 = 0u64;
         let mut saved = Vec::new();
         // 通知前端「拉取已开始」（与 P2P 路径 file-pull-start 对齐）
@@ -737,7 +791,8 @@ impl ServerConn {
             let tmp = dest.with_extension(format!("{}.clipsync.tmp", std::process::id()));
             {
                 use tokio::io::AsyncWriteExt;
-                let mut tmpf = tokio::fs::File::create(&tmp).await
+                let mut tmpf = tokio::fs::File::create(&tmp)
+                    .await
                     .map_err(|e| anyhow::anyhow!("创建临时文件失败: {e}"))?;
                 let mut stream = resp.bytes_stream();
                 let mut received: u64 = 0;
@@ -745,15 +800,16 @@ impl ServerConn {
                 let mut last_at = std::time::Instant::now();
                 while let Some(chunk) = stream.next().await {
                     let chunk = chunk.map_err(|e| anyhow::anyhow!("下载失败: {e}"))?;
-                    tmpf.write_all(&chunk).await
+                    tmpf.write_all(&chunk)
+                        .await
                         .map_err(|e| anyhow::anyhow!("写临时文件失败: {e}"))?;
                     received += chunk.len() as u64;
-                    // 按「密文已下比例」估算当前文件明文进度（密文 = nonce12 + 明文）
-                    let file_done = if enc_len > 0 {
-                        received * (f.file_size as u64) / enc_len
-                    } else {
-                        f.file_size as u64
-                    };
+                    // 按「密文已下比例」估算当前文件明文进度（密文 = nonce12 + 明文）；
+                    // enc_len 未知（0）或乘法溢出时按整个文件已完成处理
+                    let file_done = received
+                        .checked_mul(f.file_size)
+                        .and_then(|n| n.checked_div(enc_len))
+                        .unwrap_or(f.file_size);
                     let overall = done_plain + file_done;
                     let pct = (overall * 100 / total_plain.max(1)) as u32;
                     let now = std::time::Instant::now();
@@ -776,7 +832,8 @@ impl ServerConn {
                 tmpf.flush().await.ok();
             }
             // 读取密文并解密写盘；密钥未就绪则按明文写盘（降级）
-            let raw = tokio::fs::read(&tmp).await
+            let raw = tokio::fs::read(&tmp)
+                .await
                 .map_err(|e| anyhow::anyhow!("读取临时文件失败: {e}"))?;
             let key = *state.network_key.lock().unwrap();
             let bytes: Vec<u8> = match key {
@@ -805,7 +862,7 @@ impl ServerConn {
             }
             std::fs::write(&dest, &bytes)?;
             saved.push(dest.clone());
-            done_plain += f.file_size as u64;
+            done_plain += f.file_size;
             // 文件边界补报一次精确百分比
             let pct = (done_plain * 100 / total_plain.max(1)) as u32;
             let _ = app.emit(
@@ -824,10 +881,7 @@ impl ServerConn {
             // 在对端待拉取列表」。与 P2P 拉取路径(pull_files)一致——登记路径哈希，
             // 使本地监听判定为回声而丢弃，彻底切断回环。
             self.engine.suppress_next_file_offer(&saved);
-            self.engine
-                .clipboard()
-                .write_file_paths(&saved)
-                .await?;
+            self.engine.clipboard().write_file_paths(&saved).await?;
         }
         // 收尾：显式上报 100%，再发 complete（若失败由调用方补发 ok:false）
         let _ = app.emit(
