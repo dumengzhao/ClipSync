@@ -89,6 +89,8 @@ export default function PullToast() {
   /** 已完成但保留「100% 进度条」可见片刻的条目（避免直接关闭看不到满） */
   const [completed, setCompleted] = useState<Record<string, Item>>({});
   const [progress, setProgress] = useState<Record<string, number>>({});
+  /** 拉取路由标记（lan = 内网直连 / wan = 外网地址），键为条目 id */
+  const [routes, setRoutes] = useState<Record<string, string>>({});
   const [ready, setReady] = useState(false);
   /** 用户是否已点击过「拉取」：点了就取消未操作倒计时，改为等任务完成 */
   const [userActed, setUserActed] = useState(false);
@@ -260,12 +262,20 @@ export default function PullToast() {
         });
       }),
 
-      listen<{ transfer_id: string; percent: number }>('file-pull-progress', (e) => {
-        setProgress((prev) => ({
-          ...prev,
-          [`local:${e.payload.transfer_id}`]: e.payload.percent,
-        }));
-      }),
+      listen<{ transfer_id: string; percent: number; route?: string }>(
+        'file-pull-progress',
+        (e) => {
+          const id = `local:${e.payload.transfer_id}`;
+          setProgress((prev) => ({
+            ...prev,
+            [id]: e.payload.percent,
+          }));
+          // 路由标记（lan/wan）：让用户能看出这次拉取走的是内网还是外网地址
+          if (e.payload.route) {
+            setRoutes((prev) => ({ ...prev, [id]: e.payload.route as string }));
+          }
+        },
+      ),
 
       listen<{
         transfer_id: string;
@@ -293,7 +303,7 @@ export default function PullToast() {
         pullErrorsRef.current[id] = msg;
       }),
 
-      listen<{ transfer_id: string; ok?: boolean; error?: string }>(
+      listen<{ transfer_id: string; ok?: boolean; error?: string; route?: string }>(
         'file-pull-complete',
         (e) => {
           const id = `local:${e.payload.transfer_id}`;
@@ -305,6 +315,9 @@ export default function PullToast() {
           // 进度拉满到 100%，并把条目从 pulling 移到 completed：保留进度条可见 ~1.2s，
           // 让用户确实看到「100%」再转结果，而不是瞬间关闭。
           setProgress((prev) => ({ ...prev, [id]: 100 }));
+          if (e.payload.route) {
+            setRoutes((prev) => ({ ...prev, [id]: e.payload.route as string }));
+          }
           setPulling((prev) => {
             const it = prev.find((x) => x.id === id);
             if (it) setCompleted((c) => ({ ...c, [id]: it }));
@@ -322,7 +335,13 @@ export default function PullToast() {
               [id]: {
                 ok,
                 msg: ok
-                  ? '已保存到本地'
+                  ? `已保存到本地${
+                      e.payload.route === 'lan'
+                        ? '（内网直连）'
+                        : e.payload.route === 'wan'
+                          ? '（外网地址）'
+                          : ''
+                    }`
                   : err
                     ? `部分文件传输失败：${err}`
                     : `拉取失败：${e.payload.error || '未知错误'}`,
@@ -498,7 +517,7 @@ export default function PullToast() {
         delete n[it.id];
         return n;
       });
-      pullCrossLan(crossItemBase(o), o.ext_file_ep, o.manifest).catch(() => {
+      pullCrossLan(crossItemBase(o), o.from, o.ext_file_ep, o.manifest).catch(() => {
         setPulling((prev) => prev.filter((x) => x.id !== it.id));
         setItems((prev) => (prev.some((x) => x.id === it.id) ? prev : [it, ...prev]));
         setResults((prev) => ({
@@ -532,7 +551,14 @@ export default function PullToast() {
               <div className="pt-sub">{itemFrom(it)}</div>
               <div className="pt-bar">
                 <div className="pt-bar-fill" style={{ width: `${pct}%` }} />
-                <span className="pt-pct">{pct}%</span>
+                <span className="pt-pct">
+                  {routes[it.id] === 'lan'
+                    ? '内网 '
+                    : routes[it.id] === 'wan'
+                      ? '外网 '
+                      : ''}
+                  {pct}%
+                </span>
               </div>
             </div>
           );

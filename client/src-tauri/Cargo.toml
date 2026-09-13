@@ -113,3 +113,8 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# 开发构建提速：只生成行号表（不含完整调试信息），链接时间大幅缩短，
+# panic 回溯仍能看到行号。发布构建不受影响（[profile.release] 独立配置）。
+[profile.dev]
+debug = "line-tables-only"

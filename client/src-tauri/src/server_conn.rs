@@ -737,13 +737,19 @@ impl ServerConn {
         }
     }
 
-    /// 跨 LAN 拉取：从对端 ext_file_ep 下载文件并写本机剪贴板。
+    /// 跨 LAN 拉取：按发送方 device_id 优先走内网直连，回退 ext_file_ep。
     /// `pull_id` 是前端「待拉取条目」的唯一 id（不含 `local:` 前缀），用于把
     /// 进度事件(`file-pull-progress`/`file-pull-complete`)精准投递给对应条目，
     /// 让小窗进度条能实时更新（历史 bug：跨 LAN 路径从不发进度事件，进度条卡 0%）。
+    ///
+    /// 选路规则：查本机 mDNS 发现表（`discovered`）——mDNS 只在局域网内生效，
+    /// 能发现即证明发送方确实在本内网且地址可达，直接用表内 addr + SRV 真实端口；
+    /// 表内无（真跨 LAN）→ ext_file_ep 兜底。实际选中的路由随
+    /// progress/complete 事件的 `route` 字段上报（"lan" / "wan"），前端可见。
     pub async fn pull_cross_lan(
         &self,
         pull_id: &str,
+        from: &str,
         ext_file_ep: &str,
         manifest: serde_json::Value,
     ) -> anyhow::Result<()> {
@@ -758,23 +764,47 @@ impl ServerConn {
                     .to_string()
             })
         };
+        let mut routes: Vec<(String, &'static str)> = Vec::new();
+        {
+            let lan = state
+                .discovered
+                .lock()
+                .values()
+                .find(|p| p.device_id == from)
+                .filter(|p| !p.addr.is_empty())
+                .map(|p| (format!("http://{}:{}", p.addr, p.port), "lan"));
+            if let Some(r) = lan {
+                routes.push(r);
+            }
+        }
         // ext_file_ep 仅为「对端对外可达 IP」通告，端口恒为对端 listen_port：
         // 去掉误填的 :port 后拼成 http://{ip}:{listen_port}/file/{hash}。
         let pull_host = ext_file_ep.split(':').next().unwrap_or("").trim();
-        if pull_host.is_empty() {
+        if !pull_host.is_empty() {
+            let pull_port = {
+                let cfg = state.config.lock();
+                cfg.listen_port
+            };
+            let wan = (format!("http://{pull_host}:{pull_port}"), "wan");
+            if !routes.iter().any(|(u, _)| *u == wan.0) {
+                routes.push(wan);
+            }
+        }
+        if routes.is_empty() {
             return Err(anyhow::anyhow!(
-                "对端未配置对外文件地址（ext_file_ep），无法拉取跨 LAN 文件"
+                "对端不在本机局域网发现表中，且未配置对外文件地址（ext_file_ep），无法拉取"
             ));
         }
-        let pull_port = {
-            let cfg = state.config.lock();
-            cfg.listen_port
-        };
+        // 连接超时：内网地址不可达时能快速回退到下一个候选，不至于长时间挂起
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(3))
+            .build()?;
         let app = &self.app;
         // 总大小（明文，与前端 itemSize 对齐）用于进度百分比
         let total_plain: u64 = files.iter().map(|f| f.file_size).sum();
         let mut done_plain: u64 = 0u64;
         let mut saved = Vec::new();
+        let mut route_used: &'static str = "";
         // 通知前端「拉取已开始」（与 P2P 路径 file-pull-start 对齐）
         let _ = app.emit(
             "file-pull-start",
@@ -782,9 +812,29 @@ impl ServerConn {
         );
         for f in &files {
             let hash = f.hash.clone().unwrap_or_default();
-            let url = format!("http://{pull_host}:{pull_port}/file/{hash}");
-            let resp = reqwest::get(&url).await?;
-            let enc_len = resp.content_length().unwrap_or(0) as u64;
+            // 依次尝试各路由，第一个返回 2xx 的胜出（误连到别家内网同 IP 的
+            // 陌生设备会 404 / 解密失败，自然落到下一个候选，不会拿到错数据）
+            let (resp, route) = {
+                let mut chosen = None;
+                let mut last_err: Option<anyhow::Error> = None;
+                for (base, tag) in &routes {
+                    match client.get(format!("{base}/file/{hash}")).send().await {
+                        Ok(r) if r.status().is_success() => {
+                            chosen = Some((r, *tag));
+                            break;
+                        }
+                        Ok(r) => last_err = Some(anyhow::anyhow!("HTTP {}", r.status())),
+                        Err(e) => last_err = Some(anyhow::anyhow!("{e}")),
+                    }
+                }
+                chosen.ok_or_else(|| {
+                    last_err.unwrap_or_else(|| anyhow::anyhow!("所有拉取地址均不可达"))
+                })?
+            };
+            if route_used.is_empty() {
+                route_used = route;
+            }
+            let enc_len = resp.content_length().unwrap_or(0);
             // 流式下载到临时文件，边下边上报进度——大文件也能看到中间进度，
             // 不再「等很久一直 0%」。
             let dest = std::path::Path::new(&sync_dir).join(&f.file_name);
@@ -825,6 +875,7 @@ impl ServerConn {
                                 "received": overall,
                                 "total": total_plain,
                                 "percent": pct,
+                                "route": route,
                             }),
                         );
                     }
@@ -872,6 +923,7 @@ impl ServerConn {
                     "received": done_plain,
                     "total": total_plain,
                     "percent": pct,
+                    "route": route,
                 }),
             );
         }
@@ -891,6 +943,7 @@ impl ServerConn {
                 "received": total_plain,
                 "total": total_plain,
                 "percent": 100u32,
+                "route": route_used,
             }),
         );
         let _ = app.emit(
@@ -899,6 +952,7 @@ impl ServerConn {
                 "transfer_id": pull_id,
                 "device_name": "",
                 "target_dir": sync_dir,
+                "route": route_used,
                 "file_count": saved.len(),
                 "files": files
                     .iter()
@@ -915,7 +969,14 @@ impl ServerConn {
                 "ok": true,
             }),
         );
-        tracing::info!("跨 LAN 拉取 {pull_id} 完成，共写入 {done_plain} 字节");
+        tracing::info!(
+            "跨 LAN 拉取 {pull_id} 完成（路由：{}），共写入 {done_plain} 字节",
+            if route_used == "lan" {
+                "内网直连"
+            } else {
+                "外网地址"
+            }
+        );
         Ok(())
     }
 }

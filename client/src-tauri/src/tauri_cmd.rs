@@ -603,13 +603,14 @@ pub async fn pull_cross_lan(
     app: AppHandle,
     state: State<'_, AppState>,
     pull_id: String,
+    from: String,
     ext_file_ep: String,
     manifest: serde_json::Value,
 ) -> Result<(), String> {
     let sc = state.server_conn.lock().clone();
     let sc = sc.ok_or_else(|| "服务端未连接".to_string())?;
     let r = sc
-        .pull_cross_lan(&pull_id, &ext_file_ep, manifest)
+        .pull_cross_lan(&pull_id, &from, &ext_file_ep, manifest)
         .await
         .map_err(|e| e.to_string());
     // 拉取过程由 server_conn 实时上报 file-pull-progress / file-pull-complete(ok:true)。

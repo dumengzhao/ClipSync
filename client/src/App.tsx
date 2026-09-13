@@ -429,7 +429,7 @@ export default function App() {
     const key = o.ext_file_ep;
     setCrossPulling((prev) => new Set(prev).add(key));
     try {
-      await pullCrossLan(crossItemBase(o), o.ext_file_ep, o.manifest);
+      await pullCrossLan(crossItemBase(o), o.from, o.ext_file_ep, o.manifest);
       setCrossLanOffers((prev) => prev.filter((x) => x.ext_file_ep !== o.ext_file_ep));
       flash('已拉取跨 LAN 文件');
     } catch (e) {
