@@ -231,6 +231,13 @@ impl MdnsDiscovery {
                             .unwrap_or(0);
 
                         if is_paired {
+                            // 已配对设备**不写 discovered 表**（只发 peer-info-updated），
+                            // 因此取消配对时表里不会有它 —— unpair 会主动补回。
+                            // 这条 debug 日志用于排查「取消配对后发现列表为空」类问题。
+                            tracing::debug!(
+                                "mDNS 发现已配对设备 {}，跳过写入发现表（取消配对时由 unpair 补回）",
+                                peer.device_name
+                            );
                             let mut reg = st.registry.lock();
                             // 身份迁移时旧 ID 的记录要删掉，避免残留一条永远离线的僵尸设备
                             if let Some(old) = migrated_old_id.as_ref() {
@@ -258,6 +265,12 @@ impl MdnsDiscovery {
                             st.discovered
                                 .lock()
                                 .insert(peer.device_id.clone(), peer.clone());
+                            tracing::debug!(
+                                "mDNS 发现未配对设备 {}（{}:{}），已写入发现表",
+                                peer.device_name,
+                                peer.addr,
+                                peer.port
+                            );
                             let _ = app2.emit("peer-discovered", &peer);
                         }
                     }
