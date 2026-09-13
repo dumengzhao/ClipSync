@@ -779,6 +779,9 @@ impl ServerConn {
                     .to_string()
             })
         };
+        // 候选链：① 内网直连（本机 mDNS 发现表 SRV 真实端口）→ ② 对端 ext_file_ep
+        //   拉取端直接按对端通告的「完整地址（IPv4[:port]）」直连，不读取本机 listen_port
+        //   ——对端若走内网穿透，代理端口很可能 ≠ 20071，本机端口作兜底会拼错。
         let mut routes: Vec<(String, &'static str)> = Vec::new();
         {
             let lan = state
@@ -792,15 +795,10 @@ impl ServerConn {
                 routes.push(r);
             }
         }
-        // ext_file_ep 仅为「对端对外可达 IP」通告，端口恒为对端 listen_port：
-        // 去掉误填的 :port 后拼成 http://{ip}:{listen_port}/file/{hash}。
-        let pull_host = ext_file_ep.split(':').next().unwrap_or("").trim();
-        if !pull_host.is_empty() {
-            let pull_port = {
-                let cfg = state.config.lock();
-                cfg.listen_port
-            };
-            let wan = (format!("http://{pull_host}:{pull_port}"), "wan");
+        let ep = ext_file_ep.trim();
+        if !ep.is_empty() {
+            let wan = (format!("http://{ep}"), "wan");
+            // 避免与候选①完全重复（内网可达时不绕外网）
             if !routes.iter().any(|(u, _)| *u == wan.0) {
                 routes.push(wan);
             }
@@ -823,6 +821,9 @@ impl ServerConn {
         let mut saved = Vec::new();
         let mut route_used: &'static str = "";
         let mut start_emitted = false;
+        // 候选链可变：首个文件试探成功后剔除失败项，后续文件直接用命中路由
+        // ——避免每个文件重复等 3s connect_timeout，大文件夹首文件后秒级完成。
+        let mut routes: Vec<(String, &'static str)> = routes;
         for f in &files {
             // 取消检查点 1：每个文件开始前。命中即清标记并整体中止。
             if self.cross_pull_cancel.lock().unwrap().remove(pull_id) {
@@ -834,28 +835,48 @@ impl ServerConn {
                 return Err(anyhow::anyhow!("__CANCELLED__"));
             }
             let hash = f.hash.clone().unwrap_or_default();
-            // 依次尝试各路由，第一个返回 2xx 的胜出（误连到别家内网同 IP 的
-            // 陌生设备会 404 / 解密失败，自然落到下一个候选，不会拿到错数据）
-            let (resp, route) = {
-                let mut chosen = None;
+            // 试探：首个文件按候选链试，成功路由记录 route_used 并从 routes 里
+            // 剔除失败项；后续文件直接走 routes[0]（确定下来的路由），不再轮询。
+            let (resp, route) = if !route_used.is_empty() {
+                let (base, tag) = &routes[0];
+                (
+                    client
+                        .get(format!("{base}/file/{hash}"))
+                        .send()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e}"))?,
+                    *tag,
+                )
+            } else {
+                // 依次尝试各路由，第一个返回 2xx 的胜出（误连到别家内网同 IP 的
+                // 陌生设备会 404 / 解密失败，自然落到下一个候选，不会拿到错数据）
+                let mut chosen: Option<(reqwest::Response, &'static str)> = None;
                 let mut last_err: Option<anyhow::Error> = None;
-                for (base, tag) in &routes {
+                let mut i = 0usize;
+                while i < routes.len() {
+                    let (base, tag) = &routes[i];
                     match client.get(format!("{base}/file/{hash}")).send().await {
                         Ok(r) if r.status().is_success() => {
                             chosen = Some((r, *tag));
+                            // 把命中路由提到首位、剔除之前的失败项
+                            let hit = routes.swap_remove(i);
+                            routes.insert(0, hit);
                             break;
                         }
                         Ok(r) => last_err = Some(anyhow::anyhow!("HTTP {}", r.status())),
                         Err(e) => last_err = Some(anyhow::anyhow!("{e}")),
                     }
+                    i += 1;
                 }
-                chosen.ok_or_else(|| {
-                    last_err.unwrap_or_else(|| anyhow::anyhow!("所有拉取地址均不可达"))
-                })?
+                match chosen {
+                    Some(c) => c,
+                    None => {
+                        return Err(last_err
+                            .unwrap_or_else(|| anyhow::anyhow!("所有拉取地址均不可达")));
+                    }
+                }
             };
-            if route_used.is_empty() {
-                route_used = route;
-            }
+            route_used = route;
             if !start_emitted {
                 start_emitted = true;
                 // 路由确定后再发 start（内网直连通常瞬时；ext_file_ep 兜底时最多
