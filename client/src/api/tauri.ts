@@ -208,11 +208,13 @@ export async function listCrossLanOffers(): Promise<CrossLanOffer[]> {
 /** 拉取某条跨 LAN 文件通知（从对端 ext_file_ep 下载并写本机剪贴板） */
 export async function pullCrossLan(
   pullId: string,
+  from: string,
   extFileEp: string,
   manifest: unknown,
 ): Promise<void> {
   return invoke<void>('pull_cross_lan', {
     pullId,
+    from,
     extFileEp,
     manifest,
   });
