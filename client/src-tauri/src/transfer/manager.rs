@@ -1217,6 +1217,9 @@ impl ConnectionHub {
                     "device_name": offer.device_name,
                     "total_size": total,
                     "target_dir": root.to_string_lossy(),
+                    // P2P 拉取走已建立的直连通道，路由从 start 起就确定为内网，
+                    // 前端徽标无需等首个进度帧
+                    "route": "lan",
                 }),
             );
         }
