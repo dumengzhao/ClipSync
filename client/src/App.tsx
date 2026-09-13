@@ -281,8 +281,11 @@ export default function App() {
         return n;
       });
       // 取消配对后该设备应回到「局域网待连接」列表：重查发现表。
-      // Rust 端 discovered 表一直保留着它（此前仅被「已配对」过滤），
-      // 而 mDNS 的 peer-discovered 事件不会因取消配对而重发，必须主动拉取。
+      // 注意：不能指望 Rust 端 discovered 表里还留着它 —— mDNS 的
+      // ServiceResolved 对已配对设备走 is_paired 分支、从不写入该表，
+      // 所以后端在 unpair 时用注册表里的名称 + 最后地址主动补了一条，
+      // 并强制 mDNS 重新浏览；这里重查即可拿到（`peer-discovered` 事件
+      // 到达时本机 paired 尚未更新，会被"已配对"过滤掉，必须靠重查兜底）。
       listDiscoveredPeers().then(setDiscovered).catch(() => {});
     });
     // 已配对设备的信息更新（mDNS 重新发现 / 重连后名称或地址变更）。

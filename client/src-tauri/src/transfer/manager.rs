@@ -436,13 +436,61 @@ impl ConnectionHub {
         if let Some(app) = self.app.lock().unwrap().clone() {
             crate::device::store::delete_secret(&app, device_id);
             let state = app.state::<AppState>();
+            // 先取出设备信息（含最后可拨号地址）再删注册表——取消配对后要把它
+            // 补回「局域网发现的设备」列表，必须用到地址。
+            let dev = state
+                .registry
+                .lock()
+                .get(&DeviceId(device_id.to_string()))
+                .cloned();
             state
                 .registry
                 .lock()
                 .remove(&DeviceId(device_id.to_string()));
             let devices = state.registry.lock().list();
             crate::device::store::save_devices(&app, &devices);
+
+            // 取消配对后该设备必须回到「局域网待连接」列表，否则用户无法再次配对。
+            // 不能指望 `discovered` 表里恰好还留着它：mDNS 的 `ServiceResolved` 对
+            // **已配对**设备走 is_paired 分支，根本不写入 `discovered`（只发
+            // `peer-info-updated`），且该服务在 mdns-sd 缓存里长期处于「已解析」态、
+            // 不会再触发 ServiceResolved。于是客户端一重启（discovered 是内存表），
+            // 取消配对后表里就是空的，前端重查只会拿到空列表（`pair_with` 也会报
+            // 「未发现设备」）。这里用注册表保存的名称 + 最后地址主动补一条。
+            if let Some(dev) = &dev {
+                if let Some((host, port)) = dev
+                    .last_addr
+                    .as_deref()
+                    .and_then(|a| a.rsplit_once(':'))
+                    .and_then(|(h, p)| p.parse::<u16>().ok().map(|p| (h.to_string(), p)))
+                {
+                    let peer = DiscoveredPeer {
+                        device_id: dev.device_id.0.clone(),
+                        device_name: dev.device_name.clone(),
+                        addr: host,
+                        port,
+                    };
+                    state
+                        .discovered
+                        .lock()
+                        .insert(peer.device_id.clone(), peer.clone());
+                    let _ = app.emit("peer-discovered", &peer);
+                    tracing::info!(
+                        "取消配对：已把 {} 补回局域网发现表（{}:{}）",
+                        dev.device_name,
+                        peer.addr,
+                        peer.port
+                    );
+                }
+            }
             let _ = app.emit("peer-unpaired", device_id);
+            // 再强制 mDNS 重新浏览一次：让对端广告重新解析（此时它已不在配对表，
+            // 走「未配对」分支重新写入 discovered），补正地址/端口并覆盖上面可能
+            // 过期的 last_addr；本端作为应答方配对（无 last_addr）时也靠它恢复列表。
+            let port = state.config.lock().listen_port;
+            if let Err(e) = state.discovery.reconfigure(&app, &state.identity, port) {
+                tracing::warn!("取消配对后 mDNS 重查失败: {e}");
+            }
         }
         tracing::info!("已取消与 {device_id} 的配对");
     }
