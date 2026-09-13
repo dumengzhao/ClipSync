@@ -48,12 +48,12 @@ use tokio_tungstenite::WebSocketStream;
 
 use crate::clipboard::types::{ClipboardContent, DeviceId, FileMeta, SyncMark};
 use crate::clipboard::ClipboardProvider;
+use crate::config::settings::ManualAddress;
 use crate::crypto::aead::{decrypt, encrypt};
 use crate::crypto::kdf::{derive_session_keys, split_keys};
 use crate::crypto::pake::{start_initiator, start_responder};
 use crate::device::identity::DeviceIdentity;
 use crate::device::registry::{PairedDevice, TrustLevel};
-use crate::config::settings::ManualAddress;
 use crate::discovery::DiscoveredPeer;
 use crate::sync::engine::{SyncEngine, SyncEvent};
 use crate::transfer::websocket::{FileChunkResponsePayload, FileFrame, MessageFrame, MessageType};
@@ -71,6 +71,10 @@ const LINK_CONTEXT: &[u8] = b"clipsync-link-v1";
 
 /// 连接监控巡检间隔：每轮检查所有「已配对但未连接」的对端并尝试重连。
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
+/// 被对端 Reject（本机对其已无配对关系）后，自动重连的冷却期。
+const REJECT_COOLDOWN: Duration = Duration::from_secs(600);
+/// 同一对端「配对码不一致」类前端提示的最小间隔。
+const PAIRING_FAIL_EMIT_INTERVAL: Duration = Duration::from_secs(60);
 
 /// 握手阶段可区分的失败原因，供上层决定是否重试。
 #[derive(Debug)]
@@ -172,6 +176,12 @@ struct HelloPayload {
     /// 使应答方在 mDNS 失效时也能记录 last_addr 兜底重连——应答方从 TCP 连接里
     /// 只能拿到对端的临时源端口，无法直接回拨。
     listen_port: u16,
+    /// 发起方连接意图：`true` = 静默重连（按 device_id 双方配对表互有对方，直接用
+    /// link secret 建连）；`false` = 用户配对（走配对码 + SPAKE2）。应答方收到后
+    /// 结合本机配对表回应：对端要重连而本机按 ID 查无其配对信息 → 回 Reject 帧。
+    /// 旧版客户端无此字段（反序列化为 false，按用户配对处理）。
+    #[serde(default)]
+    reconnect: bool,
 }
 
 /// 网格中继最大跳数：一条剪贴板变化最多经多少台中间设备中转。
@@ -229,6 +239,13 @@ pub struct ConnectionHub {
     connected_addrs: Mutex<HashSet<String>>,
     /// 正在发起连接的对端地址集合，避免重复连接（key = addr:port）
     connecting: Mutex<HashSet<String>>,
+    /// 握手被对端 Reject 的对端（key = device_id，value = 拒绝时间）：冷却期内监控
+    /// 巡检跳过该对端，避免对「已无配对关系」的对端每 5s 空锤。重新配对 / 取消
+    /// 配对 / 冷却到期后恢复尝试（冷却到期后再被拒会重新计冷却并再提示一次）。
+    rejected: Mutex<HashMap<String, std::time::Instant>>,
+    /// 「配对码不一致」类前端提示的最近发出时间（key = device_id）：同一对端
+    /// 60s 内只提示一次，防止对端的重连循环把提示刷屏。
+    pairing_fail_emitted: Mutex<HashMap<String, std::time::Instant>>,
     /// 本端作为发送方的活动传输（transfer_id -> 本地文件清单 + 绝对路径）
     active_offers: Mutex<HashMap<String, OfferState>>,
     /// `active_offers` 的插入顺序（FIFO 淘汰用）。HashMap 无序，靠它判断「最早是谁」。
@@ -260,6 +277,8 @@ impl ConnectionHub {
             peers: Mutex::new(HashMap::new()),
             connected_addrs: Mutex::new(HashSet::new()),
             connecting: Mutex::new(HashSet::new()),
+            rejected: Mutex::new(HashMap::new()),
+            pairing_fail_emitted: Mutex::new(HashMap::new()),
             active_offers: Mutex::new(HashMap::new()),
             active_offer_order: Mutex::new(VecDeque::new()),
             pending_offers: Mutex::new(HashMap::new()),
@@ -294,6 +313,45 @@ impl ConnectionHub {
 
     pub fn is_paired(&self, device_id: &str) -> bool {
         self.paired_codes.lock().unwrap().contains_key(device_id)
+    }
+
+    /// 标记对端拒绝了本机握手（本机对其已无配对关系）。返回是否为冷却期外的
+    /// 「新拒绝」——调用方据此决定是否向前端发一次提示（冷却期内重复被拒不刷屏）。
+    fn mark_rejected(&self, device_id: &str) -> bool {
+        let mut g = self.rejected.lock().unwrap();
+        if let Some(t) = g.get(device_id) {
+            if t.elapsed() < REJECT_COOLDOWN {
+                return false; // 冷却期内，重复拒绝不再提示
+            }
+        }
+        g.insert(device_id.to_string(), std::time::Instant::now());
+        true
+    }
+
+    /// 是否处于被对端拒绝的冷却期内（监控巡检据此跳过）。
+    fn is_rejected(&self, device_id: &str) -> bool {
+        self.rejected
+            .lock()
+            .unwrap()
+            .get(device_id)
+            .is_some_and(|t| t.elapsed() < REJECT_COOLDOWN)
+    }
+
+    /// 清除对端的拒绝冷却标记（重新配对 / 取消配对时调用）。
+    fn clear_rejected(&self, device_id: &str) {
+        self.rejected.lock().unwrap().remove(device_id);
+    }
+
+    /// 「配对码不一致」类前端提示是否应该发出（同一对端 60s 内至多一次）。
+    fn should_emit_pairing_fail(&self, device_id: &str) -> bool {
+        let mut g = self.pairing_fail_emitted.lock().unwrap();
+        match g.get(device_id) {
+            Some(t) if t.elapsed() < PAIRING_FAIL_EMIT_INTERVAL => false,
+            _ => {
+                g.insert(device_id.to_string(), std::time::Instant::now());
+                true
+            }
+        }
     }
 
     /// 对端身份迁移：对端从同一 `ip:port` 出现但换了 device_id（重建身份）时，
@@ -341,10 +399,15 @@ impl ConnectionHub {
     pub fn unpair(&self, device_id: &str) {
         self.paired_codes.lock().unwrap().remove(device_id);
         self.peers.lock().unwrap().remove(device_id);
+        self.clear_rejected(device_id);
+        self.pairing_fail_emitted.lock().unwrap().remove(device_id);
         if let Some(app) = self.app.lock().unwrap().clone() {
             crate::device::store::delete_secret(&app, device_id);
             let state = app.state::<AppState>();
-            state.registry.lock().remove(&DeviceId(device_id.to_string()));
+            state
+                .registry
+                .lock()
+                .remove(&DeviceId(device_id.to_string()));
             let devices = state.registry.lock().list();
             crate::device::store::save_devices(&app, &devices);
             let _ = app.emit("peer-unpaired", device_id);
@@ -431,9 +494,7 @@ impl ConnectionHub {
         while o.len() > max {
             let Some(oldest) = o.pop_front() else { break };
             if m.remove(&oldest).is_some() {
-                tracing::warn!(
-                    "{label} 超过 {max} 条上限，已淘汰最早的一条 {oldest}"
-                );
+                tracing::warn!("{label} 超过 {max} 条上限，已淘汰最早的一条 {oldest}");
             }
         }
         // 顺带清掉 order 里已被其它路径（拉取/取消/完成）移除的陈旧 key，
@@ -444,13 +505,12 @@ impl ConnectionHub {
     }
 
     /// 从 map 与插入顺序队列中同时移除某条记录（拉取完成 / 取消 / 传输结束）。
-    fn forget_key<T>(
-        map: &Mutex<HashMap<String, T>>,
-        order: &Mutex<VecDeque<String>>,
-        key: &str,
-    ) {
+    fn forget_key<T>(map: &Mutex<HashMap<String, T>>, order: &Mutex<VecDeque<String>>, key: &str) {
         map.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
-        order.lock().unwrap_or_else(|e| e.into_inner()).retain(|k| k != key);
+        order
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|k| k != key);
     }
 
     /// 本地拷贝了文件/目录：生成传输 ID，展开为文件清单，向所有已连接对端广播「可拉取」。
@@ -473,7 +533,9 @@ impl ConnectionHub {
         let max_folder_files = *self.max_folder_files.lock().unwrap();
         if max_folder_files > 0
             && has_folder
-            && existing.iter().any(|p| Self::exceeds_file_limit(p, max_folder_files))
+            && existing
+                .iter()
+                .any(|p| Self::exceeds_file_limit(p, max_folder_files))
         {
             let folder_name = if top_names.is_empty() {
                 "该".to_string()
@@ -543,7 +605,10 @@ impl ConnectionHub {
                 tracing::warn!("对端 {id} 发送通道关闭，可拉取清单未送达");
             }
         }
-        tracing::info!("已广播文件可拉取清单 {transfer_id} 给 {} 个对端", peers.len());
+        tracing::info!(
+            "已广播文件可拉取清单 {transfer_id} 给 {} 个对端",
+            peers.len()
+        );
     }
 
     /// 处理对端发来的文件帧（按角色路由：发送方流式发片，接收方落盘）。
@@ -580,7 +645,9 @@ impl ConnectionHub {
                     .values()
                     .any(|o| Self::offer_fingerprint(&o.files) == incoming_fp);
                 if is_local_echo {
-                    tracing::debug!("忽略本机文件回环 Offer {transfer_id}（指纹命中 active_offers）");
+                    tracing::debug!(
+                        "忽略本机文件回环 Offer {transfer_id}（指纹命中 active_offers）"
+                    );
                     return;
                 }
                 let total: u64 = files.iter().map(|f| f.file_size).sum();
@@ -652,7 +719,12 @@ impl ConnectionHub {
                 file_indices,
             } => {
                 // 本端是发送方：流式读取本地文件并发片
-                let offer = self.active_offers.lock().unwrap().get(&transfer_id).cloned();
+                let offer = self
+                    .active_offers
+                    .lock()
+                    .unwrap()
+                    .get(&transfer_id)
+                    .cloned();
                 let Some(offer) = offer else {
                     tracing::warn!("收到拉取请求但本端没有该传输 {transfer_id}");
                     return;
@@ -683,9 +755,7 @@ impl ConnectionHub {
                                 let mtime = md
                                     .modified()
                                     .ok()
-                                    .and_then(|t| {
-                                        t.duration_since(std::time::UNIX_EPOCH).ok()
-                                    })
+                                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                                     .map(|d| d.as_secs());
                                 if md.len() != e.file_size {
                                     failed.push((
@@ -910,8 +980,10 @@ impl ConnectionHub {
                 let _ = GetWindowRect(hwnd, &mut after);
                 let vis = IsWindowVisible(hwnd).as_bool();
                 let ico = IsIconic(hwnd).as_bool();
-                let inside = after.right <= work.right && after.bottom <= work.bottom
-                    && after.left >= work.left && after.top >= work.top;
+                let inside = after.right <= work.right
+                    && after.bottom <= work.bottom
+                    && after.left >= work.left
+                    && after.top >= work.top;
                 tracing::info!(
                     "show_pull_toast: 窗口 {}x{} 定位=({}, {}) 实际rect=({},{})-({},{}) work=({},{})-({},{}) 完全可见={inside} visible={vis} iconic={ico}",
                     ww, wh, x, y,
@@ -1093,7 +1165,8 @@ impl ConnectionHub {
                 let _ = std::fs::create_dir_all(parent);
             }
         }
-        let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<Option<FileChunkResponsePayload>>(32);
+        let (chunk_tx, mut chunk_rx) =
+            tokio::sync::mpsc::channel::<Option<FileChunkResponsePayload>>(32);
         self.active_pulls.lock().unwrap().insert(
             transfer_id.clone(),
             PullState {
@@ -1127,11 +1200,13 @@ impl ConnectionHub {
         let file_details: Vec<serde_json::Value> = offer
             .files
             .iter()
-            .map(|f| serde_json::json!({
-                "name": f.file_name,
-                "size": f.file_size,
-                "is_dir": f.is_dir,
-            }))
+            .map(|f| {
+                serde_json::json!({
+                    "name": f.file_name,
+                    "size": f.file_size,
+                    "is_dir": f.is_dir,
+                })
+            })
             .collect();
         let targets: Vec<PathBuf> = offer
             .files
@@ -1146,15 +1221,17 @@ impl ConnectionHub {
             let mut last_progress_at = std::time::Instant::now();
             let mut last_progress_pct: u32 = 0;
             while let Some(chunk) = chunk_rx.recv().await {
-                let Some(payload) = chunk else { break; };
+                let Some(payload) = chunk else {
+                    break;
+                };
                 if payload.file_index < targets.len() {
                     let path = &targets[payload.file_index];
-                        if let Ok(mut file) = tokio::fs::OpenOptions::new()
-                            .create(true)
-                            .write(true)
-                            .truncate(false)
-                            .open(path)
-                            .await
+                    if let Ok(mut file) = tokio::fs::OpenOptions::new()
+                        .create(true)
+                        .write(true)
+                        .truncate(false)
+                        .open(path)
+                        .await
                     {
                         let _ = file.seek(std::io::SeekFrom::Start(payload.offset)).await;
                         if file.write_all(&payload.data).await.is_ok() {
@@ -1228,54 +1305,54 @@ impl ConnectionHub {
 
     /// 计算多条路径的最长公共父目录（用于还原相对结构）
     fn common_root(paths: &[PathBuf]) -> PathBuf {
-    let mut root: Option<PathBuf> = None;
-    for p in paths {
-        let parent = p.parent().unwrap_or(p).to_path_buf();
-        root = Some(match root {
-            None => parent,
-            Some(r) => Self::common_prefix(&r, &parent),
-        });
+        let mut root: Option<PathBuf> = None;
+        for p in paths {
+            let parent = p.parent().unwrap_or(p).to_path_buf();
+            root = Some(match root {
+                None => parent,
+                Some(r) => Self::common_prefix(&r, &parent),
+            });
+        }
+        root.unwrap_or_else(|| PathBuf::from("/"))
     }
-    root.unwrap_or_else(|| PathBuf::from("/"))
-}
 
     fn common_prefix(a: &std::path::Path, b: &std::path::Path) -> PathBuf {
-    let mut res = PathBuf::new();
-    for (x, y) in a.components().zip(b.components()) {
-        if x == y {
-            res.push(x.as_os_str());
-        } else {
-            break;
+        let mut res = PathBuf::new();
+        for (x, y) in a.components().zip(b.components()) {
+            if x == y {
+                res.push(x.as_os_str());
+            } else {
+                break;
+            }
         }
+        res
     }
-    res
-}
 
     /// 由本地绝对路径构造 `FileMeta`（相对路径相对于公共根）
     fn build_file_meta(path: &std::path::Path, root: &std::path::Path) -> Option<FileMeta> {
-    let meta = std::fs::metadata(path).ok()?;
-    let relative_path = path
-        .strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/");
-    let file_name = path.file_name()?.to_string_lossy().to_string();
-    let modified_at = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    Some(FileMeta {
-        file_name,
-        file_size: meta.len(),
-        is_dir: meta.is_dir(),
-        relative_path,
-        modified_at,
-        mime_type: String::new(),
-        hash: None,
-    })
-}
+        let meta = std::fs::metadata(path).ok()?;
+        let relative_path = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let file_name = path.file_name()?.to_string_lossy().to_string();
+        let modified_at = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        Some(FileMeta {
+            file_name,
+            file_size: meta.len(),
+            is_dir: meta.is_dir(),
+            relative_path,
+            modified_at,
+            mime_type: String::new(),
+            hash: None,
+        })
+    }
 
     /// 递归判断某路径下的文件数是否超过 `limit`：一旦超过立即返回 true，不继续遍历，
     /// 不计算精确总数。用于「文件夹文件数超限」拦截（超大目录也不做完整统计，避免卡顿）。
@@ -1328,35 +1405,34 @@ impl ConnectionHub {
         }
     }
 
-
-/// 计算一份文件清单的「回环指纹」：以「文件名 + 大小」集合（排序后哈希）标识，
-/// 忽略 `relative_path`——因为对端把本机文件落盘后再 offer 时根目录不同，
-/// `relative_path` 必然不一致，而 `file_name + file_size` 足以在绝大多数场景下
-/// 稳定标识「同一份复制的文件」。用于接收方识别「本机刚复制出去、被对端回环广播回来」的回声。
-fn offer_fingerprint(files: &[FileMeta]) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut v: Vec<(String, u64)> = files
-        .iter()
-        .map(|f| (f.file_name.clone(), f.file_size))
-        .collect();
-    v.sort();
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    v.hash(&mut h);
-    format!("{:x}", h.finish())
-}
+    /// 计算一份文件清单的「回环指纹」：以「文件名 + 大小」集合（排序后哈希）标识，
+    /// 忽略 `relative_path`——因为对端把本机文件落盘后再 offer 时根目录不同，
+    /// `relative_path` 必然不一致，而 `file_name + file_size` 足以在绝大多数场景下
+    /// 稳定标识「同一份复制的文件」。用于接收方识别「本机刚复制出去、被对端回环广播回来」的回声。
+    fn offer_fingerprint(files: &[FileMeta]) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut v: Vec<(String, u64)> = files
+            .iter()
+            .map(|f| (f.file_name.clone(), f.file_size))
+            .collect();
+        v.sort();
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        v.hash(&mut h);
+        format!("{:x}", h.finish())
+    }
 
     /// 把设备名等非安全字符净化为目录名
     fn sanitize_name(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
+        name.chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    }
 
     /// 启动监听器、本地剪贴板广播器，并订阅 mDNS 发现事件（仅对已配对对端自动重连）。
     pub async fn start(self: Arc<Self>, app: AppHandle, listen_port: u16) {
@@ -1395,7 +1471,9 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
                             hub.note_seen(&msg_id);
                             let peers = hub.peers.lock().unwrap().clone();
                             if peers.is_empty() {
-                                tracing::warn!("本地剪贴板已变化，但当前没有已连接对端，内容未发出");
+                                tracing::warn!(
+                                    "本地剪贴板已变化，但当前没有已连接对端，内容未发出"
+                                );
                                 continue;
                             }
                             tracing::debug!(
@@ -1437,10 +1515,8 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
                         loop {
                             match listener.accept().await {
                                 Ok((sock, _)) => {
-                                    let ra = sock
-                                        .peer_addr()
-                                        .map(|a| a.to_string())
-                                        .unwrap_or_default();
+                                    let ra =
+                                        sock.peer_addr().map(|a| a.to_string()).unwrap_or_default();
                                     // 嗅探请求行：文件拉取走 HTTP 文件服务，其余升级为 WS
                                     let mut peek_buf = [0u8; 512];
                                     let n = sock.peek(&mut peek_buf).await.unwrap_or(0);
@@ -1468,19 +1544,35 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
                                         Ok(ws) => {
                                             let hub = hub.clone();
                                             tauri::async_runtime::spawn(async move {
-                                                let _ = hub
+                                                // 响应方握手/配对失败必须留痕：此前错误被直接
+                                                // 丢弃，对端发起的配对失败在本机日志里完全静默，
+                                                // 排查「配对失败」时无从下手。
+                                                if let Err(e) = hub
                                                     .run_connection(
                                                         ws,
                                                         Role::Responder,
                                                         "incoming".to_string(),
                                                         "incoming".to_string(),
-                                                        ra,
+                                                        ra.clone(),
                                                         None,
                                                     )
-                                                    .await;
+                                                    .await
+                                                {
+                                                    tracing::warn!(
+                                                        "incoming connection from {ra} ended: {e}"
+                                                    );
+                                                }
                                             });
                                         }
-                                        Err(e) => tracing::warn!("ws accept failed: {e}"),
+                                        Err(e) => {
+                                            // 记录来源地址 + 嗅探缓冲区首字节：非 WS 客户端
+                                            // （扫描器/协议不兼容的对端）能直接看出对方发的是什么。
+                                            let head = String::from_utf8_lossy(&peek_buf[..n]);
+                                            let head: String = head.chars().take(64).collect();
+                                            tracing::warn!(
+                                                "ws accept failed (from {ra}): {e}; head: {head:?}"
+                                            );
+                                        }
                                     }
                                 }
                                 Err(e) => {
@@ -1547,6 +1639,10 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
                     {
                         let paired = state.registry.lock().list();
                         for d in paired {
+                            // 被对端拒绝冷却期内不重试（对端已无本机配对信息）
+                            if hub.is_rejected(&d.device_id.0) {
+                                continue;
+                            }
                             if let Some(addr) = d.last_addr {
                                 if hub.peers.lock().unwrap().contains_key(&d.device_id.0) {
                                     continue; // 当前已连，跳过
@@ -1568,6 +1664,10 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
     /// 由 `connecting` 守卫按 `addr:port` 去重。
     fn spawn_reconnect_if_paired(self: Arc<Self>, peer: DiscoveredPeer) {
         if !self.is_paired(&peer.device_id) {
+            return;
+        }
+        // 被对端拒绝冷却期内不重试：对端已无本机配对信息，重试只会空锤
+        if self.is_rejected(&peer.device_id) {
             return;
         }
         if self.peers.lock().unwrap().contains_key(&peer.device_id) {
@@ -1617,6 +1717,11 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
     /// 若多次尝试仍失败（如配对码错误或对方未生成），则主动结束并通知前端，避免无限重试。
     pub async fn pair_with(self: Arc<Self>, peer: DiscoveredPeer, code: String) {
         let key = format!("{}:{}", peer.addr, peer.port);
+        // 用户主动重新配对：清除拒绝冷却（如有）。握手以 Some(false) 强制走配对码，
+        // 成功后新 link secret 会覆盖双方旧值，无需先「取消配对」。
+        if !peer.device_id.is_empty() {
+            self.clear_rejected(&peer.device_id);
+        }
         {
             let mut g = self.connecting.lock().unwrap();
             if g.contains(&key) {
@@ -1754,7 +1859,7 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
         self: Arc<Self>,
         mut ws: WebSocketStream<S>,
         role: Role,
-        _placeholder_id: String,
+        dial_id: String,
         _placeholder_name: String,
         peer_addr: String,
         outgoing_code: Option<String>,
@@ -1762,21 +1867,76 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        // 1) Hello 交换：先发自己的身份，再读对方身份
+        // 1) Hello 交换。发起方声明连接意图（reconnect：静默重连 / 用户配对）；
+        //    应答方读到对端身份后，按 device_id 查本机配对表并随 Hello 回应。
+        //    配对关系完全以客户端 ID 为准——IP 只用于找到对方，不用于识别。
         let my_id = self.identity.id.0.clone();
+        let is_initiator = matches!(role, Role::Initiator);
+        let reconnect_intent = outgoing_code.is_none(); // 用户配对必带配对码
         let my_hello = HelloPayload {
             device_id: my_id.clone(),
             device_name: self.identity.name.clone(),
             public_key: base64::engine::general_purpose::STANDARD
                 .encode(self.identity.public_key_bytes()),
-            listen_port: self
-                .listen_port
-                .load(std::sync::atomic::Ordering::Relaxed),
+            listen_port: self.listen_port.load(std::sync::atomic::Ordering::Relaxed),
+            reconnect: reconnect_intent,
         };
-        send_frame(&mut ws, MessageType::Hello, &serde_json::to_vec(&my_hello)?).await?;
-        let (_ht, hpayload) = recv_frame(&mut ws).await?;
-        let peer_hello: HelloPayload = serde_json::from_slice(&hpayload)
-            .map_err(|e| anyhow::anyhow!("bad hello payload: {e}"))?;
+        let (peer_hello, resp_paired) = if is_initiator {
+            send_frame(&mut ws, MessageType::Hello, &serde_json::to_vec(&my_hello)?).await?;
+            let (ft, hpayload) = recv_frame(&mut ws).await?;
+            if ft == MessageType::Reject {
+                // 对端明确拒绝：本机在其处已无配对信息（对方取消配对 / 重置）。
+                // 停止对该对端的自动重连（冷却期）并提示一次，不再 5s 空锤。
+                let was_new = self.mark_rejected(&dial_id);
+                if was_new {
+                    if let Some(app) = self.app.lock().unwrap().clone() {
+                        let _ = app.emit(
+                            "pairing-failed",
+                            serde_json::json!({
+                                "device_id": dial_id,
+                                "reason": "对方已没有与本机的配对信息（对方可能取消配对或重置），自动重连已暂停，请重新配对",
+                            }),
+                        );
+                    }
+                }
+                anyhow::bail!("对端拒绝握手（本机对其已无配对关系）");
+            }
+            let peer: HelloPayload = serde_json::from_slice(&hpayload)
+                .map_err(|e| anyhow::anyhow!("bad hello payload: {e}"))?;
+            let peer_reconnect = peer.reconnect;
+            (peer, peer_reconnect)
+        } else {
+            let (ht, hpayload) = recv_frame(&mut ws).await?;
+            if ht != MessageType::Hello {
+                anyhow::bail!("握手首帧不是 Hello（type={ht:?}）");
+            }
+            let peer: HelloPayload = serde_json::from_slice(&hpayload)
+                .map_err(|e| anyhow::anyhow!("bad hello payload: {e}"))?;
+            let resp_paired = self.is_paired(&peer.device_id);
+            // 对端要静默重连但本机按 ID 查无其配对信息 → 直接拒绝，
+            // 让对端停止自动重连并提示重新配对，而不是反复空锤。
+            if peer.reconnect && !resp_paired {
+                let _ = send_frame(&mut ws, MessageType::Reject, b"unpaired").await;
+                if self.should_emit_pairing_fail(&peer.device_id) {
+                    if let Some(app) = self.app.lock().unwrap().clone() {
+                        let _ = app.emit(
+                            "pairing-failed",
+                            serde_json::json!({
+                                "device_id": peer.device_id,
+                                "reason": format!("「{}」尝试重连，但本机已无其配对信息；请在对方设备上重新配对", peer.device_name),
+                            }),
+                        );
+                    }
+                }
+                anyhow::bail!("对端静默重连但本机按 ID 无其配对信息，已拒绝");
+            }
+            let my_hello = HelloPayload {
+                reconnect: resp_paired,
+                ..my_hello
+            };
+            send_frame(&mut ws, MessageType::Hello, &serde_json::to_vec(&my_hello)?).await?;
+            (peer, resp_paired)
+        };
         let peer_id = peer_hello.device_id.clone();
         let peer_name = peer_hello.device_name.clone();
 
@@ -1785,45 +1945,63 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
             anyhow::bail!("拒绝与自身建立连接");
         }
 
-        // 2) 选择口令：已配对 → 用持久化的 link secret 静默重连（含重启后）；
-        //    未配对（首配对）→ 应答方用本机「配对码」（应答方常驻、无需点击生成），
-        //    发起方必须用调用方显式传入的对方配对码（outgoing_code）；两端配对码
-        //    各自独立、无需预先相同，仅本次配对握手持平即可。刷新本机配对码不影响
-        //    已配对设备（它们走 link secret 重连）。
-        let cached = self.paired_codes.lock().unwrap().get(&peer_id).cloned();
-        let (pw, is_fresh_pairing) = match cached {
-            Some(secret) => (secret, false),
-            None => {
-                let code = match role {
-                    Role::Initiator => outgoing_code.clone().ok_or_else(|| {
-                        anyhow::anyhow!("未提供配对码（请在配对时输入对方显示的配对码）")
-                    })?,
-                    Role::Responder => self.pairing_code(),
-                };
-                (code, true)
-            }
+        // 2) 建立会话密钥。规则：**双向都按客户端 ID 判断**——双方配对表里都有对方
+        //    → 跳过一切协商，直接用各自的 link secret 派生会话密钥建连；任一方没有
+        //    → 用户配对流程（SPAKE2 + 配对码），成功后新 link secret 覆盖旧值，
+        //    重新配对无需先取消配对。
+        //    「要重连但对方查无此 ID」的不对称组合已在 Hello/Reject 阶段拦截，
+        //    走不到这里；因此 direct 与 fresh 两路互斥且两端判定必然一致。
+        // 注意两端判定依据不同：发起方 = 自己的重连意图 + 应答方的配对标志
+        //（resp_paired 即对端 Hello 里的 reconnect 字段）；应答方 = 发起方声明的
+        // 意图（peer_hello.reconnect）+ 本机配对表。不能用 outgoing_code 判断——
+        // 应答方永远没有配对码，那会让重连意图判断失效。
+        let direct = if is_initiator {
+            reconnect_intent && resp_paired
+        } else {
+            peer_hello.reconnect && resp_paired
         };
-
-        // 3) SPAKE2 握手（发起方先发、应答方先收）
-        let key = match role {
-            Role::Initiator => {
-                let init = start_initiator(&pw);
-                send_frame(&mut ws, MessageType::Signal, &init.message).await?;
-                let (_t, b) = recv_frame(&mut ws).await?;
-                let shared = init
-                    .finish(&b)
-                    .map_err(|e| anyhow::anyhow!("spake2 finish: {e}"))?;
-                derive_session_key(&shared)?
-            }
-            Role::Responder => {
-                let (_t, a) = recv_frame(&mut ws).await?;
-                let resp = start_responder(&pw);
-                send_frame(&mut ws, MessageType::Signal, &resp.message).await?;
-                let shared = resp
-                    .finish(&a)
-                    .map_err(|e| anyhow::anyhow!("spake2 finish: {e}"))?;
-                derive_session_key(&shared)?
-            }
+        let (key, is_fresh_pairing) = if direct {
+            let cached_link = self.paired_codes.lock().unwrap().get(&peer_id).cloned();
+            let link = match cached_link {
+                Some(l) => l,
+                // 边缘：拨号目标 id 与实际对端不符（IP 复用指向陌生设备）。
+                // 明确回拒，让应答方也不要傻等。
+                None => {
+                    let _ = send_frame(&mut ws, MessageType::Reject, b"no_secret").await;
+                    anyhow::bail!("直接建连失败：本机无该对端的 link secret");
+                }
+            };
+            let raw: [u8; 32] =
+                hex_decode_32(&link).map_err(|e| anyhow::anyhow!("link secret 非法: {e}"))?;
+            (derive_session_key(&raw)?, false)
+        } else {
+            // 用户配对流程：SPAKE2（发起方先发、应答方先收）
+            let pw = match role {
+                Role::Initiator => outgoing_code.clone().ok_or_else(|| {
+                    anyhow::anyhow!("未提供配对码（请在配对时输入对方显示的配对码）")
+                })?,
+                Role::Responder => self.pairing_code(),
+            };
+            let shared = match role {
+                Role::Initiator => {
+                    let init = start_initiator(&pw);
+                    send_frame(&mut ws, MessageType::Signal, &init.message).await?;
+                    let (_t, b) = recv_frame(&mut ws).await?;
+                    init.finish(&b)
+                        .map_err(|e| anyhow::anyhow!("spake2 finish: {e}"))?
+                }
+                Role::Responder => {
+                    let (st, a) = recv_frame(&mut ws).await?;
+                    if st == MessageType::Reject {
+                        anyhow::bail!("对端在配对阶段拒绝握手");
+                    }
+                    let resp = start_responder(&pw);
+                    send_frame(&mut ws, MessageType::Signal, &resp.message).await?;
+                    resp.finish(&a)
+                        .map_err(|e| anyhow::anyhow!("spake2 finish: {e}"))?
+                }
+            };
+            (derive_session_key(&shared)?, true)
         };
 
         // 4) HMAC 校验：确认两端使用同一口令（错误口令会派生不同密钥 → 校验失败）。
@@ -1835,31 +2013,20 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
         let my_tag = verify_tag(&key, &my_id);
         let expected_peer_tag = verify_tag(&key, &peer_id);
         send_frame(&mut ws, MessageType::Verify, &my_tag).await?;
-        let (_vt, peer_tag) = recv_frame(&mut ws).await?;
+        let (vt, peer_tag) = recv_frame(&mut ws).await?;
+        if vt == MessageType::Reject {
+            // 直接建连边缘：对端拨号目标与实际身份不符、无本机 secret，主动回拒
+            anyhow::bail!("对端在校验阶段拒绝握手（无本机 link secret）");
+        }
         if !ct_eq(&peer_tag, &expected_peer_tag) {
-            // HMAC 校验失败：两端使用的口令不一致。需区分两种情形给出不同提示，
-            // 否则会自动重连（link secret）与首次配对（输入的配对码）的失败被混为一谈，
-            // 在「一端已配对、另一端配对状态已丢失」的非对称情况下误导用户。
+            // HMAC 校验失败：两端使用的口令不一致。本机作为应答方**只记日志、不弹窗**：
+            // 若是对方用户输错配对码，错误反馈出现在发起方（输码一侧）的界面；若是
+            // 对端持过期 link secret 静默重连（旧版协议无法提前拦截），属后台事件、
+            // 用户无从操作——无论哪种，本机弹「配对码不一致」都只是打扰。
             if matches!(role, Role::Responder) {
-                if is_fresh_pairing {
-                    // 首次配对：用户确实输入了对方配对码，但两边不一致 → 如实提示。
-                    if let Some(app) = self.app.lock().unwrap().clone() {
-                        let _ = app.emit(
-                            "pairing-failed",
-                            serde_json::json!({
-                                "device_id": peer_id,
-                                "reason": format!("与「{peer_name}」的配对码不一致"),
-                            }),
-                        );
-                    }
-                } else {
-                    // 自动重连（link secret）失败：多半是两端配对状态不一致
-                    // （一端配置被重置/清除）。这属于后台静默重连，不该弹「配对码不一致」
-                    // 误导用户；只记日志，由用户侧「取消配对后重新配对」来修复。
-                    tracing::warn!(
-                        "与 {peer_name} 的重连握手失败：本机与其配对状态不一致（link secret 不匹配），建议双方先取消配对再重新配对"
-                    );
-                }
+                tracing::warn!(
+                    "与 {peer_name} 的握手口令校验失败（fresh_pairing={is_fresh_pairing}），连接已断开；若为重新配对请核对配对码，或双方取消配对后重新配对"
+                );
             }
             return Err(HandshakeError::CodeMismatch.into());
         }
@@ -1886,6 +2053,9 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
                     .unwrap()
                     .insert(peer_id.clone(), link.clone());
                 crate::device::store::store_secret(&app, &peer_id, &link);
+                // 重新配对成功：清除拒绝冷却（如有），恢复正常自动重连
+                self.clear_rejected(&peer_id);
+                self.pairing_fail_emitted.lock().unwrap().remove(&peer_id);
             }
 
             let state = app.state::<AppState>();
@@ -1939,7 +2109,10 @@ fn offer_fingerprint(files: &[FileMeta]) -> String {
             // 记录当前已连地址，供兜底重连去重（同样只在发起方有效，
             // 此时 peer_addr 才是对端真实监听地址 host:port）。
             if matches!(role, Role::Initiator) {
-                self.connected_addrs.lock().unwrap().insert(peer_addr.clone());
+                self.connected_addrs
+                    .lock()
+                    .unwrap()
+                    .insert(peer_addr.clone());
             }
 
             let _ = app.emit(
@@ -2172,8 +2345,8 @@ where
     while let Some(m) = ws.next().await {
         match m {
             Ok(Message::Binary(b)) => {
-                let f = MessageFrame::decode(&b)
-                    .map_err(|e| anyhow::anyhow!("decode frame: {e}"))?;
+                let f =
+                    MessageFrame::decode(&b).map_err(|e| anyhow::anyhow!("decode frame: {e}"))?;
                 return Ok((f.msg_type, f.payload));
             }
             Ok(Message::Close(_)) | Err(_) => {
@@ -2190,6 +2363,25 @@ fn derive_session_key(shared: &[u8; 32]) -> anyhow::Result<[u8; 32]> {
         .map_err(|e| anyhow::anyhow!("kdf: {e}"))?;
     let (enc, _mac) = split_keys(okm);
     Ok(enc)
+}
+
+/// 解码 64 位十六进制字符串为 32 字节（link secret 存储格式）。
+fn hex_decode_32(s: &str) -> anyhow::Result<[u8; 32]> {
+    let bytes = s.as_bytes();
+    if bytes.len() != 64 {
+        anyhow::bail!("长度应为 64，实际 {}", bytes.len());
+    }
+    let mut out = [0u8; 32];
+    for (i, chunk) in bytes.chunks(2).enumerate() {
+        let hi = (chunk[0] as char)
+            .to_digit(16)
+            .ok_or_else(|| anyhow::anyhow!("非法十六进制字符"))?;
+        let lo = (chunk[1] as char)
+            .to_digit(16)
+            .ok_or_else(|| anyhow::anyhow!("非法十六进制字符"))?;
+        out[i] = (hi * 16 + lo) as u8;
+    }
+    Ok(out)
 }
 
 type HmacSha256 = Hmac<Sha256>;
@@ -2384,7 +2576,8 @@ mod tests {
 
         // 3) 处理该回环 Offer
         let h = TestArc::clone(&hub);
-        h.handle_file_frame(echo_offer, &tx, "fake-peer-not-self").await;
+        h.handle_file_frame(echo_offer, &tx, "fake-peer-not-self")
+            .await;
 
         // 4) 断言：本机待拉取列表仍为空（回声被丢弃）
         assert!(

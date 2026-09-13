@@ -26,6 +26,11 @@ pub enum MessageType {
     /// `FileFrame`（文件清单 / 拉取请求 / 分片）。与 `Sync` 共用同一会话密钥，确保
     /// 文件名、大小、内容均不在局域网裸奔。
     File = 0x08,
+    /// 握手拒绝帧：应答方在 SPAKE2 之前发现无法与对端达成口令（典型：对端声明持有
+    /// link secret 重连，但本机已无其配对信息），发此帧后断开，让对端立即停止自动
+    /// 重连并提示重新配对，而不是反复空锤。payload = UTF-8 原因文本（如 "unpaired"）。
+    /// 旧版客户端不认识此帧，收到后按握手失败断开，行为与之前一致。
+    Reject = 0x09,
 }
 
 impl MessageType {
@@ -39,6 +44,7 @@ impl MessageType {
             0x06 => Some(Self::Hello),
             0x07 => Some(Self::Verify),
             0x08 => Some(Self::File),
+            0x09 => Some(Self::Reject),
             _ => None,
         }
     }
@@ -166,7 +172,9 @@ mod tests {
 
     #[test]
     fn decode_rejects_unknown_type() {
-        assert!(MessageFrame::decode(&[0x09, 0x00]).is_err());
+        // 0x09 已分配给 Reject；这里用仍未分配的 0xFF 验证未知类型被拒
+        assert!(MessageFrame::decode(&[0xFF, 0x00]).is_err());
+        assert!(MessageFrame::decode(&[0x0A, 0x00]).is_err());
     }
 
     #[test]
