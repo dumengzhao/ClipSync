@@ -222,6 +222,8 @@ export default function App() {
       });
     });
     const unlistenPaired = listen<PairedDeviceInfo>('peer-paired', (e) => {
+      // 配对流程结束（无论成功重配还是新配对）：收起配对码输入框
+      setPairingTarget((prev) => (prev?.device_id === e.payload.id ? null : prev));
       setPaired((prev) => {
         if (prev.some((p) => p.id === e.payload.id)) {
           return prev.map((p) => (p.id === e.payload.id ? e.payload : p));
@@ -235,6 +237,9 @@ export default function App() {
       (e) => flash(`配对失败：${e.payload.reason}`),
     );
     const unlistenUnpaired = listen<string>('peer-unpaired', (e) => {
+      // 清掉残留的配对码输入框：否则该设备回到待连接列表时，因 pairingTarget
+      // 仍指向它，会「自动展开」输入框，看起来像界面自作主张弹配对
+      setPairingTarget((prev) => (prev?.device_id === e.payload ? null : prev));
       setPaired((prev) => prev.filter((p) => p.id !== e.payload));
       setConnected((prev) => {
         const n = new Set(prev);
