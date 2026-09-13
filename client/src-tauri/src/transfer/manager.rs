@@ -1286,6 +1286,8 @@ impl ConnectionHub {
                                 "received": written,
                                 "total": total,
                                 "percent": pct,
+                                // P2P 拉取走已建立的直连通道（局域网/直连 IP），恒为内网
+                                "route": "lan",
                             }),
                         );
                     }
@@ -1311,6 +1313,7 @@ impl ConnectionHub {
                         "received": total,
                         "total": total,
                         "percent": 100u32,
+                        "route": "lan",
                     }),
                 );
             }
@@ -1324,6 +1327,7 @@ impl ConnectionHub {
                         "file_count": received.len(),
                         "files": file_details,
                         "pulled_at": now_secs(),
+                        "route": "lan",
                     }),
                 );
             }
