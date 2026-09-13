@@ -1918,9 +1918,17 @@ impl ConnectionHub {
             send_frame(&mut ws, MessageType::Hello, &serde_json::to_vec(&my_hello)?).await?;
             let (ft, hpayload) = recv_frame(&mut ws).await?;
             if ft == MessageType::Reject {
-                // 对端明确拒绝：本机在其处已无配对信息（对方取消配对 / 重置）。
-                // 停止对该对端的自动重连（冷却期）并提示一次，不再 5s 空锤。
                 self.mark_rejected_addr(&peer_addr);
+                // 对端明确告知「已无与本机的配对信息」（unpaired）：对端已取消配对，
+                // 本机自动解除配对使双方状态一致，无需用户再手动取消。
+                // 其他拒绝原因（版本不兼容等）仅暂停重连，不动配对状态。
+                let reason = String::from_utf8_lossy(&hpayload).to_string();
+                if reason == "unpaired" && !dial_id.is_empty() && self.is_paired(&dial_id) {
+                    self.unpair(&dial_id);
+                    anyhow::bail!("对端已取消配对，本机已自动解除配对");
+                }
+                // 对端未说明原因（旧版 / 其他）：停止对该对端的自动重连（冷却期）
+                // 并提示一次，不再 5s 空锤。
                 let was_new = self.mark_rejected(&dial_id);
                 if was_new {
                     if let Some(app) = self.app.lock().unwrap().clone() {
