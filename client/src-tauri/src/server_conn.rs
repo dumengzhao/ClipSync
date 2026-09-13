@@ -805,11 +805,7 @@ impl ServerConn {
         let mut done_plain: u64 = 0u64;
         let mut saved = Vec::new();
         let mut route_used: &'static str = "";
-        // 通知前端「拉取已开始」（与 P2P 路径 file-pull-start 对齐）
-        let _ = app.emit(
-            "file-pull-start",
-            serde_json::json!({ "transfer_id": pull_id }),
-        );
+        let mut start_emitted = false;
         for f in &files {
             let hash = f.hash.clone().unwrap_or_default();
             // 依次尝试各路由，第一个返回 2xx 的胜出（误连到别家内网同 IP 的
@@ -833,6 +829,15 @@ impl ServerConn {
             };
             if route_used.is_empty() {
                 route_used = route;
+            }
+            if !start_emitted {
+                start_emitted = true;
+                // 路由确定后再发 start（内网直连通常瞬时；ext_file_ep 兜底时最多
+                // 等一个连接超时），前端路由徽标从进度一开始就可见
+                let _ = app.emit(
+                    "file-pull-start",
+                    serde_json::json!({ "transfer_id": pull_id, "route": route }),
+                );
             }
             let enc_len = resp.content_length().unwrap_or(0);
             // 流式下载到临时文件，边下边上报进度——大文件也能看到中间进度，

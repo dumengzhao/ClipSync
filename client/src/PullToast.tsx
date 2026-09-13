@@ -252,8 +252,12 @@ export default function PullToast() {
         onNewItemRef.current({ id: crossItemId(o), kind: 'cross', ts: now(), offer: o });
       }),
 
-      listen<{ transfer_id: string }>('file-pull-start', (e) => {
+      listen<{ transfer_id: string; route?: string }>('file-pull-start', (e) => {
         const id = `local:${e.payload.transfer_id}`;
+        if (e.payload.route) {
+          // 路由在 start 事件即确定：徽标从进度条一开始就可见，不用等首个进度帧
+          setRoutes((prev) => ({ ...prev, [id]: e.payload.route as string }));
+        }
         log(`file-pull-start: ${id}`);
         setItems((prev) => {
           const it = prev.find((x) => x.id === id);
@@ -549,16 +553,23 @@ export default function PullToast() {
                 <span className="pt-size">{fmtSize(itemSize(it))}</span>
               </div>
               <div className="pt-sub">{itemFrom(it)}</div>
-              <div className="pt-bar">
-                <div className="pt-bar-fill" style={{ width: `${pct}%` }} />
-                <span className="pt-pct">
-                  {routes[it.id] === 'lan'
-                    ? '内网 '
-                    : routes[it.id] === 'wan'
-                      ? '外网 '
-                      : ''}
-                  {pct}%
-                </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                {routes[it.id] && (
+                  <span
+                    style={{
+                      fontSize: '0.72rem',
+                      color: '#9ca3af',
+                      flexShrink: 0,
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {routes[it.id] === 'lan' ? '内网' : '外网'}
+                  </span>
+                )}
+                <div className="pt-bar" style={{ flex: 1 }}>
+                  <div className="pt-bar-fill" style={{ width: `${pct}%` }} />
+                  <span className="pt-pct">{pct}%</span>
+                </div>
               </div>
             </div>
           );
@@ -573,9 +584,23 @@ export default function PullToast() {
               <span className="pt-size">{fmtSize(itemSize(it))}</span>
             </div>
             <div className="pt-sub">{itemFrom(it)}</div>
-            <div className="pt-bar">
-              <div className="pt-bar-fill" style={{ width: '100%' }} />
-              <span className="pt-pct">100%</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+              {routes[it.id] && (
+                <span
+                  style={{
+                    fontSize: '0.72rem',
+                    color: '#9ca3af',
+                    flexShrink: 0,
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {routes[it.id] === 'lan' ? '内网' : '外网'}
+                </span>
+              )}
+              <div className="pt-bar" style={{ flex: 1 }}>
+                <div className="pt-bar-fill" style={{ width: '100%' }} />
+                <span className="pt-pct">100%</span>
+              </div>
             </div>
           </div>
         ))}
