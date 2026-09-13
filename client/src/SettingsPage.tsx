@@ -11,9 +11,11 @@ import {
   isInstalledBuild,
   getVersion,
   probeExtFileEp,
+  scanLanServerConfigs,
   type AppConfig,
   type UpdateInfo,
   type ProbeResult,
+  type LanServerConfigGroup,
 } from './api/tauri';
 import { open } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
@@ -99,6 +101,12 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
     probing: boolean;
     probe: ProbeResult | null;
   }>({ open: false, value: '', probing: false, probe: null });
+  // 「从局域网其他已配对设备获取服务端配置」：扫描中、结果、选择弹窗
+  const [lanScanBusy, setLanScanBusy] = useState(false);
+  const [lanPickModal, setLanPickModal] = useState<{
+    open: boolean;
+    groups: import('./api/tauri').LanServerConfigGroup[];
+  }>({ open: false, groups: [] });
   // 手动地址配对时输入的对方配对码（按当前正在配对的那条地址记录）
   const [manualPairing, setManualPairing] = useState<{ addr: string; port: number } | null>(null);
   const [manualPairCode, setManualPairCode] = useState('');
@@ -324,6 +332,68 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
       return;
     }
     await persist({ ext_file_ep: '' }, '已清空对外文件地址');
+  };
+
+  /// 从局域网其他已配对设备获取服务端配置：扫描 → 0/1/多分支。
+  /// - 0 个：toast 提示「未找到」；
+  /// - 1 个：直接写入（点按钮即视为确认，不二次弹窗）；
+  /// - ≥2 个：弹选择窗（显示设备名 + server_url host:port，token 不显，可取消）。
+  const lanScanAndApply = async () => {
+    if (lanScanBusy) return;
+    setLanScanBusy(true);
+    try {
+      const groups = await scanLanServerConfigs();
+      if (groups.length === 0) {
+        setMsg('未在已配对局域网设备中找到可用的服务端配置');
+        return;
+      }
+      if (groups.length === 1) {
+        const g = groups[0];
+        const curUrl = persistedRef.current?.server_url ?? '';
+        const curToken = persistedRef.current?.network_token ?? '';
+        if (curUrl === g.server_url && curToken === g.network_token) {
+          setMsg('服务端配置未变化');
+          return;
+        }
+        await persist(
+          { server_url: g.server_url, network_token: g.network_token },
+          '已从局域网其他设备获取服务端配置',
+        );
+        // 同步「服务端地址」拆分的输入框（splice srvScheme/srvHost）
+        const parsed = parseServerUrl(g.server_url);
+        setSrvScheme(parsed.scheme);
+        setSrvHost(parsed.host);
+        return;
+      }
+      // 多组：弹选择
+      setLanPickModal({ open: true, groups });
+    } catch (e) {
+      setMsg('扫描失败: ' + String(e), 'err');
+    } finally {
+      setLanScanBusy(false);
+    }
+  };
+  const cancelLanPick = () => setLanPickModal({ open: false, groups: [] });
+  const applyLanGroup = async (g: LanServerConfigGroup) => {
+    setLanPickModal({ open: false, groups: [] });
+    const curUrl = persistedRef.current?.server_url ?? '';
+    const curToken = persistedRef.current?.network_token ?? '';
+    if (curUrl === g.server_url && curToken === g.network_token) {
+      setMsg('服务端配置未变化');
+      return;
+    }
+    await persist(
+      { server_url: g.server_url, network_token: g.network_token },
+      '已从局域网其他设备获取服务端配置',
+    );
+    const parsed = parseServerUrl(g.server_url);
+    setSrvScheme(parsed.scheme);
+    setSrvHost(parsed.host);
+  };
+  // 把 server_url 的 host 部分（去掉 /ws）抽出来用于弹窗里展示
+  const serverUrlHost = (url: string): string => {
+    const m = /^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)?([^/]+)/.exec(url.trim());
+    return m ? m[2] : url;
   };
 
   // 服务端地址：失焦即把「协议 + 主机:端口」拼回完整 ws(s)://host:port/ws 落盘
@@ -699,6 +769,21 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         </div>
       </div>
       <div className="row">
+        <label></label>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flex: '0 0 auto' }}>
+          <button
+            className="btn btn-sm btn-ghost"
+            onClick={lanScanAndApply}
+            disabled={lanScanBusy}
+          >
+            {lanScanBusy ? '扫描中…' : '从局域网其他已配对设备获取…'}
+          </button>
+          <span className="hint" style={{ marginTop: 0 }}>
+            候选 = 本机已配对 + 当前在线 + 同局域网；查询经 P2P 加密通道，不携带对端对外文件地址。
+          </span>
+        </div>
+      </div>
+      <div className="row">
         <label>Network Token（共享密钥）</label>
         <input
           type="text"
@@ -927,6 +1012,40 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
                 disabled={extEpModal.probing}
               >
                 {extEpModal.probing ? '探测中…' : '测试并保存'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 「从局域网其他已配对设备获取」选择弹窗：仅 ≥2 组合时弹出 */}
+      {lanPickModal.open && (
+        <div className="modal-overlay" onClick={cancelLanPick}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ width: 'min(420px, calc(100vw - 3rem))' }}>
+            <h3 className="modal-title">选择服务端配置</h3>
+            <p className="modal-body">
+              找到 {lanPickModal.groups.length} 组不同的服务端配置，请挑一组写入。
+              Token 不展示。
+            </p>
+            <ul style={{ listStyle: 'none', padding: 0, margin: '0 0 0.9rem' }}>
+              {lanPickModal.groups.map((g, i) => (
+                <li key={i} style={{ marginBottom: '0.4rem' }}>
+                  <button
+                    className="btn btn-ghost"
+                    style={{ width: '100%', textAlign: 'left', padding: '0.6rem 0.75rem' }}
+                    onClick={() => applyLanGroup(g)}
+                  >
+                    <div style={{ fontWeight: 500 }}>{serverUrlHost(g.server_url)}</div>
+                    <div style={{ fontSize: '0.78rem', color: '#64748b', marginTop: '0.2rem' }}>
+                      来自 {g.sources.map((s) => s.device_name).join('、')}（{g.sources.length} 台）
+                    </div>
+                  </button>
+                </li>
+              ))}
+            </ul>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={cancelLanPick}>
+                取消
               </button>
             </div>
           </div>
