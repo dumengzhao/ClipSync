@@ -458,6 +458,73 @@ body {
   background: rgba(255, 107, 107, 0.12);
 }
 
+/* ===== 通用弹窗（取消配对确认 / 配对码输入） ===== */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.45);
+  animation: modal-fade 0.12s ease;
+}
+
+@keyframes modal-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.modal {
+  width: min(340px, calc(100vw - 3rem));
+  background: #ffffff;
+  color: #1a1a1a;
+  border-radius: 10px;
+  padding: 1.1rem 1.25rem 1rem;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+  animation: modal-pop 0.14s ease;
+}
+
+@keyframes modal-pop {
+  from { transform: scale(0.96); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+:root[data-theme='dark'] .modal {
+  background: #262626;
+  color: #f5f5f5;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme='system'] .modal {
+    background: #262626;
+    color: #f5f5f5;
+  }
+}
+
+.modal-title {
+  font-size: 1rem;
+  margin-bottom: 0.4rem;
+}
+
+.modal-body {
+  font-size: 0.85rem;
+  color: #64748b;
+  margin-bottom: 0.8rem;
+}
+
+.modal .pair-input {
+  width: 100%;
+  margin-bottom: 0.9rem;
+  border-color: rgba(148, 163, 184, 0.5);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
 .settings {
   flex: 1 1 auto;
   min-height: 0;
@@ -949,6 +1016,25 @@ body {
 
 .pt-pull:hover {
   background: #1d4ed8;
+}
+
+/* 拉取中条目的「取消」按钮：紧凑幽灵样式，贴在进度条右侧 */
+.pt-cancel {
+  flex-shrink: 0;
+  height: 16px;
+  line-height: 14px;
+  padding: 0 0.45rem;
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  border-radius: 5px;
+  background: transparent;
+  color: #64748b;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.pt-cancel:hover {
+  border-color: #dc2626;
+  color: #dc2626;
 }
 
 .pt-bar {

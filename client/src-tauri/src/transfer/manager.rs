@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
@@ -165,6 +165,10 @@ struct PullState {
     files: Vec<FileMeta>,
     device_id: String,
     total_bytes: u64,
+    /// 用户取消标记：置位后写盘任务跳过「写剪贴板 + 发完成事件」收尾，
+    /// 只按取消路径收口（清临时半截文件由 complete 处理照常 emit 100% 的问题
+    /// 通过此标记短路）。
+    cancelled: Arc<AtomicBool>,
 }
 
 /// Hello 握手帧：在 SPAKE2 之前交换身份，用于应答方在已知对端身份的前提下选择口令
@@ -1195,6 +1199,7 @@ impl ConnectionHub {
         }
         let (chunk_tx, mut chunk_rx) =
             tokio::sync::mpsc::channel::<Option<FileChunkResponsePayload>>(32);
+        let cancelled_flag = Arc::new(AtomicBool::new(false));
         self.active_pulls.lock().unwrap().insert(
             transfer_id.clone(),
             PullState {
@@ -1203,6 +1208,7 @@ impl ConnectionHub {
                 files: offer.files.clone(),
                 device_id: offer.device_id.clone(),
                 total_bytes: total,
+                cancelled: cancelled_flag.clone(),
             },
         );
         let _ = peer_tx.send(Outgoing::File(FileFrame::PullRequest {
@@ -1296,8 +1302,10 @@ impl ConnectionHub {
                     }
                 }
             }
-            // 落盘完成：自动写本机剪贴板（带内容哈希回声抑制，避免触发新一轮 Offer 广播）
-            if !received.is_empty() {
+            // 落盘完成：自动写本机剪贴板（带内容哈希回声抑制，避免触发新一轮 Offer 广播）。
+            // 用户已取消时跳过：既不写剪贴板（半截文件没意义），也不发完成事件
+            // （取消收口已由 cancel_pull 的 file-pull-cancelled 事件完成）。
+            if !received.is_empty() && !cancelled_flag.load(Ordering::Relaxed) {
                 // 抑制「拉取完成后自动写本机剪贴板」被本地监听误判为新的文件拷贝而回环广播：
                 // 记录本次写出路径的哈希，处理任务在检测到变化、且读到的路径哈希与之一致时，
                 // 即视为本机刚写入的回声而丢弃，不广播 Offer。与文本/图片经 `last_emitted`
@@ -1308,6 +1316,12 @@ impl ConnectionHub {
             }
             // 收尾：显式上报 100%。快传输时节流（≥5%/≥200ms）可能永远没机会上报末帧，
             // 导致前端进度条卡在 0%、且从未看到 100% 就直接关闭。
+            // 取消路径跳过 100% 与 complete 事件：前端已由 file-pull-cancelled 收口，
+            // 再发 complete 会把「已取消」覆盖成「已保存」。
+            if cancelled_flag.load(Ordering::Relaxed) {
+                tracing::info!("拉取 {tid} 已取消，写盘任务退出（写入 {written} 字节后终止）");
+                return;
+            }
             if let Some(a) = &app {
                 let _ = a.emit(
                     "file-pull-progress",
@@ -1336,6 +1350,50 @@ impl ConnectionHub {
             }
             tracing::info!("拉取 {tid} 完成，共写入 {written} 字节");
         });
+    }
+
+    /// 取消本端发起的拉取（P2P）：立即终止落盘任务，并通知发送方停止发分片。
+    ///
+    /// 步骤：
+    /// 1. 置位 `cancelled` 标记 + 从 `active_pulls` 摘除条目 —— 落盘任务持有的
+    ///    `chunk_rx` 对端无人再写，`recv()` 返回 None 自然退出；摘除后后续到达的
+    ///    Chunk 命中「收到未知传输的分片」分支被丢弃，传输即刻断流。
+    /// 2. 向发送方发 `PullCancel` 帧 —— 对端收到后清理自己的发送任务。
+    /// 3. 发 `file-pull-cancelled` 事件给前端收口（P2P 路径的取消没有 complete 帧，
+    ///    前端「拉取中」条目必须靠此事件退出）。
+    pub fn cancel_pull(&self, transfer_id: &str) {
+        let removed = self.active_pulls.lock().unwrap().remove(transfer_id);
+        let Some(st) = removed else {
+            tracing::warn!("取消拉取：本端没有进行中的传输 {transfer_id}");
+            return;
+        };
+        // 先置位再摘除：写盘任务退出时据此跳过「写剪贴板 + 发完成事件」收尾
+        st.cancelled.store(true, Ordering::Relaxed);
+        // 清掉已写入的半截落盘文件（用户取消即不要这些数据）
+        for f in &st.files {
+            let p = st.target_dir.join(&f.relative_path);
+            let _ = std::fs::remove_file(p);
+        }
+        let device_id = st.device_id.clone();
+        // 通知发送方停止发分片（尽力而为：对端不在线就默默放弃）
+        if !device_id.is_empty() {
+            let peer_tx = {
+                let g = self.peers.lock().unwrap();
+                g.get(&device_id).map(|p| p.tx.clone())
+            };
+            if let Some(tx) = peer_tx {
+                let _ = tx.send(Outgoing::File(FileFrame::PullCancel {
+                    transfer_id: transfer_id.to_string(),
+                }));
+            }
+        }
+        if let Some(app) = self.app.lock().unwrap().clone() {
+            let _ = app.emit(
+                "file-pull-cancelled",
+                serde_json::json!({ "transfer_id": transfer_id }),
+            );
+        }
+        tracing::info!("拉取 {transfer_id} 已被用户取消");
     }
 
     /// 计算多条路径的最长公共父目录（用于还原相对结构）

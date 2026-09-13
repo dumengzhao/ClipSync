@@ -17,6 +17,7 @@ use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -291,6 +292,9 @@ pub struct ServerConn {
     /// 鉴权失败（bad_token）提示去重标记：仅首次向前端发 server-auth-rejected，
     /// 避免 60s 重试周期反复弹提示。入网成功或用户重存配置（reconnect）时复位。
     auth_fail_notified: AtomicBool,
+    /// 跨 LAN 拉取取消标记（key = pull_id）：`cancel_pull_cross_lan` 置位，
+    /// 下载循环在每个分片边界检查，命中即中止本次拉取。
+    cross_pull_cancel: Mutex<HashSet<String>>,
 }
 
 impl ServerConn {
@@ -307,6 +311,7 @@ impl ServerConn {
             reconnect_notify: Notify::new(),
             removed: AtomicBool::new(false),
             auth_fail_notified: AtomicBool::new(false),
+            cross_pull_cancel: Mutex::new(HashSet::new()),
         })
     }
 
@@ -737,6 +742,16 @@ impl ServerConn {
         }
     }
 
+    /// 请求取消指定 pull_id 的跨 LAN 拉取：返回 true 表示已登记（有拉取在等它生效）。
+    /// 取消标记是「尽力而为」的集合：登记后即使该拉取已结束也无副作用，由
+    /// 下载循环收尾时清除；条目极小，无需淘汰策略。
+    pub fn cancel_cross_pull(&self, pull_id: &str) -> bool {
+        self.cross_pull_cancel
+            .lock()
+            .unwrap()
+            .insert(pull_id.to_string())
+    }
+
     /// 跨 LAN 拉取：按发送方 device_id 优先走内网直连，回退 ext_file_ep。
     /// `pull_id` 是前端「待拉取条目」的唯一 id（不含 `local:` 前缀），用于把
     /// 进度事件(`file-pull-progress`/`file-pull-complete`)精准投递给对应条目，
@@ -795,6 +810,8 @@ impl ServerConn {
                 "对端不在本机局域网发现表中，且未配置对外文件地址（ext_file_ep），无法拉取"
             ));
         }
+        // 清掉此前针对本 pull_id 残留的取消标记（用户取消后立刻重新点拉取的场景）
+        self.cross_pull_cancel.lock().unwrap().remove(pull_id);
         // 连接超时：内网地址不可达时能快速回退到下一个候选，不至于长时间挂起
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(3))
@@ -807,6 +824,15 @@ impl ServerConn {
         let mut route_used: &'static str = "";
         let mut start_emitted = false;
         for f in &files {
+            // 取消检查点 1：每个文件开始前。命中即清标记并整体中止。
+            if self.cross_pull_cancel.lock().unwrap().remove(pull_id) {
+                // 清理已写入的临时文件，不留半截垃圾
+                for p in &saved {
+                    let _ = std::fs::remove_file(p);
+                }
+                tracing::info!("跨 LAN 拉取 {pull_id} 已被用户取消");
+                return Err(anyhow::anyhow!("__CANCELLED__"));
+            }
             let hash = f.hash.clone().unwrap_or_default();
             // 依次尝试各路由，第一个返回 2xx 的胜出（误连到别家内网同 IP 的
             // 陌生设备会 404 / 解密失败，自然落到下一个候选，不会拿到错数据）
@@ -854,6 +880,17 @@ impl ServerConn {
                 let mut last_pct: u32 = 0;
                 let mut last_at = std::time::Instant::now();
                 while let Some(chunk) = stream.next().await {
+                    // 取消检查点 2：下载中每个分片边界，大文件也能即时终止
+                    if self.cross_pull_cancel.lock().unwrap().contains(pull_id) {
+                        drop(tmpf);
+                        let _ = std::fs::remove_file(&tmp);
+                        self.cross_pull_cancel.lock().unwrap().remove(pull_id);
+                        for p in &saved {
+                            let _ = std::fs::remove_file(p);
+                        }
+                        tracing::info!("跨 LAN 拉取 {pull_id} 已被用户取消（下载中）");
+                        return Err(anyhow::anyhow!("__CANCELLED__"));
+                    }
                     let chunk = chunk.map_err(|e| anyhow::anyhow!("下载失败: {e}"))?;
                     tmpf.write_all(&chunk)
                         .await

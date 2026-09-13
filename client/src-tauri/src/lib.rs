@@ -409,6 +409,7 @@ pub fn run() {
             tauri_cmd::regenerate_pairing_code,
             tauri_cmd::unpair,
             tauri_cmd::pull_files,
+            tauri_cmd::cancel_pull,
             tauri_cmd::list_pending_offers,
             tauri_cmd::open_settings,
             tauri_cmd::quit_app,
@@ -423,6 +424,7 @@ pub fn run() {
             update::is_installed_build_cmd,
             tauri_cmd::list_cross_lan_offers,
             tauri_cmd::pull_cross_lan,
+            tauri_cmd::cancel_pull_cross_lan,
             tauri_cmd::show_pull_toast,
             tauri_cmd::hide_pull_toast,
             #[cfg(debug_assertions)]
