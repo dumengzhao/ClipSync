@@ -24,6 +24,18 @@ function isIpv4(s: string): boolean {
   return parts.every((o) => /^\d{1,3}$/.test(o) && Number(o) <= 255);
 }
 
+// 校验文本是否为合法 IPv4[:port]（端口 1..=65535，端口可省）
+function isIpv4WithPort(s: string): boolean {
+  const m = /^([0-9.]+)(?::(\d+))?$/.exec(s);
+  if (!m) return false;
+  if (!isIpv4(m[1])) return false;
+  if (m[2] !== undefined) {
+    const p = Number(m[2]);
+    if (!Number.isInteger(p) || p < 1 || p > 65535) return false;
+  }
+  return true;
+}
+
 /**
  * 拆分服务端地址：把完整 `ws(s)://host:port/ws` 拆成「协议 + 主机:端口」两部分。
  * 兼容用户直接粘贴完整 URL 或省略协议/路径的写法。
@@ -239,16 +251,18 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
     };
   };
 
-  // 对外文件地址仅允许 IPv4：校验并在不合法时阻止落盘，错误统一走 toast 提示
+  // 对外文件地址允许 IPv4[:port]：端口可省（默认 20071，跨 LAN 拉取端按完整地址直连）。
+  // 校验失败阻止落盘，错误统一走 toast 提示（注意：R2 阶段会把输入搬到弹窗，本处保留
+  // 仅作失焦兜底校验，确保后端拒绝的非法值不会从其它途径写入）。
   const isValidExtEp = (v: string): boolean => {
     if (v === '') return true; // 空 = 不设置，合法
-    return isIpv4(v);
+    return isIpv4WithPort(v);
   };
   const commitExtEp = () => {
     const v = cfg.ext_file_ep ?? '';
     if (!isValidExtEp(v)) {
       // 不合法：阻止落盘，并通过统一的 toast 弹出错误提示（显式 err 红框，避免文案误判为成功）
-      setMsg('请输入有效的 IPv4 地址（如 1.2.3.4）', 'err');
+      setMsg('请输入有效的 IPv4[:port]，端口 1-65535 可省', 'err');
       return;
     }
     const cur = persistedRef.current?.ext_file_ep ?? '';

@@ -112,16 +112,11 @@ pub fn set_config(
         return Err("listen_port 不能为 0（有效范围 1..=65535）".to_string());
     }
 
-    // ext_file_ep 仅作「本机对外可达 IP」通告，端口恒为 listen_port、不另起服务：
-    // 存库时只保留 host（去掉用户可能误填的 :port），避免拉取端拼出错误端口。
+    // ext_file_ep = 对外文件地址 `IPv4[:port]`：含端口时拉取端按该端口直连
+    // （对端可能走内网穿透代理端口 ≠ listen_port，故不能在本机强行覆盖为 listen_port）。
+    // 空字符串视为「未配置对外地址」，跨 LAN 文件不可拉取。
     let mut cfg = cfg;
-    cfg.ext_file_ep = cfg
-        .ext_file_ep
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    cfg.ext_file_ep = cfg.ext_file_ep.trim().to_string();
 
     crate::config::save_config(&app, &cfg).map_err(|e| e.to_string())?;
     *state.config.lock() = cfg.clone();
