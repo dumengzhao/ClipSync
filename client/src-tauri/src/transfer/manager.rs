@@ -119,6 +119,9 @@ static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 pub(crate) enum Outgoing {
     Sync(SyncEnvelope),
     File(FileFrame),
+    /// 主动断开本连接（取消配对时使用）：写任务收到后优雅关闭连接，
+    /// 否则旧会话在取消配对后仍然存活，对端也不知道对方已解绑。
+    Close,
 }
 
 /// 单个已连接对端（用于把本地剪贴板变化 / 文件帧转发给它）
@@ -176,12 +179,12 @@ struct HelloPayload {
     /// 使应答方在 mDNS 失效时也能记录 last_addr 兜底重连——应答方从 TCP 连接里
     /// 只能拿到对端的临时源端口，无法直接回拨。
     listen_port: u16,
-    /// 发起方连接意图：`true` = 静默重连（按 device_id 双方配对表互有对方，直接用
-    /// link secret 建连）；`false` = 用户配对（走配对码 + SPAKE2）。应答方收到后
-    /// 结合本机配对表回应：对端要重连而本机按 ID 查无其配对信息 → 回 Reject 帧。
-    /// 旧版客户端无此字段（反序列化为 false，按用户配对处理）。
-    #[serde(default)]
-    reconnect: bool,
+    /// 发起方连接意图：`Some(true)` = 静默重连（按 device_id 双方配对表互有对方，
+    /// 直接用 link secret 建连）；`Some(false)` = 用户配对（走配对码 + SPAKE2）。
+    /// 应答方收到后结合本机配对表回应：对端要重连而本机按 ID 查无其配对信息 →
+    /// 回 Reject 帧。`None`（字段缺失）= 旧版客户端，本协议不做任何兼容，直接拒绝。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reconnect: Option<bool>,
 }
 
 /// 网格中继最大跳数：一条剪贴板变化最多经多少台中间设备中转。
@@ -243,6 +246,9 @@ pub struct ConnectionHub {
     /// 巡检跳过该对端，避免对「已无配对关系」的对端每 5s 空锤。重新配对 / 取消
     /// 配对 / 冷却到期后恢复尝试（冷却到期后再被拒会重新计冷却并再提示一次）。
     rejected: Mutex<HashMap<String, std::time::Instant>>,
+    /// 被对端 Reject 的**地址**（key = host:port）：手动地址/最后已知地址重连时
+    /// 对端 id 未知，只能按地址冷却，避免收到 Reject 后仍每 5s 空锤。
+    rejected_addrs: Mutex<HashMap<String, std::time::Instant>>,
     /// 「配对码不一致」类前端提示的最近发出时间（key = device_id）：同一对端
     /// 60s 内只提示一次，防止对端的重连循环把提示刷屏。
     pairing_fail_emitted: Mutex<HashMap<String, std::time::Instant>>,
@@ -278,6 +284,7 @@ impl ConnectionHub {
             connected_addrs: Mutex::new(HashSet::new()),
             connecting: Mutex::new(HashSet::new()),
             rejected: Mutex::new(HashMap::new()),
+            rejected_addrs: Mutex::new(HashMap::new()),
             pairing_fail_emitted: Mutex::new(HashMap::new()),
             active_offers: Mutex::new(HashMap::new()),
             active_offer_order: Mutex::new(VecDeque::new()),
@@ -342,6 +349,22 @@ impl ConnectionHub {
         self.rejected.lock().unwrap().remove(device_id);
     }
 
+    /// 按地址标记/查询拒绝冷却（对端 id 未知的连接，如手动地址兜底重连）。
+    fn mark_rejected_addr(&self, addr: &str) {
+        self.rejected_addrs
+            .lock()
+            .unwrap()
+            .insert(addr.to_string(), std::time::Instant::now());
+    }
+
+    fn is_rejected_addr(&self, addr: &str) -> bool {
+        self.rejected_addrs
+            .lock()
+            .unwrap()
+            .get(addr)
+            .is_some_and(|t| t.elapsed() < REJECT_COOLDOWN)
+    }
+
     /// 「配对码不一致」类前端提示是否应该发出（同一对端 60s 内至多一次）。
     fn should_emit_pairing_fail(&self, device_id: &str) -> bool {
         let mut g = self.pairing_fail_emitted.lock().unwrap();
@@ -398,7 +421,12 @@ impl ConnectionHub {
     /// 不需要额外的中断信号。
     pub fn unpair(&self, device_id: &str) {
         self.paired_codes.lock().unwrap().remove(device_id);
-        self.peers.lock().unwrap().remove(device_id);
+        // 主动断开与该对端的现存连接：仅从表里移除 sender 并不会关闭 socket
+        //（连接任务自身持有通道另一端），取消配对后旧会话必须立即终止，
+        // 对端下次重连才能走到 Reject 流程。
+        if let Some(p) = self.peers.lock().unwrap().remove(device_id) {
+            let _ = p.tx.send(Outgoing::Close);
+        }
         self.clear_rejected(device_id);
         self.pairing_fail_emitted.lock().unwrap().remove(device_id);
         if let Some(app) = self.app.lock().unwrap().clone() {
@@ -1698,6 +1726,11 @@ impl ConnectionHub {
         if self.connected_addrs.lock().unwrap().contains(&key) {
             return;
         }
+        // 手动地址/最后已知地址的重连同样受拒绝冷却约束（此时对端 id 未知，
+        // 发起方收到 Reject 时会按地址记录）
+        if self.is_rejected_addr(&key) {
+            return;
+        }
         if self.connecting.lock().unwrap().contains(&key) {
             return;
         }
@@ -1879,7 +1912,7 @@ impl ConnectionHub {
             public_key: base64::engine::general_purpose::STANDARD
                 .encode(self.identity.public_key_bytes()),
             listen_port: self.listen_port.load(std::sync::atomic::Ordering::Relaxed),
-            reconnect: reconnect_intent,
+            reconnect: Some(reconnect_intent),
         };
         let (peer_hello, resp_paired) = if is_initiator {
             send_frame(&mut ws, MessageType::Hello, &serde_json::to_vec(&my_hello)?).await?;
@@ -1887,6 +1920,7 @@ impl ConnectionHub {
             if ft == MessageType::Reject {
                 // 对端明确拒绝：本机在其处已无配对信息（对方取消配对 / 重置）。
                 // 停止对该对端的自动重连（冷却期）并提示一次，不再 5s 空锤。
+                self.mark_rejected_addr(&peer_addr);
                 let was_new = self.mark_rejected(&dial_id);
                 if was_new {
                     if let Some(app) = self.app.lock().unwrap().clone() {
@@ -1912,11 +1946,28 @@ impl ConnectionHub {
             }
             let peer: HelloPayload = serde_json::from_slice(&hpayload)
                 .map_err(|e| anyhow::anyhow!("bad hello payload: {e}"))?;
+            // 旧版客户端（Hello 无 reconnect 字段）：本协议不做任何兼容，直接拒绝。
+            // 对端会按握手失败处理并重试，本机仅记日志、不弹窗。
+            let peer_reconnect = match peer.reconnect {
+                Some(v) => v,
+                None => {
+                    let _ = send_frame(&mut ws, MessageType::Reject, b"incompatible").await;
+                    tracing::debug!(
+                        "拒绝旧版客户端 {}（{}）：Hello 缺少 reconnect 字段，请更新对方客户端",
+                        peer.device_name,
+                        peer.device_id
+                    );
+                    anyhow::bail!("旧版客户端不受支持，已拒绝");
+                }
+            };
             let resp_paired = self.is_paired(&peer.device_id);
             // 对端要静默重连但本机按 ID 查无其配对信息 → 直接拒绝，
             // 让对端停止自动重连并提示重新配对，而不是反复空锤。
-            if peer.reconnect && !resp_paired {
+            if peer_reconnect && !resp_paired {
                 let _ = send_frame(&mut ws, MessageType::Reject, b"unpaired").await;
+                // 留出缓冲期再关闭，确保对端的 recv 一定读到 Reject 帧
+                //（否则对端只看到连接关闭，无法区分「被拒」与「网络故障」，会继续重试）。
+                tokio::time::sleep(Duration::from_millis(200)).await;
                 if self.should_emit_pairing_fail(&peer.device_id) {
                     if let Some(app) = self.app.lock().unwrap().clone() {
                         let _ = app.emit(
@@ -1931,11 +1982,11 @@ impl ConnectionHub {
                 anyhow::bail!("对端静默重连但本机按 ID 无其配对信息，已拒绝");
             }
             let my_hello = HelloPayload {
-                reconnect: resp_paired,
+                reconnect: Some(resp_paired),
                 ..my_hello
             };
             send_frame(&mut ws, MessageType::Hello, &serde_json::to_vec(&my_hello)?).await?;
-            (peer, resp_paired)
+            (peer, Some(resp_paired))
         };
         let peer_id = peer_hello.device_id.clone();
         let peer_name = peer_hello.device_name.clone();
@@ -1956,9 +2007,9 @@ impl ConnectionHub {
         // 意图（peer_hello.reconnect）+ 本机配对表。不能用 outgoing_code 判断——
         // 应答方永远没有配对码，那会让重连意图判断失效。
         let direct = if is_initiator {
-            reconnect_intent && resp_paired
+            reconnect_intent && resp_paired == Some(true)
         } else {
-            peer_hello.reconnect && resp_paired
+            peer_hello.reconnect == Some(true) && resp_paired == Some(true)
         };
         let (key, is_fresh_pairing) = if direct {
             let cached_link = self.paired_codes.lock().unwrap().get(&peer_id).cloned();
@@ -2182,9 +2233,15 @@ impl ConnectionHub {
             tokio::select! {
                 outgoing = rx.recv() => {
                     match outgoing {
+                        Some(Outgoing::Close) => {
+                            // 取消配对等场景的主动断开：优雅关闭后结束本连接
+                            let _ = write.send(Message::Close(None)).await;
+                            break;
+                        }
                         Some(out) => {
                             // Sync / File 两类帧统一在此用会话密钥加密后发出
                             let (msg_type, pt) = match out {
+                                Outgoing::Close => continue, // 已在外层处理，防御分支
                                 Outgoing::Sync(env) => (
                                     MessageType::Sync,
                                     bincode::serialize(&env)
