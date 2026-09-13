@@ -62,7 +62,9 @@ impl DeviceRegistry {
     /// 去重以 `ip:port` 为准而非 device_id：对端若因重建身份换了 device_id，
     /// 只要仍从同一地址出现，就仍识别为同一台已配对设备，不会重复出现在发现列表。
     pub fn find_by_addr(&self, addr: &str) -> Option<&PairedDevice> {
-        self.devices.values().find(|d| d.last_addr.as_deref() == Some(addr))
+        self.devices
+            .values()
+            .find(|d| d.last_addr.as_deref() == Some(addr))
     }
 
     /// 按设备名查找已配对设备。

@@ -126,7 +126,10 @@ fn default_theme() -> Theme {
 /// 默认设备名取本机机器名（hostname），使不同设备默认即可区分。
 /// 取不到（或为空）时回退到固定占位名，避免空名称。
 pub fn default_device_name() -> String {
-    let host = gethostname::gethostname().to_string_lossy().trim().to_string();
+    let host = gethostname::gethostname()
+        .to_string_lossy()
+        .trim()
+        .to_string();
     if host.is_empty() {
         "ClipSync-Device".to_string()
     } else {

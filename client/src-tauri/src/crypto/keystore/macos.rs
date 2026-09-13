@@ -20,7 +20,10 @@ const FALLBACK_DIR: &str = ".clipsync/keystore";
 
 /// 是否启用系统 Keychain 存储。
 fn keychain_enabled() -> bool {
-    if std::env::var("CLIPSYNC_KEYCHAIN").map(|v| v == "1").unwrap_or(false) {
+    if std::env::var("CLIPSYNC_KEYCHAIN")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
         return true;
     }
     #[cfg(debug_assertions)]

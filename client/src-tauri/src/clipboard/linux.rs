@@ -22,8 +22,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use anyhow::Result;
 use anyhow::anyhow;
+use anyhow::Result;
 use arboard::Clipboard;
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -191,8 +191,8 @@ fn intern<C: Connection>(conn: &C, name: &[u8]) -> Result<u32> {
 
 /// 读取本机 CLIPBOARD 中的文件 URI 列表（优先 gnome-copied-files，回退 text/uri-list）。
 fn read_clipboard_files_x11() -> Result<Vec<PathBuf>> {
-    use x11rb::protocol::Event;
     use x11rb::protocol::xproto::WindowClass;
+    use x11rb::protocol::Event;
 
     let (conn, screen) = x11rb::connect(None).map_err(|e| anyhow!("{e}"))?;
     let root = conn.setup().roots[screen].root;
@@ -209,7 +209,7 @@ fn read_clipboard_files_x11() -> Result<Vec<PathBuf>> {
 
     let req_win = conn.generate_id()?;
     conn.create_window(
-        x11rb::COPY_DEPTH_FROM_PARENT as u8,
+        x11rb::COPY_DEPTH_FROM_PARENT,
         req_win,
         root,
         0,
@@ -257,8 +257,8 @@ fn read_property<C: Connection>(conn: &C, window: u32, property: u32) -> Result<
 
 /// 把一组本地路径写回 CLIPBOARD（接管所有权，应答 SelectionRequest 提供 text/uri-list）。
 fn write_clipboard_files_x11(paths: &[PathBuf]) -> Result<()> {
-    use x11rb::protocol::Event;
     use x11rb::protocol::xproto::{EventMask, PropMode, SelectionNotifyEvent, WindowClass};
+    use x11rb::protocol::Event;
 
     let uris = paths_to_uri_list(paths);
     let (conn, screen) = x11rb::connect(None).map_err(|e| anyhow!("{e}"))?;
@@ -266,7 +266,7 @@ fn write_clipboard_files_x11(paths: &[PathBuf]) -> Result<()> {
 
     let owner_win = conn.generate_id()?;
     conn.create_window(
-        x11rb::COPY_DEPTH_FROM_PARENT as u8,
+        x11rb::COPY_DEPTH_FROM_PARENT,
         owner_win,
         root,
         0,
@@ -282,7 +282,7 @@ fn write_clipboard_files_x11(paths: &[PathBuf]) -> Result<()> {
     let uri_atom = intern(&conn, b"text/uri-list")?;
     let targets_atom = intern(&conn, b"TARGETS")?;
     let atom_atom = intern(&conn, b"ATOM")?;
-    let prop_atom = intern(&conn, b"CLIPSYNC_FILE_PROP")?;
+    let _prop_atom = intern(&conn, b"CLIPSYNC_FILE_PROP")?;
 
     conn.set_selection_owner(owner_win, clipboard_atom, x11rb::CURRENT_TIME)?;
     conn.flush()?;
@@ -290,11 +290,7 @@ fn write_clipboard_files_x11(paths: &[PathBuf]) -> Result<()> {
     let conn = std::sync::Arc::new(conn);
     let data = Arc::new(uris);
     thread::spawn(move || {
-        loop {
-            let event = match conn.wait_for_event() {
-                Ok(e) => e,
-                Err(_) => break,
-            };
+        while let Ok(event) = conn.wait_for_event() {
             match event {
                 Event::SelectionRequest(req) => {
                     if req.selection != clipboard_atom {
@@ -304,8 +300,7 @@ fn write_clipboard_files_x11(paths: &[PathBuf]) -> Result<()> {
                     let is_targets = req.target == targets_atom;
                     if is_targets {
                         let targets: Vec<u32> = vec![uri_atom];
-                        let bytes: Vec<u8> =
-                            targets.iter().flat_map(|a| a.to_ne_bytes()).collect();
+                        let bytes: Vec<u8> = targets.iter().flat_map(|a| a.to_ne_bytes()).collect();
                         let _ = conn.change_property(
                             PropMode::REPLACE,
                             req.requestor,
@@ -340,12 +335,8 @@ fn write_clipboard_files_x11(paths: &[PathBuf]) -> Result<()> {
                         },
                     };
                     let notify_bytes: [u8; 32] = notify.into();
-                    let _ = conn.send_event(
-                        false,
-                        req.requestor,
-                        EventMask::NO_EVENT,
-                        notify_bytes,
-                    );
+                    let _ =
+                        conn.send_event(false, req.requestor, EventMask::NO_EVENT, notify_bytes);
                     let _ = conn.flush();
                 }
                 Event::SelectionClear(_) => break,
@@ -396,7 +387,7 @@ fn percent_decode(s: &str) -> String {
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
             if let (Some(h), Some(l)) = (hexval(bytes[i + 1]), hexval(bytes[i + 2])) {
-                out.push((h * 16 + l) as u8);
+                out.push(h * 16 + l);
                 i += 3;
                 continue;
             }

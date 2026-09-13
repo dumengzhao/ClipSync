@@ -149,9 +149,9 @@ impl ClipboardProvider for MacosClipboard {
     }
 
     async fn watch(&self, cb: Box<dyn Fn() + Send>) -> Result<WatchHandle> {
+        use objc2_app_kit::NSPasteboard;
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::Duration;
-        use objc2_app_kit::NSPasteboard;
 
         // 后台线程轮询 NSPasteboard.changeCount（仅比较自增整数，不读取剪贴板内容）。
         // 变化时才回调，驱动前端刷新与同步引擎。比在前端每秒跨进程读文本轻量得多。

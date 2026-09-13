@@ -27,20 +27,27 @@ pub struct DeviceIdentity {
 impl DeviceIdentity {
     /// 加载已有身份，若不存在则生成并持久化。
     pub fn load_or_create(name: &str) -> Result<Self> {
-        let id = match keystore::load(KEYSTORE_SERVICE, ACCOUNT_DEVICE_ID) {
+        Self::load_or_create_in(KEYSTORE_SERVICE, name)
+    }
+
+    /// 指定 keystore service 的内部实现。
+    /// 拆出来是为了让测试用独立的 service 名——测试若直接使用生产 service，
+    /// 会在真实密钥链上读写、并在清理阶段把本机应用的真实设备身份删掉。
+    fn load_or_create_in(service: &str, name: &str) -> Result<Self> {
+        let id = match keystore::load(service, ACCOUNT_DEVICE_ID) {
             Ok(bytes) => DeviceId(
                 String::from_utf8(bytes)
                     .map_err(|e| anyhow!("stored device id is not valid utf-8: {e}"))?,
             ),
             Err(_) => {
                 let new_id = DeviceId(Uuid::new_v4().to_string());
-                keystore::store(KEYSTORE_SERVICE, ACCOUNT_DEVICE_ID, new_id.0.as_bytes())
+                keystore::store(service, ACCOUNT_DEVICE_ID, new_id.0.as_bytes())
                     .map_err(anyhow::Error::msg)?;
                 new_id
             }
         };
 
-        let secret = match keystore::load(KEYSTORE_SERVICE, ACCOUNT_IDENTITY_KEY) {
+        let secret = match keystore::load(service, ACCOUNT_IDENTITY_KEY) {
             Ok(bytes) => {
                 let arr: [u8; 32] = bytes
                     .try_into()
@@ -49,7 +56,7 @@ impl DeviceIdentity {
             }
             Err(_) => {
                 let s = StaticSecret::random_from_rng(OsRng);
-                keystore::store(KEYSTORE_SERVICE, ACCOUNT_IDENTITY_KEY, s.as_bytes())
+                keystore::store(service, ACCOUNT_IDENTITY_KEY, s.as_bytes())
                     .map_err(anyhow::Error::msg)?;
                 s
             }
@@ -80,16 +87,20 @@ mod tests {
     use super::*;
     use crate::crypto::keystore;
 
+    /// 测试专用 service：绝不能与生产 KEYSTORE_SERVICE 混用，
+    /// 否则测试清理会把本机应用的真实设备身份从密钥链里删掉。
+    const TEST_SERVICE: &str = "com.clipsync.device.test";
+
     #[test]
     fn identity_persists_across_loads() {
-        let a = DeviceIdentity::load_or_create("test-device").unwrap();
-        let b = DeviceIdentity::load_or_create("test-device").unwrap();
+        let a = DeviceIdentity::load_or_create_in(TEST_SERVICE, "test-device").unwrap();
+        let b = DeviceIdentity::load_or_create_in(TEST_SERVICE, "test-device").unwrap();
         // 同一进程内 keystore 已被第一次写入，第二次应读取到相同身份
         assert_eq!(a.id, b.id);
         assert_eq!(a.public_key_bytes(), b.public_key_bytes());
 
-        // 清理测试写入的密钥链条目
-        let _ = keystore::delete(KEYSTORE_SERVICE, ACCOUNT_DEVICE_ID);
-        let _ = keystore::delete(KEYSTORE_SERVICE, ACCOUNT_IDENTITY_KEY);
+        // 清理测试写入的密钥链条目（仅测试 service，不影响生产数据）
+        let _ = keystore::delete(TEST_SERVICE, ACCOUNT_DEVICE_ID);
+        let _ = keystore::delete(TEST_SERVICE, ACCOUNT_IDENTITY_KEY);
     }
 }

@@ -4,10 +4,10 @@
 //! `ext_file_ep/file/<hash>` 拉取时，按 hash 取回字节。服务端只转发 manifest，不碰字节。
 
 use crate::clipboard::types::FileMeta;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use sha2::{Digest, Sha256};
 
 #[derive(Default)]
 pub struct FileShare {
