@@ -31,6 +31,11 @@ pub enum MessageType {
     /// 重连并提示重新配对，而不是反复空锤。payload = UTF-8 原因文本（如 "unpaired"）。
     /// 旧版客户端不认识此帧，收到后按握手失败断开，行为与之前一致。
     Reject = 0x09,
+    /// 配置查询帧：经加密 P2P 通道询问对端的「服务端地址 + Network Token」配置，
+    /// 用于设置页「从局域网其他已配对设备获取服务端配置」功能。仅在已配对链路里传输，
+    /// 复用 Sync/File 同一会话密钥（nonce12 + AES-GCM），payload = bincode 序列化的
+    /// `ConfigFrame`。不携带任何凭据之外的隐私字段（不查 ext_file_ep、不查设备名）。
+    Config = 0x0A,
 }
 
 impl MessageType {
@@ -45,9 +50,34 @@ impl MessageType {
             0x07 => Some(Self::Verify),
             0x08 => Some(Self::File),
             0x09 => Some(Self::Reject),
+            0x0A => Some(Self::Config),
             _ => None,
         }
     }
+}
+
+/// 配置查询帧（加密前 / 解密后的明文，bincode 序列化）
+///
+/// 用于「从局域网其他已配对设备获取服务端配置」功能：
+/// - 询问方发 `Query{request_id, kind=0}`，被询问方回 `Reply` 或 `NotConfigured`；
+/// - 同一 request_id 串起来两端的一次往返，超时未回则视为放弃；
+/// - `kind` 留作扩展（目前固定 0 = "服务端配置"），未来可加 ext_file_ep 探测等。
+///
+/// 注意：本枚举**必须追加在末尾**——走 bincode 按变体序号编码，插中间会改既有变体
+/// 序号，导致新旧版本两端互不可解析。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ConfigFrame {
+    /// 询问对端的某项配置（当前固定查询服务端配置；扩展时复用此枚举）。
+    Query { request_id: String, kind: u8 },
+    /// 对端回：返回 `server_url` 与 `network_token`。任一为空字符串表示该项未配置；
+    /// 调用方据此决定是否纳入候选组（至少有一个非空才算「该端有服务端配置」）。
+    Reply {
+        request_id: String,
+        server_url: String,
+        network_token: String,
+    },
+    /// 对端回：明确告知「未配置服务端」，免去调用方因超时猜测状态。
+    NotConfigured { request_id: String },
 }
 
 /// 文件传输控制 / 数据帧（加密前 / 解密后的明文，bincode 序列化）
@@ -172,9 +202,9 @@ mod tests {
 
     #[test]
     fn decode_rejects_unknown_type() {
-        // 0x09 已分配给 Reject；这里用仍未分配的 0xFF 验证未知类型被拒
+        // 0x0A 已分配给 Config；这里用仍未分配的 0xFF 验证未知类型被拒
         assert!(MessageFrame::decode(&[0xFF, 0x00]).is_err());
-        assert!(MessageFrame::decode(&[0x0A, 0x00]).is_err());
+        assert!(MessageFrame::decode(&[0x0B, 0x00]).is_err());
     }
 
     #[test]

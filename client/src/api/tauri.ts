@@ -266,6 +266,25 @@ export async function probeExtFileEp(ep: string): Promise<ProbeResult> {
   return invoke<ProbeResult>('probe_ext_file_ep', { ep });
 }
 
+/** 一台局域网设备返回的服务端配置候选（来自 `LanServerConfigSource`） */
+export interface LanServerConfigSource {
+  device_id: string;
+  device_name: string;
+  lan_group: string;
+}
+
+/** 一组「相同 (server_url, network_token)」的局域网设备聚合（来自 `LanServerConfigGroup`） */
+export interface LanServerConfigGroup {
+  server_url: string;
+  network_token: string;
+  sources: LanServerConfigSource[];
+}
+
+/** 扫描本机已配对 + 局域网内可达的对端，返回按 (server_url, network_token) 分组的聚合结果 */
+export async function scanLanServerConfigs(): Promise<LanServerConfigGroup[]> {
+  return invoke<LanServerConfigGroup[]>('scan_lan_server_configs');
+}
+
 
 /* ================= 客户端自更新（无签名自托管，见 server/UPDATE_MODULE_PLAN.md） ================= */
 

@@ -27,6 +27,7 @@ use crate::AppState;
 use crate::clipboard::types::FileMeta;
 #[cfg(debug_assertions)]
 use crate::transfer::manager::Outgoing;
+use crate::transfer::manager::LanServerConfigGroup;
 #[cfg(debug_assertions)]
 use crate::transfer::websocket::FileFrame;
 #[cfg(debug_assertions)]
@@ -784,4 +785,16 @@ pub async fn probe_ext_file_ep(
         version: ver,
         error: None,
     })
+}
+
+/// 扫描本机已配对 + 局域网内可达的对端，询问其服务端配置。
+/// 返回按 (server_url, network_token) 分组的聚合结果；前端按 groups.len() 决定 UI：
+/// - 0 个：提示「未找到任何已配对局域网设备的服务端配置」；
+/// - 1 个：直接写入该配置；
+/// - ≥2 个：让用户挑。
+#[tauri::command]
+pub async fn scan_lan_server_configs(
+    state: State<'_, AppState>,
+) -> Result<Vec<LanServerConfigGroup>, String> {
+    Ok(state.hub.scan_lan_server_configs().await)
 }

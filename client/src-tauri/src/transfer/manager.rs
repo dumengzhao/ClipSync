@@ -56,7 +56,7 @@ use crate::device::identity::DeviceIdentity;
 use crate::device::registry::{PairedDevice, TrustLevel};
 use crate::discovery::DiscoveredPeer;
 use crate::sync::engine::{SyncEngine, SyncEvent};
-use crate::transfer::websocket::{FileChunkResponsePayload, FileFrame, MessageFrame, MessageType};
+use crate::transfer::websocket::{ConfigFrame, FileChunkResponsePayload, FileFrame, MessageFrame, MessageType};
 use crate::AppState;
 use std::path::PathBuf;
 
@@ -113,12 +113,16 @@ enum Role {
 /// 连接序号发生器，用于区分同一对端的新旧连接。
 static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 
-/// 经由本连接出站的消息。两类都经会话密钥 AES-GCM 加密后发出：
+/// 经由本连接出站的消息。Sync / File / Config 三类帧统一在此用会话密钥 AES-GCM 加密后发出：
 /// - `Sync`：剪贴板内容信封（文本/图片）
 /// - `File`：文件传输帧（清单/拉取请求/分片），见 `FileFrame`
+/// - `Config`：配置查询/应答（见 `ConfigFrame`），由「从局域网其他已配对设备获取服务端配置」使用
 pub(crate) enum Outgoing {
     Sync(SyncEnvelope),
     File(FileFrame),
+    /// 已组装好的 `MessageFrame`（含 `MessageType::Config` 标签），由 `send_to_peer`
+    /// 经加密通道直发。不在枚举里直接放 `ConfigFrame`，避免混淆「明文 vs 帧」语义。
+    Config(crate::transfer::websocket::MessageFrame),
     /// 主动断开本连接（取消配对时使用）：写任务收到后优雅关闭连接，
     /// 否则旧会话在取消配对后仍然存活，对端也不知道对方已解绑。
     Close,
@@ -274,6 +278,11 @@ pub struct ConnectionHub {
     app: Mutex<Option<AppHandle>>,
     /// 网格中继去重表（key = 剪贴板消息 id），防止连通图中消息无限回环。
     seen: Mutex<RelaySeen>,
+    /// 配置查询请求池（key = request_id，value = oneshot sender）。
+    /// 「从局域网其他已配对设备获取服务端配置」功能：询问方为每次询问生成
+    /// request_id 并在此注册，收到对端 Reply 后通过 sender 把结果投递给等待方。
+    /// 超时未回由调用方兜底（不依赖此处的清理），sender 关闭后下一次插入即覆盖。
+    config_queries: Mutex<HashMap<String, tokio::sync::oneshot::Sender<ConfigReply>>>,
 }
 
 impl ConnectionHub {
@@ -299,6 +308,7 @@ impl ConnectionHub {
             listen_port: std::sync::atomic::AtomicU16::new(0),
             app: Mutex::new(None),
             seen: Mutex::new(RelaySeen::new()),
+            config_queries: Mutex::new(HashMap::new()),
         })
     }
 
@@ -2385,7 +2395,9 @@ impl ConnectionHub {
                             break;
                         }
                         Some(out) => {
-                            // Sync / File 两类帧统一在此用会话密钥加密后发出
+                            // Sync / File / Config 三类帧统一在此用会话密钥加密后发出
+                            // （Config 的明文 = bincode(ConfigFrame)；上层已封装为
+                            // MessageFrame，此处只需按帧头决定 msg_type 并原样加密载荷）
                             let (msg_type, pt) = match out {
                                 Outgoing::Close => continue, // 已在外层处理，防御分支
                                 Outgoing::Sync(env) => (
@@ -2398,6 +2410,11 @@ impl ConnectionHub {
                                     bincode::serialize(&ff)
                                         .map_err(|e| anyhow::anyhow!("serialize file frame: {e}"))?,
                                 ),
+                                Outgoing::Config(framed) => {
+                                    // Config 帧必须保持 MessageType::Config 标签；
+                                    // 载荷已是 bincode(ConfigFrame) 的明文（上层封装时已剥帧头）
+                                    (framed.msg_type, framed.payload)
+                                }
                             };
                             let nonce: [u8; 12] = rand::random();
                             let ct = encrypt(&key, &nonce, &pt)
@@ -2486,6 +2503,40 @@ impl ConnectionHub {
                                                 }
                                             }
                                             Err(e) => tracing::warn!("file decrypt failed: {e}"),
+                                        }
+                                    }
+                                    MessageType::Config => {
+                                        if f.payload.len() < 12 {
+                                            continue;
+                                        }
+                                        let (nonce, ct) = f.payload.split_at(12);
+                                        let mut n = [0u8; 12];
+                                        n.copy_from_slice(nonce);
+                                        match decrypt(&key, &n, ct) {
+                                            Ok(pt) => {
+                                                if let Ok(cf) =
+                                                    bincode::deserialize::<ConfigFrame>(&pt)
+                                                {
+                                                    match cf {
+                                                        ConfigFrame::Query { request_id, kind } => {
+                                                            self.handle_config_query(request_id, kind, &peer_id).await;
+                                                        }
+                                                        ConfigFrame::Reply { request_id, server_url, network_token } => {
+                                                            self.handle_config_reply(
+                                                                ConfigReply::HasConfig { server_url, network_token },
+                                                                &request_id,
+                                                            );
+                                                        }
+                                                        ConfigFrame::NotConfigured { request_id } => {
+                                                            self.handle_config_reply(
+                                                                ConfigReply::NotConfigured,
+                                                                &request_id,
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => tracing::warn!("config decrypt failed: {e}"),
                                         }
                                     }
                                     _ => {}
@@ -2652,6 +2703,229 @@ fn parse_host_port(s: &str) -> Option<(String, u16)> {
         return None;
     }
     Some((h.to_string(), port))
+}
+
+/// 从对端 IPv4 地址推断 lan_group（取前三段）。失败/非 IPv4 返回空串，调用方据此跳过。
+fn lan_group_from_addr(addr: &str) -> String {
+    let ip: std::net::Ipv4Addr = match addr.parse() {
+        Ok(v) => v,
+        Err(_) => return String::new(),
+    };
+    let oct = ip.octets();
+    format!("{}.{}.{}", oct[0], oct[1], oct[2])
+}
+
+/// 单个已配对局域网设备返回的服务端配置候选（按 (server_url, network_token) 分组前的扁平项）。
+#[derive(Debug, Clone, Serialize)]
+pub struct LanServerConfigSource {
+    pub device_id: String,
+    pub device_name: String,
+    pub lan_group: String,
+}
+
+/// 一组「相同 (server_url, network_token)」的局域网设备聚合。
+/// 调用方按 groups.len() 决定 UI：0/1 个直接用、≥2 个让用户挑。
+#[derive(Debug, Clone, Serialize)]
+pub struct LanServerConfigGroup {
+    pub server_url: String,
+    pub network_token: String,
+    pub sources: Vec<LanServerConfigSource>,
+}
+
+/// 单次扫描总超时（含收集 + 各端逐个超时）；超过则放弃等待，按已收到的聚合。
+const LAN_SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2500);
+
+impl ConnectionHub {
+    /// 扫描本机已配对 + 局域网内可达的对端，询问其服务端配置。
+    ///
+    /// 行为契约：
+    /// - 仅候选 = AppState.paired_devices ∩ AppState.discovered（保证对端在本局域网）；
+    /// - 候选设备当前**未建立加密通道**（不在 `peers` 表里）时直接跳过——重启/初装
+    ///   后第一次跑可让用户先在 P2P 视图里点一下设备触发重连，再回来按按钮；
+    /// - 经加密 P2P 通道发 Config::Query{request_id, kind=0}，对端回 Config::Reply
+    ///   或 NotConfigured；
+    /// - 候选设备全无回复 / 全未配置 → 返回空 Vec；
+    /// - 单个聚合结果 → 调用方直写不弹窗；多个 → 弹选择。
+    pub async fn scan_lan_server_configs(self: &Arc<Self>) -> Vec<LanServerConfigGroup> {
+        use std::time::Duration;
+        // 1) 计算本机 lan_group：cfg.lan_group 非空直接用，否则用 infer（与 server_conn 同源逻辑）
+        let (my_lg, candidate_devices) = {
+            let app_guard = self.app.lock().unwrap();
+            let state = app_guard.as_ref().and_then(|a| a.try_state::<AppState>());
+            let Some(state) = state else { return vec![] };
+            let configured = state.config.lock().lan_group.clone();
+            let my_lg = if !configured.trim().is_empty() {
+                configured
+            } else {
+                // 与 server_conn::infer_lan_group 同算法：首个非回环 IPv4 的前 24 位
+                crate::server_conn::infer_lan_group(&configured)
+            };
+            // 候选 = 已配对 ∩ discovered ∩ 同局域网（lan_group 由对端 IP 前 24 位推断，
+            // 不依赖 mDNS TXT 通告，避免协议改动）
+            let discovered: std::collections::HashMap<String, DiscoveredPeer> =
+                state.discovered.lock().clone();
+            let peers_now: std::collections::HashSet<String> =
+                self.peers.lock().unwrap().keys().cloned().collect();
+            let mut candidates: Vec<(String, String, String)> = Vec::new(); // (device_id, device_name, peer_lg)
+            for (id, peer) in &discovered {
+                if !self.paired_codes.lock().unwrap().contains_key(id) {
+                    continue;
+                }
+                if !peers_now.contains(id) {
+                    // 当前未在线：跳过。重启/初装后先在 P2P 视图点一下触发连接
+                    continue;
+                }
+                let peer_lg = lan_group_from_addr(&peer.addr);
+                if peer_lg.is_empty() || peer_lg != my_lg {
+                    continue;
+                }
+                candidates.push((id.clone(), peer.device_name.clone(), peer_lg));
+            }
+            (my_lg, candidates)
+        };
+        // 2) 总超时门闩：到点立刻结束等待，已收的足够聚合
+        let started = std::time::Instant::now();
+        let overall_deadline = started + LAN_SCAN_TIMEOUT;
+        let mut rx_map = std::collections::HashMap::new(); // request_id -> (device_id, device_name, oneshot::Receiver<ConfigReply>)
+        let mut pending: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new(); // device_id -> (request_id, device_name)
+        for (device_id, device_name, _lg) in &candidate_devices {
+            let request_id = format!(
+                "scan-{:016x}-{}",
+                rand::random::<u64>(),
+                &device_id[..device_id.len().min(8)]
+            );
+            let (tx, rx) = tokio::sync::oneshot::channel::<ConfigReply>();
+            self.config_queries
+                .lock()
+                .unwrap()
+                .insert(request_id.clone(), tx);
+            rx_map.insert(request_id.clone(), (device_id.clone(), device_name.clone(), rx));
+            pending.insert(device_id.clone(), (request_id.clone(), device_name.clone()));
+        }
+        // 3) 发出 Query（每端各发一次；共享加密通道走 peers 表里的 tx）
+        for (device_id, (request_id, _)) in &pending {
+            let pt = bincode::serialize(&ConfigFrame::Query {
+                request_id: request_id.clone(),
+                kind: 0,
+            })
+            .unwrap_or_default();
+            let frame = MessageFrame::new(MessageType::Config, pt);
+            if let Some(peer) = self.peers.lock().unwrap().get(device_id).cloned() {
+                let _ = peer.tx.send(Outgoing::Config(frame));
+            }
+        }
+        // 4) 收集回复 / 超时
+        let mut replies: Vec<(String, String, ConfigReply)> = Vec::new(); // (device_id, device_name, reply)
+        while !rx_map.is_empty() && std::time::Instant::now() < overall_deadline {
+            // 简化：轮询 + 短间隔
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            // 清掉已收到的：用 iter_mut 拿到 &mut Receiver 才能 try_recv
+            let mut done = Vec::new();
+            for (rid, (did, dn, rx)) in rx_map.iter_mut() {
+                match rx.try_recv() {
+                    Ok(r) => {
+                        replies.push((did.clone(), dn.clone(), r));
+                        done.push(rid.clone());
+                    }
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+                    Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                        done.push(rid.clone());
+                    }
+                }
+            }
+            for rid in done {
+                rx_map.remove(&rid);
+                self.config_queries.lock().unwrap().remove(&rid);
+            }
+        }
+        // 5) 清理剩余（oneshot sender 已 drop 在表里，无需 remove 也不可能再投递）
+        self.config_queries.lock().unwrap().clear();
+        // 6) 聚合：按 (server_url, network_token) 分组；空 server_url+空 token 视为「未配置」丢弃
+        let mut groups: std::collections::HashMap<(String, String), LanServerConfigGroup> =
+            std::collections::HashMap::new();
+        for (device_id, device_name, reply) in replies {
+            let (server_url, network_token) = match reply {
+                ConfigReply::HasConfig { server_url, network_token } => (server_url, network_token),
+                ConfigReply::NotConfigured => continue,
+            };
+            // 空 url + 空 token 视为「该端虽回复但实际未配置」，丢弃
+            if server_url.trim().is_empty() && network_token.trim().is_empty() {
+                continue;
+            }
+            let key = (server_url.clone(), network_token.clone());
+            groups
+                .entry(key)
+                .or_insert_with(|| LanServerConfigGroup {
+                    server_url: server_url.clone(),
+                    network_token: network_token.clone(),
+                    sources: Vec::new(),
+                })
+                .sources
+                .push(LanServerConfigSource {
+                    device_id,
+                    device_name,
+                    lan_group: my_lg.clone(),
+                });
+        }
+        let mut out: Vec<LanServerConfigGroup> = groups.into_values().collect();
+        // 稳定排序：按首个出现的 source.device_name 字典序，方便 UI 稳定显示
+        out.sort_by(|a, b| {
+            let an = a.sources.first().map(|s| s.device_name.clone()).unwrap_or_default();
+            let bn = b.sources.first().map(|s| s.device_name.clone()).unwrap_or_default();
+            an.cmp(&bn)
+        });
+        // 总耗时未到也没关系——已经收完；故意超时也只是提前返回已收到的
+        let _ = Duration::from_millis(0);
+        out
+    }
+
+    /// 收到 Config::Query 时调用：本端若有服务端配置，回 Reply；否则回 NotConfigured。
+    async fn handle_config_query(&self, request_id: String, kind: u8, from: &str) {
+        // 暂时仅支持 kind=0（服务端配置）；其他忽略
+        if kind != 0 {
+            return;
+        }
+        let app_guard = self.app.lock().unwrap();
+        let state_opt = app_guard.as_ref().and_then(|a| a.try_state::<AppState>());
+        let Some(state) = state_opt else { return };
+        let (server_url, network_token) = {
+            let cfg = state.config.lock();
+            (cfg.server_url.clone(), cfg.network_token.clone())
+        };
+        drop(app_guard); // 提前释放互斥锁（lock 已不需要）
+        let reply = if !server_url.trim().is_empty() {
+            ConfigReply::HasConfig {
+                server_url,
+                network_token,
+            }
+        } else {
+            ConfigReply::NotConfigured
+        };
+        // 仅当 request_id 仍未被消费（防重放或异常路径）
+        let Some(tx) = self.config_queries.lock().unwrap().remove(&request_id) else {
+            // 没有任何等待方（被询问方不可能发起 Query）：直接忽略，不要把 reply 反向发给对端
+            return;
+        };
+        let _ = tx.send(reply);
+        let _ = from;
+    }
+
+    /// 收到 Config::Reply / NotConfigured 时调用：通过 request_id 投递到等待方。
+    fn handle_config_reply(&self, reply: ConfigReply, request_id: &str) {
+        if let Some(tx) = self.config_queries.lock().unwrap().remove(request_id) {
+            let _ = tx.send(reply);
+        }
+    }
+}
+
+/// 配置查询应答（对端 → 询问方）；仅在内存中流转，不序列化到磁盘。
+#[derive(Debug, Clone)]
+pub(crate) enum ConfigReply {
+    HasConfig {
+        server_url: String,
+        network_token: String,
+    },
+    NotConfigured,
 }
 
 #[cfg(test)]

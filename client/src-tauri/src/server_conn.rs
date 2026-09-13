@@ -1061,7 +1061,8 @@ fn lan_differ(a: &str, b: &str) -> bool {
 }
 
 /// 推断本机 lan_group：取首个非回环 IPv4 的前 24 位，失败回退空串。
-fn infer_lan_group(configured: &str) -> String {
+/// pub(crate)：transfer/manager 也需要同源算法做「只看局域网」过滤，避免两处拷贝。
+pub(crate) fn infer_lan_group(configured: &str) -> String {
     if !configured.is_empty() {
         return configured.to_string();
     }
