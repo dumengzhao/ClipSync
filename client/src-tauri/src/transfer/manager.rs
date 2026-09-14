@@ -2760,26 +2760,38 @@ impl ConnectionHub {
                 // 与 server_conn::infer_lan_group 同算法：首个非回环 IPv4 的前 24 位
                 crate::server_conn::infer_lan_group(&configured)
             };
-            // 候选 = 已配对 ∩ discovered ∩ 同局域网（lan_group 由对端 IP 前 24 位推断，
-            // 不依赖 mDNS TXT 通告，避免协议改动）
-            let discovered: std::collections::HashMap<String, DiscoveredPeer> =
-                state.discovered.lock().clone();
+            // 候选 = 配对注册表 ∩ 同局域网 ∩ 当前在线。
+            // 注意：**不能**用 discovered 表——它只存未配对设备（mDNS 对已配对设备
+            // 走 is_paired 分支从不写入，见 mdns.rs），已配对设备的信息在 registry
+            // （PairedDevice.last_addr）。此前用「已配对 ∩ discovered」交集恒空，
+            // 扫描必然返回空。地址取 last_addr（host:port），解析出 IP 后推断 lan_group。
             let peers_now: std::collections::HashSet<String> =
                 self.peers.lock().unwrap().keys().cloned().collect();
+            let paired_list = state.registry.lock().list();
             let mut candidates: Vec<(String, String, String)> = Vec::new(); // (device_id, device_name, peer_lg)
-            for (id, peer) in &discovered {
-                if !self.paired_codes.lock().unwrap().contains_key(id) {
+            for dev in &paired_list {
+                let id = dev.device_id.0.clone();
+                if !self.paired_codes.lock().unwrap().contains_key(&id) {
                     continue;
                 }
-                if !peers_now.contains(id) {
-                    // 当前未在线：跳过。重启/初装后先在 P2P 视图点一下触发连接
+                if !peers_now.contains(&id) {
+                    // 当前未在线：跳过（配置查询走加密通道，必须已建立连接）
                     continue;
                 }
-                let peer_lg = lan_group_from_addr(&peer.addr);
+                // last_addr 形如 "host:port"，取 host 部分推断 lan_group
+                let Some(host) = dev
+                    .last_addr
+                    .as_deref()
+                    .and_then(|s| s.rsplit_once(':'))
+                    .map(|(h, _)| h)
+                else {
+                    continue;
+                };
+                let peer_lg = lan_group_from_addr(host);
                 if peer_lg.is_empty() || peer_lg != my_lg {
                     continue;
                 }
-                candidates.push((id.clone(), peer.device_name.clone(), peer_lg));
+                candidates.push((id, dev.device_name.clone(), peer_lg));
             }
             (my_lg, candidates)
         };
