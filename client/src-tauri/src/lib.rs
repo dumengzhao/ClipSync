@@ -425,6 +425,7 @@ pub fn run() {
             tauri_cmd::open_settings,
             tauri_cmd::quit_app,
             log_viewer::open_log_window,
+            log_viewer::log_window_ready,
             hide_app_window,
             win_minimize,
             win_toggle_maximize,

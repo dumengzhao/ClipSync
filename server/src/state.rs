@@ -64,6 +64,18 @@ impl AppState {
         device: &DeviceInfo,
         tx: &Tx,
     ) -> Result<(String, String), String> {
+        // 设备 ID 由客户端自报，会进入管理页渲染与日志：限定字符集与长度。
+        // 前端管理页已改为 data 属性 + 转义（第一道防线），这里是服务端侧的纵深防御——
+        // 允许 ID 里出现引号/尖括号之类的字符没有任何正当理由（客户端用的是 UUID）。
+        let id_ok = !device.id.is_empty()
+            && device.id.len() <= 64
+            && device
+                .id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        if !id_ok {
+            return Err("bad_device_id".to_string());
+        }
         let token_hash = hash_token(token);
         let mut nets = self.networks.lock().unwrap();
         let idx = nets
@@ -119,7 +131,7 @@ impl AppState {
             nodes: Self::enabled_node_infos(net),
         };
         drop(nets);
-        let _ = tx.send(OutMsg::App(welcome));
+        let _ = tx.try_send(OutMsg::App(welcome));
         self.hub.register(&dev_id, &net_id, tx.clone());
         self.save().ok();
         self.push_admin_nodes(&net_id);
@@ -158,7 +170,7 @@ impl AppState {
                 None => return,
             };
             if !from_node.enabled {
-                let _ = tx.send(OutMsg::App(ServerToClient::Error {
+                let _ = tx.try_send(OutMsg::App(ServerToClient::Error {
                     code: "not_active".into(),
                     msg: "device not enabled".into(),
                 }));
@@ -167,7 +179,7 @@ impl AppState {
             let to_node = match net.nodes.iter().find(|n| n.device_id == to) {
                 Some(n) => n,
                 None => {
-                    let _ = tx.send(OutMsg::App(ServerToClient::Error {
+                    let _ = tx.try_send(OutMsg::App(ServerToClient::Error {
                         code: "no_target".into(),
                         msg: "target not found".into(),
                     }));
@@ -175,7 +187,7 @@ impl AppState {
                 }
             };
             if !to_node.enabled {
-                let _ = tx.send(OutMsg::App(ServerToClient::Error {
+                let _ = tx.try_send(OutMsg::App(ServerToClient::Error {
                     code: "target_not_active".into(),
                     msg: "target not enabled".into(),
                 }));
@@ -216,7 +228,7 @@ impl AppState {
                 None => return,
             };
             if !from_node.enabled {
-                let _ = tx.send(OutMsg::App(ServerToClient::Error {
+                let _ = tx.try_send(OutMsg::App(ServerToClient::Error {
                     code: "not_active".into(),
                     msg: "device not enabled".into(),
                 }));
@@ -329,6 +341,8 @@ impl AppState {
         let conns = self.admin_ws.lock().unwrap();
         if let Some(txs) = conns.get(net_id) {
             for tx in txs {
+                // 注意：这是管理端 WS 的通道（String），与 hub 的设备 Tx 是不同类型，
+                // 用 send 而非 try_send。
                 let _ = tx.send(payload.clone());
             }
         }

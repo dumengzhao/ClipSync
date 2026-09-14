@@ -1235,6 +1235,31 @@ body {
   width: fit-content;
 }
 
+/* 监听/握手失败提示：显性化，避免窗口一片空白无从排查 */
+.log-error {
+  flex: none;
+  padding: 6px 10px;
+  font-size: 11.5px;
+  color: #b91c1c;
+  background: #fee2e2;
+  border-bottom: 1px solid #fca5a5;
+  word-break: break-all;
+}
+
+:root[data-theme='dark'] .log-error {
+  color: #fca5a5;
+  background: #3b1414;
+  border-bottom-color: #7f1d1d;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme='system'] .log-error {
+    color: #fca5a5;
+    background: #3b1414;
+    border-bottom-color: #7f1d1d;
+  }
+}
+
 :root[data-theme='dark'] .log-paused-badge {
   color: #fbbf24;
   background: #3a2b0a;

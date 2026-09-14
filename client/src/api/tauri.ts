@@ -299,9 +299,17 @@ export async function firewallFix(): Promise<void> {
 
 /* ================= 实时日志窗口（log-viewer） ================= */
 
-/** 打开（或聚焦已存在的）实时日志窗口；Rust 侧自动启动文件 tail 任务，窗口关闭任务即退 */
+/** 打开（或聚焦已存在的）实时日志窗口；Rust 侧在收到 log_window_ready 后才启动 tail */
 export async function openLogWindow(): Promise<void> {
   return invoke<void>('open_log_window');
+}
+
+/**
+ * 日志窗口前端就绪信号（监听注册完成后调用）：
+ * 返回日志文件尾部历史行，Rust 侧同时从该位置开始增量推送。
+ */
+export async function logWindowReady(): Promise<string[]> {
+  return invoke<string[]>('log_window_ready');
 }
 
 
