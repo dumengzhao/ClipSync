@@ -20,9 +20,16 @@
     FileClose $0
     ; 设为隐藏：普通用户在资源管理器看不到，但运行时 File::exists 能读到
     SetFileAttributes "$INSTDIR\installed.marker" HIDDEN
+    ; 防火墙放行 mDNS 入站多播（UDP 5353）：NSIS 安装器本身以管理员权限运行，
+    ; 此处加规则一次到位，运行期无需再碰 netsh。失败不中断安装。
+    nsExec::ExecToLog \
+        'netsh advfirewall firewall add rule name="ClipSync mDNS (UDP 5353)" dir=in action=allow protocol=UDP localport=5353'
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
     ; 卸载前先删掉标记，避免已卸载目录残留导致后续误判为安装版
     Delete "$INSTDIR\installed.marker"
+    ; 同步删除安装时添加的防火墙规则，不留垃圾。失败不中断卸载。
+    nsExec::ExecToLog \
+        'netsh advfirewall firewall delete rule name="ClipSync mDNS (UDP 5353)"'
 !macroend

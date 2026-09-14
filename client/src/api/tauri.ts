@@ -285,6 +285,18 @@ export async function scanLanServerConfigs(): Promise<LanServerConfigGroup[]> {
   return invoke<LanServerConfigGroup[]>('scan_lan_server_configs');
 }
 
+/* ================= mDNS 防火墙修复（LocalSend 同款交互） ================= */
+
+/** 查询 mDNS 防火墙入站放行规则（UDP 5353）是否已存在 */
+export async function firewallRuleExists(): Promise<boolean> {
+  return invoke<boolean>('firewall_rule_exists');
+}
+
+/** 触发 UAC 提权执行一次 netsh 加放行规则；用户在 UAC 点「否」则规则不生效 */
+export async function firewallFix(): Promise<void> {
+  return invoke<void>('firewall_fix');
+}
+
 
 /* ================= 客户端自更新（无签名自托管，见 server/UPDATE_MODULE_PLAN.md） ================= */
 

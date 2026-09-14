@@ -12,6 +12,8 @@ import {
   getVersion,
   probeExtFileEp,
   scanLanServerConfigs,
+  firewallRuleExists,
+  firewallFix,
   type AppConfig,
   type UpdateInfo,
   type ProbeResult,
@@ -109,6 +111,9 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
   }>({ open: false, groups: [] });
   // Network Token 显隐：默认隐藏（星号）
   const [showToken, setShowToken] = useState(false);
+  // 防火墙修复：规则是否已放行 / 修复中
+  const [fwOk, setFwOk] = useState<boolean | null>(null);
+  const [fwBusy, setFwBusy] = useState(false);
   // 手动地址配对时输入的对方配对码（按当前正在配对的那条地址记录）
   const [manualPairing, setManualPairing] = useState<{ addr: string; port: number } | null>(null);
   const [manualPairCode, setManualPairCode] = useState('');
@@ -140,7 +145,28 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
       .catch(() => setInstalledBuild(false));
     // 取一次客户端版本号，用于「更新」section 显示当前版本（便于与远端版本比对）
     getVersion().then(setAppVersion).catch(() => setAppVersion(''));
+    // 防火墙放行状态（仅 Windows 有意义；null = 查询失败按未放行处理）
+    firewallRuleExists()
+      .then(setFwOk)
+      .catch(() => setFwOk(false));
   }, []);
+
+  // 「防火墙修复」：UAC 提权跑一次 netsh，完成后轮询确认规则是否真的加上
+  const doFirewallFix = async () => {
+    setFwBusy(true);
+    try {
+      await firewallFix();
+      // UAC 交互 + netsh 执行需要时间，稍候再查
+      await new Promise((r) => setTimeout(r, 1500));
+      const ok = await firewallRuleExists().catch(() => false);
+      setFwOk(ok);
+      setMsg(ok ? '防火墙规则已添加，局域网发现应恢复正常' : '规则未生效——可能在 UAC 弹窗点了「否」，或权限不足');
+    } catch (e) {
+      setMsg('修复失败: ' + String(e));
+    } finally {
+      setFwBusy(false);
+    }
+  };
 
   // 「检查更新」：调 Rust 自写更新器；null=已是最新/未发布
   const doCheckUpdate = async () => {
@@ -488,11 +514,22 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
       </div>
       <div className="row">
         <label>启用局域网发现 (mDNS)</label>
-        <input
-          type="checkbox"
-          checked={cfg.enable_mdns}
-          onChange={(e) => persist({ enable_mdns: e.target.checked })}
-        />
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flex: '0 0 auto' }}>
+          <input
+            type="checkbox"
+            checked={cfg.enable_mdns}
+            onChange={(e) => persist({ enable_mdns: e.target.checked })}
+          />
+          {/* 防火墙修复（LocalSend 同款）：入站多播被拦时用户主动提权放行 */}
+          {fwOk === false && (
+            <button className="btn btn-sm" onClick={doFirewallFix} disabled={fwBusy}>
+              {fwBusy ? '修复中…' : '防火墙修复'}
+            </button>
+          )}
+          {fwOk === true && (
+            <span style={{ fontSize: '0.78rem', color: '#64748b' }}>已放行</span>
+          )}
+        </div>
       </div>
 
       <div className="section">启动</div>
