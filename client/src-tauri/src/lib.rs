@@ -116,6 +116,10 @@ impl Default for AppState {
 #[cfg(windows)]
 fn ensure_mdns_firewall_rule() {
     use std::process::Command;
+    // netsh 是控制台程序：不设 CREATE_NO_WINDOW 会给每个子进程闪出一个命令窗口
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let rule_name = "ClipSync mDNS (UDP 5353)";
     let exists = Command::new("netsh")
         .args([
@@ -125,6 +129,7 @@ fn ensure_mdns_firewall_rule() {
             "rule",
             &format!("name={rule_name}"),
         ])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
@@ -144,6 +149,7 @@ fn ensure_mdns_firewall_rule() {
             "protocol=UDP",
             "localport=5353",
         ])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
     {
         Ok(o) if o.status.success() => {
