@@ -125,6 +125,9 @@ fn hardware_id() -> String {
     }
     #[cfg(target_os = "windows")]
     {
+        // reg 是控制台程序：不设 CREATE_NO_WINDOW 会闪出命令窗口
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         if let Ok(out) = std::process::Command::new("reg")
             .args([
                 "query",
@@ -132,6 +135,7 @@ fn hardware_id() -> String {
                 "/v",
                 "MachineGuid",
             ])
+            .creation_flags(CREATE_NO_WINDOW)
             .output()
         {
             let s = String::from_utf8_lossy(&out.stdout);
@@ -172,6 +176,9 @@ fn os_version() -> String {
     }
     #[cfg(target_os = "windows")]
     {
+        // reg 是控制台程序：不设 CREATE_NO_WINDOW 会闪出命令窗口
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         if let Ok(out) = std::process::Command::new("reg")
             .args([
                 "query",
@@ -179,6 +186,7 @@ fn os_version() -> String {
                 "/v",
                 "ProductName",
             ])
+            .creation_flags(CREATE_NO_WINDOW)
             .output()
         {
             let s = String::from_utf8_lossy(&out.stdout);
@@ -295,6 +303,10 @@ pub struct ServerConn {
     /// 跨 LAN 拉取取消标记（key = pull_id）：`cancel_pull_cross_lan` 置位，
     /// 下载循环在每个分片边界检查，命中即中止本次拉取。
     cross_pull_cancel: Mutex<HashSet<String>>,
+    /// 硬件 ID / OS 版本缓存：reg 查询是控制台子进程（虽然已加 CREATE_NO_WINDOW
+    /// 不闪窗），也不该在每次重连时重复执行——启动后缓存一次即可。
+    cached_hw_id: Mutex<String>,
+    cached_os_ver: Mutex<String>,
 }
 
 impl ServerConn {
@@ -312,6 +324,8 @@ impl ServerConn {
             removed: AtomicBool::new(false),
             auth_fail_notified: AtomicBool::new(false),
             cross_pull_cancel: Mutex::new(HashSet::new()),
+            cached_hw_id: Mutex::new(String::new()),
+            cached_os_ver: Mutex::new(String::new()),
         })
     }
 
@@ -455,11 +469,19 @@ impl ServerConn {
         if cfg.network_token.trim().is_empty() {
             anyhow::bail!("network_token 为空，无法连接服务端");
         }
-        let mut hw = hardware_id();
+        let mut hw = self.cached_hw_id.lock().unwrap().clone();
         if hw.is_empty() {
-            hw = self.engine.device_id().0.clone();
+            hw = hardware_id();
+            if hw.is_empty() {
+                hw = self.engine.device_id().0.clone();
+            }
+            *self.cached_hw_id.lock().unwrap() = hw.clone();
         }
-        let os_ver = os_version();
+        let mut os_ver = self.cached_os_ver.lock().unwrap().clone();
+        if os_ver.is_empty() {
+            os_ver = os_version();
+            *self.cached_os_ver.lock().unwrap() = os_ver.clone();
+        }
         let auth = ClientToServer::Auth {
             token: cfg.network_token.clone(),
             device: DeviceFields {
