@@ -8,6 +8,12 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import './styles.css';
 
 const winLabel = getCurrentWindow().label;
+/**
+ * 窗口 label 常量：与 Rust 侧保持一致。
+ * - `log-viewer` ↔ `src-tauri/src/log_viewer.rs` 的 `LOG_WINDOW_LABEL`
+ * - `pull-toast` ↔ `src-tauri/tauri.conf.json` 的静态窗口声明
+ * Tauri 没有跨语言共享机制，**改动必须两处同步**（另见 capabilities/default.json 的 windows 白名单）。
+ */
 const isToast = winLabel === 'pull-toast';
 const isLogViewer = winLabel === 'log-viewer';
 

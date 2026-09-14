@@ -437,7 +437,7 @@ pub async fn simulate_incoming_offer(app: AppHandle) {
 
 #[cfg(debug_assertions)]
 pub(crate) async fn debug_simulate_offer(app: AppHandle) {
-    let (tx, _rx) = mpsc::unbounded_channel::<Outgoing>();
+    let (tx, _rx) = mpsc::channel::<Outgoing>(crate::transfer::manager::OUT_QUEUE_CAPACITY);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

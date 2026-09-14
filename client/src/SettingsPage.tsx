@@ -32,14 +32,16 @@ function isIpv4(s: string): boolean {
 }
 
 /**
- * 校验主机名：IPv4 或域名（RFC 1123：标签由字母/数字/连字符组成、不以连字符开头结尾、
- * 长度 1-63，顶级域至少 2 段；整体 ≤253 字符）。用于「对外文件地址」允许填域名。
+ * 校验主机名：IPv4 或主机名/域名。
+ *
+ * RFC 1123 字符集：标签由字母/数字/连字符组成，不以连字符开头或结尾，
+ * 单个标签长度 1-63，整体 ≤253。**允许单标签**（如 `localhost`、内网短主机名），
+ * 早期要求「至少两段」会把 `localhost:20071` 这类合法写法挡在外面。
  */
 function isHostName(s: string): boolean {
   if (isIpv4(s)) return true;
   if (!s || s.length > 253) return false;
   const labels = s.split('.');
-  if (labels.length < 2) return false;
   return labels.every(
     (l) =>
       l.length >= 1 &&

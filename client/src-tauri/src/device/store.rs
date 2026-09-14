@@ -138,7 +138,15 @@ pub fn load_devices(app: &tauri::AppHandle) -> Vec<PairedDevice> {
     }
 }
 
+/// 上次实际落盘的设备表内容（用于跳过无变化的重复写盘）。
+static LAST_SAVED_DEVICES: std::sync::LazyLock<std::sync::Mutex<Option<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
 /// 覆盖写入已配对设备列表。
+///
+/// **内容未变则跳过写盘**：mDNS 的 `ServiceResolved` 会因多网卡、重复解析被频繁触发，
+/// 每次 `reg.add` 之后都全量写盘会造成大量无意义的 I/O（设备表本身没变化）。
+/// 比对的是最终要写入的 JSON 文本，所以不会漏掉任何真实变更。
 pub fn save_devices(app: &tauri::AppHandle, devices: &[PairedDevice]) {
     let Some(dir) = config_dir(app) else {
         tracing::warn!("无法定位配置目录，已配对设备表未能保存");
@@ -151,6 +159,15 @@ pub fn save_devices(app: &tauri::AppHandle, devices: &[PairedDevice]) {
     let records: Vec<PairedRecord> = devices.iter().map(PairedRecord::from).collect();
     match serde_json::to_string_pretty(&records) {
         Ok(text) => {
+            {
+                let mut last = LAST_SAVED_DEVICES
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if last.as_deref() == Some(text.as_str()) {
+                    return;
+                }
+                *last = Some(text.clone());
+            }
             if let Err(e) = std::fs::write(dir.join(DEVICES_FILE), text) {
                 tracing::warn!("写入已配对设备表失败：{e}");
             }

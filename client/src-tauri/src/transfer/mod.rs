@@ -2,6 +2,7 @@
 
 pub mod file_stream;
 pub mod manager;
+pub mod paths;
 pub mod websocket;
 
 use crate::error::TransferResult;

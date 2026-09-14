@@ -24,15 +24,33 @@ fn load_state() -> Arc<AppState> {
 
     // 管理员凭据单一来源 = 环境变量 ADMIN_USER / ADMIN_PASS。
     // 不再读/写 data/admin.json，避免两份配置打架（这正是「改配置文件密码不生效」的根因）。
-    // env 缺失时回退默认 admin/clipsync（仅本地开发用；生产由 install.sh 保证写入真实密码）。
-    let admin_user = std::env::var("ADMIN_USER").unwrap_or_else(|_| {
-        eprintln!("[clipsync-server] 警告：未设置 ADMIN_USER，使用默认用户名 admin");
-        "admin".to_string()
-    });
-    let admin_pass = std::env::var("ADMIN_PASS").unwrap_or_else(|_| {
-        eprintln!("[clipsync-server] 警告：未设置 ADMIN_PASS，使用默认密码 clipsync（生产请通过 env 配置）");
-        "clipsync".to_string()
-    });
+    //
+    // ⚠️ ADMIN_PASS 必须显式提供：它保护的是「客户端更新包上传」接口——拿到它就能
+    // 给所有客户端推恶意安装包。因此**缺失、过短或仍是旧默认值一律拒绝启动**，
+    // 不再像早期那样静默回退到 "clipsync"（那等于把上传接口公开）。
+    // 部署侧由 install.sh 保证：env 缺失时用 `openssl rand -hex 12` 生成 24 位随机口令。
+    let admin_user = std::env::var("ADMIN_USER")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "admin".to_string());
+    let admin_pass = match std::env::var("ADMIN_PASS").ok().map(|s| s.trim().to_string()) {
+        Some(p) if p.len() >= 8 && p != "clipsync" => p,
+        Some(_) => {
+            eprintln!(
+                "[clipsync-server] 启动中止：ADMIN_PASS 少于 8 位或仍是默认值 clipsync。\n\
+                 该口令保护客户端更新上传接口，必须设置强口令（建议 openssl rand -hex 12）。"
+            );
+            std::process::exit(1);
+        }
+        None => {
+            eprintln!(
+                "[clipsync-server] 启动中止：未设置 ADMIN_PASS。\n\
+                 该口令保护客户端更新上传接口，必须显式配置（至少 8 位）。"
+            );
+            std::process::exit(1);
+        }
+    };
     let admin_pass_hash = storage::hash_pass(&admin_pass);
 
     let server_key = store.load_or_create_key().expect("create server key");

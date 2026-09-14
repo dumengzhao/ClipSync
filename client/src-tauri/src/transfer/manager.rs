@@ -22,8 +22,9 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -65,6 +66,74 @@ const MAX_PAIRING_ATTEMPTS: u32 = 24;
 
 /// 口令确认标签的域分隔串，避免该 HMAC 与其它用途的 MAC 混淆。
 const VERIFY_CONTEXT: &[u8] = b"clipsync-verify-v1";
+
+/// 应答方配对握手的失败限速阈值与封禁时长。///
+/// 应答方使用**常驻**的 6 位配对码（约 20 bit 熵）。SPAKE2 只防离线爆破，
+/// 防不了在线反复试探——同网段攻击者可以不断连上来试码直到猜中。
+/// 这里给应答方加一道在线防线：同一来源连续失败达阈值即临时封禁。
+const PAIRING_MAX_FAILS: u32 = 5;
+const PAIRING_BLOCK: Duration = Duration::from_secs(300);
+
+/// 入站连接并发上限。每个连接会独立 spawn 一个任务并可能阻塞到 5s 嗅探超时，
+/// 无上限时同网段任意主机刷连接就能耗尽任务与内存。
+const MAX_CONCURRENT_CONNS: usize = 64;
+
+/// 落盘任务的空闲超时：超过该时长没有任何分片到达即中止（对端已消失）。
+/// 正常传输的分片间隔是毫秒级，60s 足够宽松，不会误杀慢速大文件。
+const PULL_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// 每条连接出站队列容量（有界）。
+///
+/// 早先用 unbounded：发送端读盘通常快于网络写入，队列会按文件大小堆积，
+/// 大文件传输时内存暴涨。现在改为有界——文件分片走 `send().await` 施压背压，
+/// 信令类走 `try_send`（满则丢弃，通知类消息过时即失效，不必排队）。
+pub(crate) const OUT_QUEUE_CAPACITY: usize = 64;
+
+/// 记录一次出站消息被丢弃的原因。
+///
+/// `try_send` 失败有两种语义完全不同的情况，排查时必须能区分：
+/// - `Full`：队列满 → 对端消费不过来，**本条消息被丢弃**（内容确实没送达）；
+/// - `Closed`：接收端已关闭 → 连接断了。
+///
+/// 早期文案一律写「通道已关闭」，队列满时会把排查引向错误方向。
+fn log_outgoing_dropped(peer: &str, what: &str, e: &mpsc::error::TrySendError<Outgoing>) {
+    match e {
+        mpsc::error::TrySendError::Full(_) => tracing::warn!(
+            "对端 {peer} 出站队列已满（容量 {OUT_QUEUE_CAPACITY}），{what} 被丢弃（对端消费过慢）"
+        ),
+        mpsc::error::TrySendError::Closed(_) => {
+            tracing::warn!("对端 {peer} 连接已关闭，{what} 未送达")
+        }
+    }
+}
+
+/// 配对失败计数表：源地址 → (连续失败次数, 最近失败时刻)。仅内存态，进程重启即清零。
+static PAIRING_FAILS: std::sync::LazyLock<Mutex<HashMap<String, (u32, std::time::Instant)>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 该来源是否处于配对封禁期。
+fn pairing_blocked(addr: &str) -> bool {
+    let tbl = PAIRING_FAILS.lock();
+    match tbl.get(addr) {
+        Some((n, at)) => *n >= PAIRING_MAX_FAILS && at.elapsed() < PAIRING_BLOCK,
+        None => false,
+    }
+}
+
+/// 记录一次配对握手结果（成功清零、失败累加），并顺带清理过期条目防表膨胀。
+fn note_pairing_result(addr: &str, ok: bool) {
+    let mut tbl = PAIRING_FAILS.lock();
+    tbl.retain(|_, (_, at)| at.elapsed() < PAIRING_BLOCK);
+    if ok {
+        tbl.remove(addr);
+        return;
+    }
+    let entry = tbl
+        .entry(addr.to_string())
+        .or_insert((0, std::time::Instant::now()));
+    entry.0 = entry.0.saturating_add(1);
+    entry.1 = std::time::Instant::now();
+}
 
 /// 长期重连口令（link secret）的派生域分隔串。
 const LINK_CONTEXT: &[u8] = b"clipsync-link-v1";
@@ -134,7 +203,7 @@ struct Peer {
     /// 本条连接的唯一序号。清理时据此判断表中登记的是否仍是自己，
     /// 避免**已过期的旧连接把刚建立的新连接从表里删掉**（那会导致本机只收不发）。
     conn_id: u64,
-    tx: mpsc::UnboundedSender<Outgoing>,
+    tx: mpsc::Sender<Outgoing>,
 }
 
 /// 本端作为「发送方」（拷贝者）时保存的一次传输：仅本端持有本地绝对路径，绝不外传。
@@ -314,32 +383,32 @@ impl ConnectionHub {
 
     /// 同步设置中的「配对码」到内存（配置加载/保存时调用）。
     pub fn set_pairing_code(&self, code: String) {
-        *self.pairing_code.lock().unwrap() = code;
+        *self.pairing_code.lock() = code;
     }
 
     /// 同步设置中的「文件夹文件数上限」到内存（配置加载/保存时调用）。
     pub fn set_max_folder_files(&self, n: usize) {
-        *self.max_folder_files.lock().unwrap() = n;
+        *self.max_folder_files.lock() = n;
     }
 
     /// 读取当前静态配对口令（供首配对握手使用）。
     pub fn pairing_code(&self) -> String {
-        self.pairing_code.lock().unwrap().clone()
+        self.pairing_code.lock().clone()
     }
 
     /// 网格中继去重：标记/查询某剪贴板消息是否已处理过。true = 已见过（应丢弃）。
     fn note_seen(&self, id: &str) -> bool {
-        self.seen.lock().unwrap().note(id)
+        self.seen.lock().note(id)
     }
 
     pub fn is_paired(&self, device_id: &str) -> bool {
-        self.paired_codes.lock().unwrap().contains_key(device_id)
+        self.paired_codes.lock().contains_key(device_id)
     }
 
     /// 标记对端拒绝了本机握手（本机对其已无配对关系）。返回是否为冷却期外的
     /// 「新拒绝」——调用方据此决定是否向前端发一次提示（冷却期内重复被拒不刷屏）。
     fn mark_rejected(&self, device_id: &str) -> bool {
-        let mut g = self.rejected.lock().unwrap();
+        let mut g = self.rejected.lock();
         if let Some(t) = g.get(device_id) {
             if t.elapsed() < REJECT_COOLDOWN {
                 return false; // 冷却期内，重复拒绝不再提示
@@ -353,35 +422,32 @@ impl ConnectionHub {
     fn is_rejected(&self, device_id: &str) -> bool {
         self.rejected
             .lock()
-            .unwrap()
             .get(device_id)
             .is_some_and(|t| t.elapsed() < REJECT_COOLDOWN)
     }
 
     /// 清除对端的拒绝冷却标记（重新配对 / 取消配对时调用）。
     fn clear_rejected(&self, device_id: &str) {
-        self.rejected.lock().unwrap().remove(device_id);
+        self.rejected.lock().remove(device_id);
     }
 
     /// 按地址标记/查询拒绝冷却（对端 id 未知的连接，如手动地址兜底重连）。
     fn mark_rejected_addr(&self, addr: &str) {
         self.rejected_addrs
             .lock()
-            .unwrap()
             .insert(addr.to_string(), std::time::Instant::now());
     }
 
     fn is_rejected_addr(&self, addr: &str) -> bool {
         self.rejected_addrs
             .lock()
-            .unwrap()
             .get(addr)
             .is_some_and(|t| t.elapsed() < REJECT_COOLDOWN)
     }
 
     /// 「配对码不一致」类前端提示是否应该发出（同一对端 60s 内至多一次）。
     fn should_emit_pairing_fail(&self, device_id: &str) -> bool {
-        let mut g = self.pairing_fail_emitted.lock().unwrap();
+        let mut g = self.pairing_fail_emitted.lock();
         match g.get(device_id) {
             Some(t) if t.elapsed() < PAIRING_FAIL_EMIT_INTERVAL => false,
             _ => {
@@ -400,7 +466,7 @@ impl ConnectionHub {
             return false;
         }
         let secret = {
-            let mut g = self.paired_codes.lock().unwrap();
+            let mut g = self.paired_codes.lock();
             match g.remove(old_id) {
                 Some(s) => {
                     g.insert(new_id.to_string(), s.clone());
@@ -426,7 +492,7 @@ impl ConnectionHub {
             return;
         }
         tracing::info!("已恢复 {} 台设备的配对状态", secrets.len());
-        self.paired_codes.lock().unwrap().extend(secrets);
+        self.paired_codes.lock().extend(secrets);
     }
 
     /// 取消与某设备的配对：清掉 link secret 与持久化记录，并断开当前连接。
@@ -434,16 +500,16 @@ impl ConnectionHub {
     /// 移除 `peers` 表项会 drop 该连接的发送端，加密循环随即结束——因此这里
     /// 不需要额外的中断信号。
     pub fn unpair(&self, device_id: &str) {
-        self.paired_codes.lock().unwrap().remove(device_id);
+        self.paired_codes.lock().remove(device_id);
         // 主动断开与该对端的现存连接：仅从表里移除 sender 并不会关闭 socket
         //（连接任务自身持有通道另一端），取消配对后旧会话必须立即终止，
         // 对端下次重连才能走到 Reject 流程。
-        if let Some(p) = self.peers.lock().unwrap().remove(device_id) {
-            let _ = p.tx.send(Outgoing::Close);
+        if let Some(p) = self.peers.lock().remove(device_id) {
+            let _ = p.tx.try_send(Outgoing::Close);
         }
         self.clear_rejected(device_id);
-        self.pairing_fail_emitted.lock().unwrap().remove(device_id);
-        if let Some(app) = self.app.lock().unwrap().clone() {
+        self.pairing_fail_emitted.lock().remove(device_id);
+        if let Some(app) = self.app.lock().clone() {
             crate::device::store::delete_secret(&app, device_id);
             let state = app.state::<AppState>();
             // 先取出设备信息（含最后可拨号地址）再删注册表——取消配对后要把它
@@ -507,14 +573,13 @@ impl ConnectionHub {
 
     /// 返回当前已建立加密通道的对端 device_id 集合（供前端挂载时主动查询一次）。
     pub fn connected_peer_ids(&self) -> Vec<String> {
-        self.peers.lock().unwrap().keys().cloned().collect()
+        self.peers.lock().keys().cloned().collect()
     }
 
     /// 当前接收到的「待拉取」文件清单快照（前端挂载时查询一次，兜底事件丢失）。
     pub fn pending_offers_snapshot(&self) -> Vec<serde_json::Value> {
         self.pending_offers
             .lock()
-            .unwrap()
             .values()
             .map(|o| {
                 serde_json::json!({
@@ -558,7 +623,6 @@ impl ConnectionHub {
     fn should_auto_pull(&self, total: u64) -> bool {
         self.app
             .lock()
-            .unwrap()
             .as_ref()
             .map(|a| a.state::<AppState>().config.lock().should_auto_pull(total))
             .unwrap_or(false)
@@ -578,8 +642,8 @@ impl ConnectionHub {
     ) {
         // 锁中毒（持锁线程 panic 过）时取回守卫继续用，而不是跟着 panic：
         // 这里登记的都是内存态，数据本身不会因中毒而损坏，整条链路中断反而更糟。
-        let mut m = map.lock().unwrap_or_else(|e| e.into_inner());
-        let mut o = order.lock().unwrap_or_else(|e| e.into_inner());
+        let mut m = map.lock();
+        let mut o = order.lock();
         o.push_back(key.to_string());
         while o.len() > max {
             let Some(oldest) = o.pop_front() else { break };
@@ -596,10 +660,9 @@ impl ConnectionHub {
 
     /// 从 map 与插入顺序队列中同时移除某条记录（拉取完成 / 取消 / 传输结束）。
     fn forget_key<T>(map: &Mutex<HashMap<String, T>>, order: &Mutex<VecDeque<String>>, key: &str) {
-        map.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
+        map.lock().remove(key);
         order
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
             .retain(|k| k != key);
     }
 
@@ -620,7 +683,7 @@ impl ConnectionHub {
         // 文件夹文件数超过上限：递归计数，一旦超过上限立即返回（不展开清单、不广播、
         // 不写入 active_offers），仅在本地弹提示请用户压缩。无需算出精确总数。
         // 上限来自设置（max_folder_files），0 表示不限制。
-        let max_folder_files = *self.max_folder_files.lock().unwrap();
+        let max_folder_files = *self.max_folder_files.lock();
         if max_folder_files > 0
             && has_folder
             && existing
@@ -635,7 +698,7 @@ impl ConnectionHub {
             tracing::warn!(
                 "文件夹 {folder_name} 文件数量超过 {max_folder_files}，已取消广播，请压缩后复制"
             );
-            if let Some(app) = self.app.lock().unwrap().clone() {
+            if let Some(app) = self.app.lock().clone() {
                 let _ = app.emit(
                     "file-count-exceeded",
                     serde_json::json!({ "folder_name": folder_name }),
@@ -662,7 +725,7 @@ impl ConnectionHub {
         let transfer_id = Uuid::new_v4().to_string();
         let my_id = self.identity.id.0.clone();
         let my_name = self.identity.name.clone();
-        self.active_offers.lock().unwrap().insert(
+        self.active_offers.lock().insert(
             transfer_id.clone(),
             OfferState {
                 device_name: my_name.clone(),
@@ -677,7 +740,7 @@ impl ConnectionHub {
             MAX_ACTIVE_OFFERS,
             "待拉取文件登记（active_offers）",
         );
-        let peers = self.peers.lock().unwrap().clone();
+        let peers = self.peers.lock().clone();
         if peers.is_empty() {
             tracing::warn!("本地拷贝了文件，但当前没有已连接对端，未广播可拉取清单");
             return;
@@ -691,8 +754,8 @@ impl ConnectionHub {
             has_folder,
         };
         for (id, p) in &peers {
-            if p.tx.send(Outgoing::File(frame.clone())).is_err() {
-                tracing::warn!("对端 {id} 发送通道关闭，可拉取清单未送达");
+            if let Err(e) = p.tx.try_send(Outgoing::File(frame.clone())) {
+                log_outgoing_dropped(id, "可拉取清单", &e);
             }
         }
         tracing::info!(
@@ -705,7 +768,7 @@ impl ConnectionHub {
     pub(crate) async fn handle_file_frame(
         self: Arc<Self>,
         ff: FileFrame,
-        tx: &mpsc::UnboundedSender<Outgoing>,
+        tx: &mpsc::Sender<Outgoing>,
         _peer_id: &str,
     ) {
         match ff {
@@ -731,7 +794,6 @@ impl ConnectionHub {
                 let is_local_echo = self
                     .active_offers
                     .lock()
-                    .unwrap()
                     .values()
                     .any(|o| Self::offer_fingerprint(&o.files) == incoming_fp);
                 if is_local_echo {
@@ -744,7 +806,7 @@ impl ConnectionHub {
                 // 自动拉取需同时满足：总开关 auto_pull_enabled 开启 且 总大小严格小于阈值。
                 // 拷贝端自身已被上面的 device_id 守卫排除，所以这里一定是「其它端」。
                 let auto_pull = self.should_auto_pull(total);
-                self.pending_offers.lock().unwrap().insert(
+                self.pending_offers.lock().insert(
                     transfer_id.clone(),
                     PendingOffer {
                         transfer_id: transfer_id.clone(),
@@ -763,7 +825,7 @@ impl ConnectionHub {
                     MAX_PENDING_OFFERS,
                     "待拉取清单（pending_offers）",
                 );
-                if let Some(app) = self.app.lock().unwrap().clone() {
+                if let Some(app) = self.app.lock().clone() {
                     let _ = app.emit(
                         "file-offer",
                         serde_json::json!({
@@ -792,7 +854,7 @@ impl ConnectionHub {
                     total,
                     auto_pull
                 );
-                if let Some(app) = self.app.lock().unwrap().clone() {
+                if let Some(app) = self.app.lock().clone() {
                     Self::show_pull_toast(&app);
                 }
                 // 小于阈值的传输自动拉取：直接走与手动拉取相同的链路（写盘 + 写本机剪贴板）。
@@ -812,7 +874,6 @@ impl ConnectionHub {
                 let offer = self
                     .active_offers
                     .lock()
-                    .unwrap()
                     .get(&transfer_id)
                     .cloned();
                 let Some(offer) = offer else {
@@ -882,6 +943,9 @@ impl ConnectionHub {
                                         Ok(0) => break,
                                         Ok(n) => {
                                             let data = buf[..n].to_vec();
+                                            // 文件分片必须走 `send().await`（背压）：
+                                            // 队列满时等对端消费，而**绝不能** try_send 丢弃——
+                                            // 丢一片就等于传输损坏。信令类消息才允许丢。
                                             if tx
                                                 .send(Outgoing::File(FileFrame::Chunk(
                                                     FileChunkResponsePayload {
@@ -891,6 +955,7 @@ impl ConnectionHub {
                                                         data,
                                                     },
                                                 )))
+                                                .await
                                                 .is_err()
                                             {
                                                 return;
@@ -927,28 +992,30 @@ impl ConnectionHub {
                             .collect();
                         let msg = format!("{} 个文件未能传输：{}", failed.len(), names.join("；"));
                         tracing::error!("传输 {transfer_id} {msg}");
-                        let _ = tx.send(Outgoing::File(FileFrame::Error {
+                        let _ = tx.try_send(Outgoing::File(FileFrame::Error {
                             transfer_id: transfer_id.clone(),
                             message: msg,
                             failed_indices: failed.iter().map(|(i, _)| *i).collect(),
                         }));
                     }
-                    let _ = tx.send(Outgoing::File(FileFrame::Complete {
+                    // 完成通知必须可见地记录失败：丢弃会让接收方只能靠空闲超时收场
+                    if let Err(e) = tx.try_send(Outgoing::File(FileFrame::Complete {
                         transfer_id: transfer_id.clone(),
-                    }));
+                    })) {
+                        log_outgoing_dropped(&transfer_id, "传输完成通知", &e);
+                    }
                     // 传输结束即清理：此前只在 PullCancel 时移除，成功传输后会一直
                     // 留着原文件路径，进程不重启就持续累积。
-                    hub.active_offers.lock().unwrap().remove(&transfer_id);
+                    hub.active_offers.lock().remove(&transfer_id);
                     hub.active_offer_order
                         .lock()
-                        .unwrap()
                         .retain(|k| k != &transfer_id);
                     tracing::info!("传输 {transfer_id} 分片发送完毕");
                 });
             }
             FileFrame::PullCancel { transfer_id } => {
                 Self::forget_key(&self.active_offers, &self.active_offer_order, &transfer_id);
-                self.active_pulls.lock().unwrap().remove(&transfer_id);
+                self.active_pulls.lock().remove(&transfer_id);
             }
             FileFrame::Error {
                 transfer_id,
@@ -963,13 +1030,12 @@ impl ConnectionHub {
                     .filter_map(|i| {
                         self.active_pulls
                             .lock()
-                            .unwrap()
                             .get(&transfer_id)
                             .and_then(|s| s.files.get(*i))
                             .map(|f| f.file_name.clone())
                     })
                     .collect();
-                if let Some(app) = self.app.lock().unwrap().clone() {
+                if let Some(app) = self.app.lock().clone() {
                     let _ = app.emit(
                         "file-pull-error",
                         serde_json::json!({
@@ -984,7 +1050,6 @@ impl ConnectionHub {
                 let tx_opt = self
                     .active_pulls
                     .lock()
-                    .unwrap()
                     .get(&transfer_id)
                     .map(|s| s.chunk_tx.clone());
                 if let Some(ctx) = tx_opt {
@@ -995,7 +1060,6 @@ impl ConnectionHub {
                 let tx_opt = self
                     .active_pulls
                     .lock()
-                    .unwrap()
                     .get(&payload.transfer_id)
                     .map(|s| s.chunk_tx.clone());
                 if let Some(ctx) = tx_opt {
@@ -1174,9 +1238,9 @@ impl ConnectionHub {
     }
 
     pub async fn pull_files(self: Arc<Self>, transfer_id: String) {
-        let app = self.app.lock().unwrap().clone();
+        let app = self.app.lock().clone();
         let offer = {
-            let mut g = self.pending_offers.lock().unwrap();
+            let mut g = self.pending_offers.lock();
             match g.remove(&transfer_id) {
                 Some(o) => o,
                 None => {
@@ -1203,10 +1267,9 @@ impl ConnectionHub {
         };
         self.pending_offer_order
             .lock()
-            .unwrap()
             .retain(|k| k != &transfer_id);
         let peer_tx = {
-            let g = self.peers.lock().unwrap();
+            let g = self.peers.lock();
             match g.get(&offer.device_id) {
                 Some(p) => p.tx.clone(),
                 None => {
@@ -1228,7 +1291,7 @@ impl ConnectionHub {
                         );
                     }
                     // 放回待拉取清单（对端重连后可再试），并同步维护插入顺序与上限
-                    let mut g = self.pending_offers.lock().unwrap();
+                    let mut g = self.pending_offers.lock();
                     g.insert(transfer_id.clone(), offer);
                     drop(g);
                     Self::track_and_trim(
@@ -1244,21 +1307,19 @@ impl ConnectionHub {
         };
         // app 句柄已在函数开头取过（失败路径也要用），此处不再重复绑定
         let sync_dir = self.resolve_sync_dir(app.as_ref());
-        let root = sync_dir
-            .join(Self::sanitize_name(&offer.device_name))
-            .join(&transfer_id);
-        let total: u64 = offer.files.iter().map(|f| f.file_size).sum();
-        // 预建目录结构
-        for f in &offer.files {
-            let target = root.join(&f.relative_path);
-            if let Some(parent) = target.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
+        // 落盘目录：`sync_dir/<设备名>/` —— 文件平铺、同名覆盖。
+        // 对端提供的 `relative_path` / `transfer_id` **一律不参与路径构造**：
+        // 它们不受信，直接 join 会造成路径穿越 / 绝对路径替换（`PathBuf::join`
+        // 遇到绝对路径会整体丢弃前缀）。详见 `transfer::paths` 模块说明。
+        let root = sync_dir.join(crate::transfer::paths::safe_segment(&offer.device_name));
+        if let Err(e) = std::fs::create_dir_all(&root) {
+            tracing::warn!("创建接收目录失败（后续落盘可能失败）: {e}");
         }
+        let total: u64 = offer.files.iter().map(|f| f.file_size).sum();
         let (chunk_tx, mut chunk_rx) =
             tokio::sync::mpsc::channel::<Option<FileChunkResponsePayload>>(32);
         let cancelled_flag = Arc::new(AtomicBool::new(false));
-        self.active_pulls.lock().unwrap().insert(
+        self.active_pulls.lock().insert(
             transfer_id.clone(),
             PullState {
                 chunk_tx: chunk_tx.clone(),
@@ -1269,7 +1330,7 @@ impl ConnectionHub {
                 cancelled: cancelled_flag.clone(),
             },
         );
-        let _ = peer_tx.send(Outgoing::File(FileFrame::PullRequest {
+        let _ = peer_tx.try_send(Outgoing::File(FileFrame::PullRequest {
             transfer_id: transfer_id.clone(),
             file_indices: (0..offer.files.len()).collect(),
         }));
@@ -1303,37 +1364,75 @@ impl ConnectionHub {
                 })
             })
             .collect();
-        let targets: Vec<PathBuf> = offer
+        // 目标路径：设备名目录下平铺（同名覆盖）；目录条目用 None 占位，跳过不写
+        let targets: Vec<Option<PathBuf>> = offer
             .files
             .iter()
-            .map(|f| root.join(&f.relative_path))
+            .map(|f| {
+                if f.is_dir {
+                    None
+                } else {
+                    Some(root.join(crate::transfer::paths::safe_segment(&f.file_name)))
+                }
+            })
             .collect();
+        // 声明尺寸：用于校验对端提供的 offset/data 长度，防止构造超大稀疏文件
+        let declared_sizes: Vec<u64> = offer.files.iter().map(|f| f.file_size).collect();
         tauri::async_runtime::spawn(async move {
             use tokio::io::AsyncSeekExt;
             use tokio::io::AsyncWriteExt;
             let mut written: u64 = 0;
+            // 已落盘文件：Vec 保序（写剪贴板的粘贴顺序），HashSet 做 O(1) 去重
             let mut received: Vec<PathBuf> = Vec::new();
+            let mut received_seen: HashSet<PathBuf> = HashSet::new();
             let mut last_progress_at = std::time::Instant::now();
             let mut last_progress_pct: u32 = 0;
-            while let Some(chunk) = chunk_rx.recv().await {
+            loop {
+                // 空闲超时：对端中途消失（既不发完成帧也不断开连接）时，
+                // 不设超时的话这个落盘任务会一直挂着，白占内存与半截文件。
+                let chunk = match tokio::time::timeout(PULL_IDLE_TIMEOUT, chunk_rx.recv()).await {
+                    // recv() 外层 Some=通道有消息、内层 None=发送方标记结束
+                    Ok(Some(inner)) => inner,
+                    Ok(None) => break,
+                    Err(_) => {
+                        tracing::warn!(
+                            "拉取 {tid} 空闲超时（{:?} 无数据），中止落盘任务",
+                            PULL_IDLE_TIMEOUT
+                        );
+                        break;
+                    }
+                };
                 let Some(payload) = chunk else {
                     break;
                 };
-                if payload.file_index < targets.len() {
-                    let path = &targets[payload.file_index];
-                    if let Ok(mut file) = tokio::fs::OpenOptions::new()
-                        .create(true)
-                        .write(true)
-                        .truncate(false)
-                        .open(path)
-                        .await
-                    {
-                        let _ = file.seek(std::io::SeekFrom::Start(payload.offset)).await;
-                        if file.write_all(&payload.data).await.is_ok() {
-                            written += payload.data.len() as u64;
-                            if !received.contains(path) {
-                                received.push(path.clone());
-                            }
+                // 越界索引 / 目录条目（None）直接忽略
+                let Some(path) = targets.get(payload.file_index).and_then(|p| p.as_ref()) else {
+                    continue;
+                };
+                // offset 由对端提供：限制在声明尺寸内，避免稀疏文件与越界覆写
+                let declared = declared_sizes.get(payload.file_index).copied().unwrap_or(0);
+                let end = payload.offset.saturating_add(payload.data.len() as u64);
+                if declared > 0 && end > declared {
+                    tracing::warn!(
+                        "分片越界已丢弃 index={} offset={} len={} declared={declared}",
+                        payload.file_index,
+                        payload.offset,
+                        payload.data.len()
+                    );
+                    continue;
+                }
+                if let Ok(mut file) = tokio::fs::OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(false)
+                    .open(path)
+                    .await
+                {
+                    let _ = file.seek(std::io::SeekFrom::Start(payload.offset)).await;
+                    if file.write_all(&payload.data).await.is_ok() {
+                        written += payload.data.len() as u64;
+                        if received_seen.insert(path.clone()) {
+                            received.push(path.clone());
                         }
                     }
                 }
@@ -1420,32 +1519,38 @@ impl ConnectionHub {
     /// 3. 发 `file-pull-cancelled` 事件给前端收口（P2P 路径的取消没有 complete 帧，
     ///    前端「拉取中」条目必须靠此事件退出）。
     pub fn cancel_pull(&self, transfer_id: &str) {
-        let removed = self.active_pulls.lock().unwrap().remove(transfer_id);
+        let removed = self.active_pulls.lock().remove(transfer_id);
         let Some(st) = removed else {
             tracing::warn!("取消拉取：本端没有进行中的传输 {transfer_id}");
             return;
         };
         // 先置位再摘除：写盘任务退出时据此跳过「写剪贴板 + 发完成事件」收尾
         st.cancelled.store(true, Ordering::Relaxed);
-        // 清掉已写入的半截落盘文件（用户取消即不要这些数据）
+        // 清掉已写入的半截落盘文件（用户取消即不要这些数据）。
+        // 与落盘同源：目标一律由 safe_segment 重新计算，绝不使用对端的 relative_path。
         for f in &st.files {
-            let p = st.target_dir.join(&f.relative_path);
+            if f.is_dir {
+                continue;
+            }
+            let p = st
+                .target_dir
+                .join(crate::transfer::paths::safe_segment(&f.file_name));
             let _ = std::fs::remove_file(p);
         }
         let device_id = st.device_id.clone();
         // 通知发送方停止发分片（尽力而为：对端不在线就默默放弃）
         if !device_id.is_empty() {
             let peer_tx = {
-                let g = self.peers.lock().unwrap();
+                let g = self.peers.lock();
                 g.get(&device_id).map(|p| p.tx.clone())
             };
             if let Some(tx) = peer_tx {
-                let _ = tx.send(Outgoing::File(FileFrame::PullCancel {
+                let _ = tx.try_send(Outgoing::File(FileFrame::PullCancel {
                     transfer_id: transfer_id.to_string(),
                 }));
             }
         }
-        if let Some(app) = self.app.lock().unwrap().clone() {
+        if let Some(app) = self.app.lock().clone() {
             let _ = app.emit(
                 "file-pull-cancelled",
                 serde_json::json!({ "transfer_id": transfer_id }),
@@ -1573,21 +1678,18 @@ impl ConnectionHub {
     }
 
     /// 把设备名等非安全字符净化为目录名
+    /// 设备名 → 安全的单段目录名。
+    ///
+    /// 已统一收敛到 [`crate::transfer::paths::safe_segment`]（只取最后一段、
+    /// 拒绝 `..`/绝对路径/控制字符），这里保留薄封装以免调用点散落细节。
+    #[allow(dead_code)]
     fn sanitize_name(name: &str) -> String {
-        name.chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect()
+        crate::transfer::paths::safe_segment(name)
     }
 
     /// 启动监听器、本地剪贴板广播器，并订阅 mDNS 发现事件（仅对已配对对端自动重连）。
     pub async fn start(self: Arc<Self>, app: AppHandle, listen_port: u16) {
-        *self.app.lock().unwrap() = Some(app.clone());
+        *self.app.lock() = Some(app.clone());
         self.listen_port
             .store(listen_port, std::sync::atomic::Ordering::Relaxed);
 
@@ -1620,7 +1722,7 @@ impl ConnectionHub {
                             };
                             // 记录本机生成的消息 id，避免经其他路径回传时被重复应用/转发。
                             hub.note_seen(&msg_id);
-                            let peers = hub.peers.lock().unwrap().clone();
+                            let peers = hub.peers.lock().clone();
                             if peers.is_empty() {
                                 tracing::warn!(
                                     "本地剪贴板已变化，但当前没有已连接对端，内容未发出"
@@ -1632,8 +1734,8 @@ impl ConnectionHub {
                                 peers.len()
                             );
                             for (id, p) in peers {
-                                if p.tx.send(Outgoing::Sync(env.clone())).is_err() {
-                                    tracing::warn!("对端 {id} 的发送通道已关闭，本次内容未送达");
+                                if let Err(e) = p.tx.try_send(Outgoing::Sync(env.clone())) {
+                                    log_outgoing_dropped(&id, "剪贴板同步内容", &e);
                                 }
                             }
                         }
@@ -1663,9 +1765,24 @@ impl ConnectionHub {
                 match TcpListener::bind(("0.0.0.0", listen_port)).await {
                     Ok(listener) => {
                         tracing::info!("ClipSync listening on 0.0.0.0:{}", listen_port);
+                        // 并发上限：每连接都会 spawn 一个任务并可能阻塞到嗅探超时，
+                        // 没有上限时同网段任意主机刷连接即可耗尽任务/内存。
+                        let sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNS));
                         loop {
                             match listener.accept().await {
-                                Ok((sock, _)) => {
+                                Ok((sock, peer)) => {
+                                    // 取不到许可说明并发已满：直接关闭该连接并计数，
+                                    // 不排队（排队会让 accept 循环重新变成瓶颈）。
+                                    let permit = match sem.clone().try_acquire_owned() {
+                                        Ok(p) => p,
+                                        Err(_) => {
+                                            tracing::warn!(
+                                                "入站连接数已达上限（{MAX_CONCURRENT_CONNS}），拒绝 {peer}"
+                                            );
+                                            drop(sock);
+                                            continue;
+                                        }
+                                    };
                                     // 每连接独立任务：嗅探/握手绝不能串行阻塞 accept 循环。
                                     // 此前 sniff 用裸 `sock.peek()` 且无超时——任何「连上但不发
                                     // 数据」的客户端（浏览器/WebView 预连接、端口扫描、健康检查）
@@ -1676,6 +1793,8 @@ impl ConnectionHub {
                                     let file_share = file_share.clone();
                                     let network_key = network_key.clone();
                                     tauri::async_runtime::spawn(async move {
+                                    // 许可随任务存活，任务结束（含所有分支 return）即释放
+                                    let _permit = permit;
                                     let ra =
                                         sock.peer_addr().map(|a| a.to_string()).unwrap_or_default();
                                     // 嗅探请求行：连通性探测 → 文件拉取 → 其余升级为 WS。
@@ -1840,7 +1959,7 @@ impl ConnectionHub {
                                 continue;
                             }
                             if let Some(addr) = d.last_addr {
-                                if hub.peers.lock().unwrap().contains_key(&d.device_id.0) {
+                                if hub.peers.lock().contains_key(&d.device_id.0) {
                                     continue; // 当前已连，跳过
                                 }
                                 if let Some((h, p)) = parse_host_port(&addr) {
@@ -1866,14 +1985,14 @@ impl ConnectionHub {
         if self.is_rejected(&peer.device_id) {
             return;
         }
-        if self.peers.lock().unwrap().contains_key(&peer.device_id) {
+        if self.peers.lock().contains_key(&peer.device_id) {
             return;
         }
         let key = format!("{}:{}", peer.addr, peer.port);
-        if self.connected_addrs.lock().unwrap().contains(&key) {
+        if self.connected_addrs.lock().contains(&key) {
             return;
         }
-        if self.connecting.lock().unwrap().contains(&key) {
+        if self.connecting.lock().contains(&key) {
             return;
         }
         tauri::async_runtime::spawn(async move {
@@ -1891,7 +2010,7 @@ impl ConnectionHub {
     /// 连接中的地址反复发起尝试。
     fn spawn_connect_addr(self: Arc<Self>, addr: String, port: u16) {
         let key = format!("{addr}:{port}");
-        if self.connected_addrs.lock().unwrap().contains(&key) {
+        if self.connected_addrs.lock().contains(&key) {
             return;
         }
         // 手动地址/最后已知地址的重连同样受拒绝冷却约束（此时对端 id 未知，
@@ -1899,7 +2018,7 @@ impl ConnectionHub {
         if self.is_rejected_addr(&key) {
             return;
         }
-        if self.connecting.lock().unwrap().contains(&key) {
+        if self.connecting.lock().contains(&key) {
             return;
         }
         let peer = DiscoveredPeer {
@@ -1924,7 +2043,7 @@ impl ConnectionHub {
             self.clear_rejected(&peer.device_id);
         }
         {
-            let mut g = self.connecting.lock().unwrap();
+            let mut g = self.connecting.lock();
             if g.contains(&key) {
                 return;
             }
@@ -1943,8 +2062,8 @@ impl ConnectionHub {
                     // 继续重试只会每 5 秒重复弹一次错误。立即终止并给出明确提示。
                     if e.downcast_ref::<HandshakeError>().is_some() {
                         tracing::warn!("pairing with {} rejected: {e}", peer.device_name);
-                        self.connecting.lock().unwrap().remove(&key);
-                        if let Some(app) = self.app.lock().unwrap().clone() {
+                        self.connecting.lock().remove(&key);
+                        if let Some(app) = self.app.lock().clone() {
                             let reason = if self.is_paired(&peer.device_id) {
                                 "重连失败：与对方配对状态不一致（本机已保存其配对信息但密钥不匹配），请双方先「取消配对」再重新配对".to_string()
                             } else {
@@ -1969,8 +2088,8 @@ impl ConnectionHub {
                         || emsg.contains("handshake")
                     {
                         tracing::warn!("pairing with {} unreachable: {e}", peer.device_name);
-                        self.connecting.lock().unwrap().remove(&key);
-                        if let Some(app) = self.app.lock().unwrap().clone() {
+                        self.connecting.lock().remove(&key);
+                        if let Some(app) = self.app.lock().clone() {
                             let _ = app.emit(
                                 "pairing-failed",
                                 serde_json::json!({
@@ -1993,10 +2112,10 @@ impl ConnectionHub {
             }
         }
         // 无论成败都解除连接守卫，允许用户在配对超时后重新发起
-        self.connecting.lock().unwrap().remove(&key);
+        self.connecting.lock().remove(&key);
         // 若始终未配对成功，通知前端（成功会写入 paired_codes，is_paired 为真）
         if !self.is_paired(&peer.device_id) {
-            if let Some(app) = self.app.lock().unwrap().clone() {
+            if let Some(app) = self.app.lock().clone() {
                 let _ = app.emit(
                     "pairing-failed",
                     serde_json::json!({
@@ -2045,13 +2164,13 @@ impl ConnectionHub {
     /// 旧循环会一直占着按 `addr:port` 建立的守卫空转，而它永远也连不上了。
     async fn reconnect_once(self: Arc<Self>, peer: DiscoveredPeer) {
         let key = format!("{}:{}", peer.addr, peer.port);
-        if !self.connecting.lock().unwrap().insert(key.clone()) {
+        if !self.connecting.lock().insert(key.clone()) {
             return;
         }
         if let Err(e) = self.clone().connect_once(peer.clone(), None).await {
             tracing::debug!("与 {} 的连接结束：{e}", peer.device_name);
         }
-        self.connecting.lock().unwrap().remove(&key);
+        self.connecting.lock().remove(&key);
     }
 
     /// 处理一条已建立的 WebSocket 连接：Hello 交换 → 选口令 → SPAKE2 → HMAC 校验 →
@@ -2099,7 +2218,7 @@ impl ConnectionHub {
                 // 并提示一次，不再 5s 空锤。
                 let was_new = self.mark_rejected(&dial_id);
                 if was_new {
-                    if let Some(app) = self.app.lock().unwrap().clone() {
+                    if let Some(app) = self.app.lock().clone() {
                         let _ = app.emit(
                             "pairing-failed",
                             serde_json::json!({
@@ -2145,7 +2264,7 @@ impl ConnectionHub {
                 //（否则对端只看到连接关闭，无法区分「被拒」与「网络故障」，会继续重试）。
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 if self.should_emit_pairing_fail(&peer.device_id) {
-                    if let Some(app) = self.app.lock().unwrap().clone() {
+                    if let Some(app) = self.app.lock().clone() {
                         let _ = app.emit(
                             "pairing-failed",
                             serde_json::json!({
@@ -2172,6 +2291,14 @@ impl ConnectionHub {
             anyhow::bail!("拒绝与自身建立连接");
         }
 
+        // 应答方在线爆破防护：本机配对码是常驻的 6 位数字，若不限速，
+        // 同网段攻击者可反复连接试探直到命中。直连（link secret）路径不涉及
+        // 口令试探，正常设备也不会累积失败，不会误伤。
+        if !is_initiator && pairing_blocked(&peer_addr) {
+            tracing::warn!("拒绝来自 {peer_addr} 的配对握手：连续失败过多，临时封禁中");
+            anyhow::bail!("配对尝试过于频繁，请稍后再试");
+        }
+
         // 2) 建立会话密钥。规则：**双向都按客户端 ID 判断**——双方配对表里都有对方
         //    → 跳过一切协商，直接用各自的 link secret 派生会话密钥建连；任一方没有
         //    → 用户配对流程（SPAKE2 + 配对码），成功后新 link secret 覆盖旧值，
@@ -2188,7 +2315,7 @@ impl ConnectionHub {
             peer_hello.reconnect == Some(true) && resp_paired == Some(true)
         };
         let (key, is_fresh_pairing) = if direct {
-            let cached_link = self.paired_codes.lock().unwrap().get(&peer_id).cloned();
+            let cached_link = self.paired_codes.lock().get(&peer_id).cloned();
             let link = match cached_link {
                 Some(l) => l,
                 // 边缘：拨号目标 id 与实际对端不符（IP 复用指向陌生设备）。
@@ -2255,8 +2382,12 @@ impl ConnectionHub {
                     "与 {peer_name} 的握手口令校验失败（fresh_pairing={is_fresh_pairing}），连接已断开；若为重新配对请核对配对码，或双方取消配对后重新配对"
                 );
             }
+            note_pairing_result(&peer_addr, false);
             return Err(HandshakeError::CodeMismatch.into());
         }
+
+        // 握手通过：清掉该来源的失败计数（配对成功即恢复正常）
+        note_pairing_result(&peer_addr, true);
 
         if is_fresh_pairing {
             tracing::info!("paired with {} ({})", peer_name, peer_addr);
@@ -2265,7 +2396,7 @@ impl ConnectionHub {
         }
 
         // 5) 登记为已配对：持久化 link secret + 写注册表并落盘 + 通知前端
-        if let Some(app) = self.app.lock().unwrap().clone() {
+        if let Some(app) = self.app.lock().clone() {
             let pk = base64::engine::general_purpose::STANDARD
                 .decode(&peer_hello.public_key)
                 .map_err(|e| anyhow::anyhow!("bad peer public key: {e}"))?;
@@ -2277,12 +2408,11 @@ impl ConnectionHub {
                 let link = derive_link_secret(&key);
                 self.paired_codes
                     .lock()
-                    .unwrap()
                     .insert(peer_id.clone(), link.clone());
                 crate::device::store::store_secret(&app, &peer_id, &link);
                 // 重新配对成功：清除拒绝冷却（如有），恢复正常自动重连
                 self.clear_rejected(&peer_id);
-                self.pairing_fail_emitted.lock().unwrap().remove(&peer_id);
+                self.pairing_fail_emitted.lock().remove(&peer_id);
             }
 
             let state = app.state::<AppState>();
@@ -2338,7 +2468,6 @@ impl ConnectionHub {
             if matches!(role, Role::Initiator) {
                 self.connected_addrs
                     .lock()
-                    .unwrap()
                     .insert(peer_addr.clone());
             }
 
@@ -2386,14 +2515,13 @@ impl ConnectionHub {
         let conn_id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
         // 发送端**只**存放在 peers 表里（不在本地留 clone）：这样取消配对时
         // 把表项一移除，tx 即被 drop，下面的 rx 立刻收到 None 并结束本连接。
-        let (tx, mut rx) = mpsc::unbounded_channel::<Outgoing>();
+        let (tx, mut rx) = mpsc::channel::<Outgoing>(OUT_QUEUE_CAPACITY);
         // handle_file_frame 需要在解密循环里用发送端回传分片，而 tx 已被移入 Peer
         // 表项（用于转发任务）。此处克隆一份专供文件帧回传，避免「move 后借用」。
         let tx_for_file = tx.clone();
         if let Some(old) = self
             .peers
             .lock()
-            .unwrap()
             .insert(peer_id.clone(), Peer { conn_id, tx })
         {
             tracing::debug!(
@@ -2485,16 +2613,14 @@ impl ConnectionHub {
                                                             ttl: ttl - 1,
                                                         };
                                                         let peers =
-                                                            self.peers.lock().unwrap().clone();
+                                                            self.peers.lock().clone();
                                                         let other_count = peers.len().saturating_sub(1);
                                                         for (id, p) in peers {
                                                             if id == peer_id {
                                                                 continue;
                                                             }
-                                                            if p.tx.send(Outgoing::Sync(relay.clone())).is_err() {
-                                                                tracing::warn!(
-                                                                    "中继转发对端 {id} 通道已关闭"
-                                                                );
+                                                            if let Err(e) = p.tx.try_send(Outgoing::Sync(relay.clone())) {
+                                                                log_outgoing_dropped(&id, "中继转发内容", &e);
                                                             }
                                                         }
                                                         tracing::debug!(
@@ -2573,7 +2699,7 @@ impl ConnectionHub {
         // 清理：仅当表中登记的仍是**本条**连接时才摘除。若期间已被更新的连接取代，
         // 无条件 remove 会把活着的新连接一并删掉，本机将只收不发。
         let was_current = {
-            let mut g = self.peers.lock().unwrap();
+            let mut g = self.peers.lock();
             match g.get(&peer_id) {
                 Some(p) if p.conn_id == conn_id => {
                     g.remove(&peer_id);
@@ -2583,7 +2709,7 @@ impl ConnectionHub {
             }
         };
         if was_current {
-            if let Some(app) = self.app.lock().unwrap().clone() {
+            if let Some(app) = self.app.lock().clone() {
                 let _ = app.emit("peer-disconnected", &peer_id);
             }
             tracing::info!("connection to {} closed", peer_name);
@@ -2591,7 +2717,7 @@ impl ConnectionHub {
             tracing::debug!("{peer_name} 的旧连接 #{conn_id} 退出，当前连接不受影响");
         }
         // 移出已连地址集合，允许监控任务在断线后重新兜底重连
-        self.connected_addrs.lock().unwrap().remove(&peer_addr);
+        self.connected_addrs.lock().remove(&peer_addr);
         Ok(())
     }
 }
@@ -2770,7 +2896,7 @@ impl ConnectionHub {
         use std::time::Duration;
         // 1) 计算本机 lan_group：cfg.lan_group 非空直接用，否则用 infer（与 server_conn 同源逻辑）
         let (my_lg, candidate_devices) = {
-            let app_guard = self.app.lock().unwrap();
+            let app_guard = self.app.lock();
             let state = app_guard.as_ref().and_then(|a| a.try_state::<AppState>());
             let Some(state) = state else { return vec![] };
             let configured = state.config.lock().lan_group.clone();
@@ -2786,12 +2912,12 @@ impl ConnectionHub {
             // （PairedDevice.last_addr）。此前用「已配对 ∩ discovered」交集恒空，
             // 扫描必然返回空。地址取 last_addr（host:port），解析出 IP 后推断 lan_group。
             let peers_now: std::collections::HashSet<String> =
-                self.peers.lock().unwrap().keys().cloned().collect();
+                self.peers.lock().keys().cloned().collect();
             let paired_list = state.registry.lock().list();
             let mut candidates: Vec<(String, String, String)> = Vec::new(); // (device_id, device_name, peer_lg)
             for dev in &paired_list {
                 let id = dev.device_id.0.clone();
-                if !self.paired_codes.lock().unwrap().contains_key(&id) {
+                if !self.paired_codes.lock().contains_key(&id) {
                     continue;
                 }
                 if !peers_now.contains(&id) {
@@ -2829,7 +2955,6 @@ impl ConnectionHub {
             let (tx, rx) = tokio::sync::oneshot::channel::<ConfigReply>();
             self.config_queries
                 .lock()
-                .unwrap()
                 .insert(request_id.clone(), tx);
             rx_map.insert(request_id.clone(), (device_id.clone(), device_name.clone(), rx));
             pending.insert(device_id.clone(), (request_id.clone(), device_name.clone()));
@@ -2842,8 +2967,8 @@ impl ConnectionHub {
             })
             .unwrap_or_default();
             let frame = MessageFrame::new(MessageType::Config, pt);
-            if let Some(peer) = self.peers.lock().unwrap().get(device_id).cloned() {
-                let _ = peer.tx.send(Outgoing::Config(frame));
+            if let Some(peer) = self.peers.lock().get(device_id).cloned() {
+                let _ = peer.tx.try_send(Outgoing::Config(frame));
             }
         }
         // 4) 收集回复 / 超时
@@ -2867,11 +2992,11 @@ impl ConnectionHub {
             }
             for rid in done {
                 rx_map.remove(&rid);
-                self.config_queries.lock().unwrap().remove(&rid);
+                self.config_queries.lock().remove(&rid);
             }
         }
         // 5) 清理剩余（oneshot sender 已 drop 在表里，无需 remove 也不可能再投递）
-        self.config_queries.lock().unwrap().clear();
+        self.config_queries.lock().clear();
         // 6) 聚合：按 (server_url, network_token) 分组；空 server_url+空 token 视为「未配置」丢弃
         let mut groups: std::collections::HashMap<(String, String), LanServerConfigGroup> =
             std::collections::HashMap::new();
@@ -2920,7 +3045,7 @@ impl ConnectionHub {
         if kind != 0 {
             return;
         }
-        let app_guard = self.app.lock().unwrap();
+        let app_guard = self.app.lock();
         let state_opt = app_guard.as_ref().and_then(|a| a.try_state::<AppState>());
         let Some(state) = state_opt else { return };
         let (server_url, network_token) = {
@@ -2943,16 +3068,15 @@ impl ConnectionHub {
         let sent = self
             .peers
             .lock()
-            .unwrap()
             .get(from)
-            .map(|p| p.tx.send(Outgoing::Config(frame)).is_ok())
+            .map(|p| p.tx.try_send(Outgoing::Config(frame)).is_ok())
             .unwrap_or(false);
         tracing::info!("LAN 配置查询：已回复 {}（has_config={}）", from, sent && has_cfg);
     }
 
     /// 收到 Config::Reply / NotConfigured 时调用：通过 request_id 投递到等待方。
     fn handle_config_reply(&self, reply: ConfigReply, request_id: &str) {
-        if let Some(tx) = self.config_queries.lock().unwrap().remove(request_id) {
+        if let Some(tx) = self.config_queries.lock().remove(request_id) {
             let _ = tx.send(reply);
         }
     }
@@ -3065,10 +3189,10 @@ mod tests {
         std::fs::write(&tmp, b"hello clipsync").unwrap();
         hub.offer_local_files(vec![tmp.clone()]);
         assert!(
-            !hub.active_offers.lock().unwrap().is_empty(),
+            !hub.active_offers.lock().is_empty(),
             "本机复制后 active_offers 应非空"
         );
-        assert!(hub.pending_offers.lock().unwrap().is_empty());
+        assert!(hub.pending_offers.lock().is_empty());
 
         // 2) 构造「对端回环 Offer」：device_id 是别的设备、文件指纹与本机一致
         let size = std::fs::metadata(&tmp).unwrap().len();
@@ -3089,7 +3213,7 @@ mod tests {
             top_names: vec![],
             has_folder: false,
         };
-        let (tx, _rx) = test_mpsc::unbounded_channel::<Outgoing>();
+        let (tx, _rx) = test_mpsc::channel::<Outgoing>(OUT_QUEUE_CAPACITY);
 
         // 3) 处理该回环 Offer
         let h = TestArc::clone(&hub);
@@ -3098,7 +3222,7 @@ mod tests {
 
         // 4) 断言：本机待拉取列表仍为空（回声被丢弃）
         assert!(
-            hub.pending_offers.lock().unwrap().is_empty(),
+            hub.pending_offers.lock().is_empty(),
             "回环 Offer 不应进入本机待拉取列表"
         );
 
@@ -3129,12 +3253,12 @@ mod tests {
             top_names: vec![],
             has_folder: false,
         };
-        let (tx, _rx) = test_mpsc::unbounded_channel::<Outgoing>();
+        let (tx, _rx) = test_mpsc::channel::<Outgoing>(OUT_QUEUE_CAPACITY);
         let h = TestArc::clone(&hub);
         h.handle_file_frame(offer, &tx, "genuine-peer").await;
 
         assert_eq!(
-            hub.pending_offers.lock().unwrap().len(),
+            hub.pending_offers.lock().len(),
             1,
             "真实对端 Offer 应进入待拉取列表"
         );

@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 
 use crate::AppState;
 
@@ -301,6 +301,26 @@ pub async fn download_update(
     if !is_installed_build() {
         return Err("当前为免安装版，不支持在线更新（请使用 NSIS 安装版）".to_string());
     }
+    // 下载地址必须与本机配置的服务端**同源**（scheme + host + port）。
+    // 清单是服务端下发的：若不校验，服务端被控或响应被篡改时就能把安装包
+    // 指向任意外域（乃至明文 http），而 SHA256 也来自同一份清单、形同虚设。
+    let expected_base = {
+        let state = app.state::<crate::AppState>();
+        let server_url = state.config.lock().server_url.clone();
+        update_base_from_server_url(&server_url)
+    };
+    let expected = expected_base
+        .ok_or_else(|| "未配置服务端地址，无法校验更新来源".to_string())?;
+    let target = reqwest::Url::parse(&url).map_err(|e| format!("更新地址非法: {e}"))?;
+    let allowed = reqwest::Url::parse(&expected).map_err(|e| format!("服务端地址非法: {e}"))?;
+    if target.scheme() != allowed.scheme()
+        || target.host_str() != allowed.host_str()
+        || target.port_or_known_default() != allowed.port_or_known_default()
+    {
+        return Err(format!(
+            "更新地址与配置的服务端不同源，已拒绝下载：{url}（期望源自 {expected}）"
+        ));
+    }
     let fname = basename_of(&url);
     if fname.is_empty() || fname.contains("..") || fname.contains('/') || fname.contains('\\') {
         return Err(format!("无效的下载文件名: {fname}"));
@@ -313,13 +333,32 @@ pub async fn download_update(
     }
     // 总大小用于算百分比；服务端未给 Content-Length 时为 0 → 前端只显示已下载字节数。
     let total: u64 = resp.content_length().unwrap_or(0);
-    let dir: PathBuf = std::env::temp_dir().join("clipsync-update");
+    // 每次下载使用**独占的随机目录**。此前是固定的 `temp/clipsync-update` +
+    // 可预测文件名，本机其它进程可以预置同名文件/符号链接，配合「先校验后安装」
+    // 的时序做替换（TOCTOU）。
+    let dir: PathBuf = std::env::temp_dir().join(format!(
+        "clipsync-update-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| format!("创建临时目录失败: {e}"))?;
+    // 顺手清理历史遗留的下载目录（本次之外的 clipsync-update*），避免残留堆积
+    if let Ok(mut rd) = tokio::fs::read_dir(std::env::temp_dir()).await {
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let n = entry.file_name().to_string_lossy().into_owned();
+            if n.starts_with("clipsync-update") && entry.path() != dir {
+                let _ = tokio::fs::remove_dir_all(entry.path()).await;
+            }
+        }
+    }
     let path = dir.join(&fname);
     let tmp = dir.join(format!("{fname}.download"));
-    let mut file = tokio::fs::File::create(&tmp)
+    // create_new：不存在才创建，绝不跟随/覆盖既有文件
+    let mut file = tokio::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&tmp)
         .await
         .map_err(|e| format!("创建临时文件失败: {e}"))?;
     let mut hasher = Sha256::new();

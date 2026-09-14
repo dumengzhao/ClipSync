@@ -10,8 +10,7 @@
     "preview": "vite preview",
     "lint": "eslint src --ext .ts,.tsx --max-warnings 0",
     "tauri": "tauri",
-    "local-ci": "bash scripts/local-ci.sh",
-    "build:update": "tauri build && node ../server/gen-latest-json.mjs"
+    "local-ci": "bash scripts/local-ci.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

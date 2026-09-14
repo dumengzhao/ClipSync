@@ -18,8 +18,10 @@ use futures_util::{SinkExt, StreamExt};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use parking_lot::Mutex;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::net::TcpStream;
@@ -292,7 +294,10 @@ pub struct ServerConn {
     nodes: Mutex<Vec<RemoteNode>>,
     our_lan_group: Mutex<String>,
     /// WS 发送通道（消息由连接任务转发）。断开时为 None。
-    ws_tx: Mutex<Option<mpsc::UnboundedSender<ClientToServer>>>,
+    ///
+    /// **有界**：与 P2P 出站同理，服务端消费不过来时不能让队列无限堆积
+    /// （剪贴板中继与文件通知都可能持续产生）。满时 `try_send` 丢弃并记日志。
+    ws_tx: Mutex<Option<mpsc::Sender<ClientToServer>>>,
     /// 配置变更（set_config）后唤醒连接循环立即重连。
     reconnect_notify: Notify,
     /// 被服务端移除（拉黑）标记：置位后仍周期性重试以便自愈，管理员后台恢复设备后下次连接即清除。
@@ -307,6 +312,32 @@ pub struct ServerConn {
     /// 不闪窗），也不该在每次重连时重复执行——启动后缓存一次即可。
     cached_hw_id: Mutex<String>,
     cached_os_ver: Mutex<String>,
+}
+
+/// 跨 LAN 单文件体积上限。
+///
+/// 跨 LAN 拉取目前是「整文件读入内存 → 原地解密 → 写盘」（原地解密已把峰值从 2× 降到 ≈1×，
+/// 见 `crypto::aead::decrypt_in_place`）。真正做流式需要把服务端的**整体加密**改成
+/// 分块加密协议（两端同步变更），暂不引入；这里先用上限保护内存，超限提示走局域网 P2P
+/// ——P2P 路径本身就是流式的，不受此限。
+const MAX_CROSS_LAN_FILE_BYTES: u64 = 512 * 1024 * 1024;
+
+/// 中继（客户端 → 服务端）出站队列容量。
+///
+/// 与 P2P 出站同理取小值：队列满即说明服务端消费不过来，此时丢弃新的中继消息
+/// 好过无界堆积（剪贴板中继与文件通知都会持续产生）。
+const RELAY_QUEUE_CAPACITY: usize = 64;
+
+/// 记录一次中继出站消息被丢弃的原因（Full = 队列满丢弃 / Closed = 连接已关闭）。
+fn log_relay_dropped(what: &str, e: &mpsc::error::TrySendError<ClientToServer>) {
+    match e {
+        mpsc::error::TrySendError::Full(_) => tracing::warn!(
+            "中继出站队列已满（容量 {RELAY_QUEUE_CAPACITY}），{what} 被丢弃（服务端消费过慢）"
+        ),
+        mpsc::error::TrySendError::Closed(_) => {
+            tracing::debug!("中继连接已关闭，{what} 未发送")
+        }
+    }
 }
 
 impl ServerConn {
@@ -338,7 +369,7 @@ impl ServerConn {
     }
 
     pub fn nodes(&self) -> Vec<RemoteNode> {
-        self.nodes.lock().unwrap().clone()
+        self.nodes.lock().clone()
     }
 
     /// 启动：连接循环（断线指数退避）+ 引擎事件路由订阅。
@@ -351,7 +382,11 @@ impl ServerConn {
                 loop {
                     let ev = match rx.recv().await {
                         Ok(ev) => ev,
-                        Err(_) => continue,
+                        // broadcast 语义要分开处理：
+                        // Lagged = 本端消费慢、丢了若干条 → 跳过继续；
+                        // Closed = 所有发送端已 drop，再 continue 就是 100% CPU 空转，必须退出。
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     };
                     match ev {
                         SyncEvent::LocalClipboardChanged { mark, content } => {
@@ -395,7 +430,7 @@ impl ServerConn {
                         _ = tokio::time::sleep(Duration::from_secs(10)) => continue,
                     }
                 }
-                *conn.our_lan_group.lock().unwrap() =
+                *conn.our_lan_group.lock() =
                     infer_lan_group(&app.state::<AppState>().config.lock().lan_group);
                 match conn.connect_once(&url).await {
                     Ok(outcome) => match outcome {
@@ -455,7 +490,7 @@ impl ServerConn {
         // 复位鉴权失败提示去重：用户刚改过配置，重试后若仍被拒应再次收到提示
         self.auth_fail_notified.store(false, Ordering::SeqCst);
         {
-            let mut tx = self.ws_tx.lock().unwrap();
+            let mut tx = self.ws_tx.lock();
             *tx = None;
         }
         self.reconnect_notify.notify_one();
@@ -468,12 +503,12 @@ impl ServerConn {
         std::thread::spawn(move || {
             let hw = hardware_id();
             let os = os_version();
-            let mut hw_guard = conn.cached_hw_id.lock().unwrap();
+            let mut hw_guard = conn.cached_hw_id.lock();
             if hw_guard.is_empty() {
                 *hw_guard = hw;
             }
             drop(hw_guard);
-            *conn.cached_os_ver.lock().unwrap() = os;
+            *conn.cached_os_ver.lock() = os;
         });
     }
 
@@ -482,24 +517,24 @@ impl ServerConn {
     async fn connect_once(self: &Arc<Self>, url: &str) -> anyhow::Result<ConnectOutcome> {
         let (ws, _resp) = tokio_tungstenite::connect_async(url).await?;
         let (mut w_tx, mut w_rx) = ws.split();
-        let (tx, mut rx) = mpsc::unbounded_channel::<ClientToServer>();
+        let (tx, mut rx) = mpsc::channel::<ClientToServer>(RELAY_QUEUE_CAPACITY);
 
         let cfg = self.app.state::<AppState>().config.lock().clone();
         if cfg.network_token.trim().is_empty() {
             anyhow::bail!("network_token 为空，无法连接服务端");
         }
-        let mut hw = self.cached_hw_id.lock().unwrap().clone();
+        let mut hw = self.cached_hw_id.lock().clone();
         if hw.is_empty() {
             // 预热尚未完成（极快重连时可能撞上）：用 device_id 兜底，不阻塞等待子进程
             hw = self.engine.device_id().0.clone();
         }
-        let os_ver = self.cached_os_ver.lock().unwrap().clone();
+        let os_ver = self.cached_os_ver.lock().clone();
         let auth = ClientToServer::Auth {
             token: cfg.network_token.clone(),
             device: DeviceFields {
                 id: self.engine.device_id().0.clone(),
                 name: cfg.device_name.clone(),
-                lan_group: self.our_lan_group.lock().unwrap().clone(),
+                lan_group: self.our_lan_group.lock().clone(),
                 ext_file_ep: cfg.ext_file_ep.clone(),
                 platform: std::env::consts::OS.to_string(),
                 hardware_id: hw,
@@ -508,7 +543,7 @@ impl ServerConn {
         };
         send_json(&mut w_tx, &auth).await?;
 
-        *self.ws_tx.lock().unwrap() = Some(tx);
+        *self.ws_tx.lock() = Some(tx);
 
         let mut outcome = ConnectOutcome::Disconnected;
         let mut hb = tokio::time::interval(Duration::from_secs(25));
@@ -532,7 +567,7 @@ impl ServerConn {
                 }
             }
         }
-        *self.ws_tx.lock().unwrap() = None;
+        *self.ws_tx.lock() = None;
         Ok(outcome)
     }
 
@@ -568,14 +603,21 @@ impl ServerConn {
                 nodes,
             } => {
                 *outcome = ConnectOutcome::Authed;
-                *self.network_id.lock().unwrap() = network.id.clone();
+                *self.network_id.lock() = network.id.clone();
                 let key = derive_network_key(
                     &self.app.state::<AppState>().config.lock().network_token,
                     &network.id,
                 );
-                *self.network_key.lock().unwrap() = Some(key);
+                *self.network_key.lock() = Some(key);
                 // 同步到 AppState，供内嵌 HTTP 文件服务加密 / 拉取端解密复用同一个网络密钥
-                *self.app.state::<AppState>().network_key.lock().unwrap() = Some(key);
+                // 注意：AppState.network_key 是 std::sync::Mutex（与 ServerConn 自身那个
+                // parking_lot::Mutex 类型不同），所以这里仍需 .unwrap()
+                *self
+                    .app
+                    .state::<AppState>()
+                    .network_key
+                    .lock()
+                    .unwrap() = Some(key);
                 // 成功入网即清除拉黑标记（管理员恢复设备 / 误报后自愈），下次循环不再走拉黑重试分支
                 self.removed.store(false, Ordering::SeqCst);
                 self.set_status(ServerStatus::from_str(&status));
@@ -635,13 +677,13 @@ impl ServerConn {
                 platform: n.platform,
             })
             .collect();
-        *self.nodes.lock().unwrap() = mapped.clone();
+        *self.nodes.lock() = mapped.clone();
         let _ = self.app.emit("server-nodes", mapped);
     }
 
     /// 接收对端文字中继：解密 → apply_remote。
     async fn handle_relay_text(&self, _from: &str, ct: &str) {
-        let key = match *self.network_key.lock().unwrap() {
+        let key = match *self.network_key.lock() {
             Some(k) => k,
             None => {
                 tracing::warn!("收到 relay_text 但无网络密钥，忽略");
@@ -690,7 +732,6 @@ impl ServerConn {
         let name = self
             .nodes
             .lock()
-            .unwrap()
             .iter()
             .find(|n| n.device_id == from)
             .map(|n| n.name.clone())
@@ -710,12 +751,17 @@ impl ServerConn {
 
     /// 本机文字变化 → 对跨 LAN 已启用节点做中继。
     fn route_text(&self, mark: &SyncMark, content: &ClipboardContent) {
-        if self.status() != ServerStatus::Active || self.network_key.lock().unwrap().is_none() {
+        if self.status() != ServerStatus::Active {
             return;
         }
-        let key = (*self.network_key.lock().unwrap()).unwrap();
-        let our_lg = self.our_lan_group.lock().unwrap().clone();
-        let nodes = self.nodes.lock().unwrap().clone();
+        // 一次加锁取出密钥快照：早些时候写成「先 is_none() 判断、再 unwrap()」，
+        // 两次独立加锁之间存在检查-使用竞态（中途被清空会 panic）。
+        let Some(key) = *self.network_key.lock() else {
+            tracing::debug!("relay_text：网络密钥未就绪，跳过该次中继");
+            return;
+        };
+        let our_lg = self.our_lan_group.lock().clone();
+        let nodes = self.nodes.lock().clone();
         for n in nodes.iter().filter(|n| lan_differ(&our_lg, &n.lan_group)) {
             let payload = RelayPayload {
                 mark: mark.clone(),
@@ -746,8 +792,10 @@ impl ServerConn {
                 to: n.device_id.clone(),
                 ct,
             };
-            if let Some(tx) = self.ws_tx.lock().unwrap().as_ref() {
-                let _ = tx.send(msg);
+            if let Some(tx) = self.ws_tx.lock().as_ref() {
+                if let Err(e) = tx.try_send(msg) {
+                    log_relay_dropped("剪贴板中继内容", &e);
+                }
             }
         }
     }
@@ -761,8 +809,8 @@ impl ServerConn {
         if cfg.ext_file_ep.trim().is_empty() {
             return;
         }
-        let our_lg = self.our_lan_group.lock().unwrap().clone();
-        let nodes = self.nodes.lock().unwrap().clone();
+        let our_lg = self.our_lan_group.lock().clone();
+        let nodes = self.nodes.lock().clone();
         if !nodes.iter().any(|n| lan_differ(&our_lg, &n.lan_group)) {
             return;
         }
@@ -771,8 +819,10 @@ impl ServerConn {
             manifest,
             ext_file_ep: cfg.ext_file_ep.clone(),
         };
-        if let Some(tx) = self.ws_tx.lock().unwrap().as_ref() {
-            let _ = tx.send(msg);
+        if let Some(tx) = self.ws_tx.lock().as_ref() {
+            if let Err(e) = tx.try_send(msg) {
+                log_relay_dropped("文件通知", &e);
+            }
         }
     }
 
@@ -782,7 +832,6 @@ impl ServerConn {
     pub fn cancel_cross_pull(&self, pull_id: &str) -> bool {
         self.cross_pull_cancel
             .lock()
-            .unwrap()
             .insert(pull_id.to_string())
     }
 
@@ -813,6 +862,25 @@ impl ServerConn {
                     .to_string()
             })
         };
+        // 落盘目录：`sync_dir/<设备名>/`（与 P2P 路径一致：平铺、同名覆盖）。
+        // 设备名优先取已配对 registry 的显示名，取不到（未配对/已解配）才回退 device_id；
+        // 一律经 safe_segment 净化，杜绝名字中的路径成分。
+        let device_dir = {
+            let name = state
+                .registry
+                .lock()
+                .list()
+                .into_iter()
+                .find(|d| d.device_id.0 == from)
+                .map(|d| d.device_name)
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or_else(|| from.to_string());
+            crate::transfer::paths::safe_segment(&name)
+        };
+        let root = std::path::Path::new(&sync_dir).join(device_dir);
+        if let Err(e) = std::fs::create_dir_all(&root) {
+            tracing::warn!("创建跨 LAN 接收目录失败（落盘可能失败）: {e}");
+        }
         // 候选链：① 内网直连（本机 mDNS 发现表 SRV 真实端口）→ ② 对端 ext_file_ep
         //   拉取端直接按对端通告的「完整地址（IPv4[:port]）」直连，不读取本机 listen_port
         //   ——对端若走内网穿透，代理端口很可能 ≠ 20071，本机端口作兜底会拼错。
@@ -843,7 +911,7 @@ impl ServerConn {
             ));
         }
         // 清掉此前针对本 pull_id 残留的取消标记（用户取消后立刻重新点拉取的场景）
-        self.cross_pull_cancel.lock().unwrap().remove(pull_id);
+        self.cross_pull_cancel.lock().remove(pull_id);
         // 连接超时：内网地址不可达时能快速回退到下一个候选，不至于长时间挂起
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(3))
@@ -860,7 +928,7 @@ impl ServerConn {
         let mut routes: Vec<(String, &'static str)> = routes;
         for f in &files {
             // 取消检查点 1：每个文件开始前。命中即清标记并整体中止。
-            if self.cross_pull_cancel.lock().unwrap().remove(pull_id) {
+            if self.cross_pull_cancel.lock().remove(pull_id) {
                 // 清理已写入的临时文件，不留半截垃圾
                 for p in &saved {
                     let _ = std::fs::remove_file(p);
@@ -868,7 +936,27 @@ impl ServerConn {
                 tracing::info!("跨 LAN 拉取 {pull_id} 已被用户取消");
                 return Err(anyhow::anyhow!("__CANCELLED__"));
             }
+            // 体积上限：跨 LAN 路径是「整文件读入内存 → 原地解密 → 写盘」（峰值 ≈1× 文件大小），
+            // 超大文件仍会吃光内存。局域网 P2P 路径是流式的（边读边发 / 边收边写），不受此限。
+            if f.file_size > MAX_CROSS_LAN_FILE_BYTES {
+                return Err(anyhow::anyhow!(
+                    "跨 LAN 单文件上限 {} MiB：{} 为 {} MiB，请改用局域网直连传输",
+                    MAX_CROSS_LAN_FILE_BYTES / (1024 * 1024),
+                    f.file_name,
+                    f.file_size / (1024 * 1024)
+                ));
+            }
             let hash = f.hash.clone().unwrap_or_default();
+            // 请求方凭证：证明本端持有同一网络密钥（对端 file_server 会校验，
+            // 未持密钥的同网段主机无法拉取共享文件）。密钥未就绪则为空串，
+            // 对端会以 401 拒绝——这正是期望行为（无密钥不该能取文件）。
+            let auth = {
+                let key = *self
+                    .network_key
+                    .lock();
+                key.map(|k| crate::crypto::file_auth::auth_token(&k, &hash))
+                    .unwrap_or_default()
+            };
             // 试探：首个文件按候选链试，成功路由记录 route_used 并从 routes 里
             // 剔除失败项；后续文件直接走 routes[0]（确定下来的路由），不再轮询。
             let (resp, route) = if !route_used.is_empty() {
@@ -876,6 +964,7 @@ impl ServerConn {
                 (
                     client
                         .get(format!("{base}/file/{hash}"))
+                        .header("X-Clipsync-Auth", auth.clone())
                         .send()
                         .await
                         .map_err(|e| anyhow::anyhow!("{e}"))?,
@@ -889,7 +978,12 @@ impl ServerConn {
                 let mut i = 0usize;
                 while i < routes.len() {
                     let (base, tag) = &routes[i];
-                    match client.get(format!("{base}/file/{hash}")).send().await {
+                    match client
+                        .get(format!("{base}/file/{hash}"))
+                        .header("X-Clipsync-Auth", auth.clone())
+                        .send()
+                        .await
+                    {
                         Ok(r) if r.status().is_success() => {
                             chosen = Some((r, *tag));
                             // 把命中路由提到首位、剔除之前的失败项
@@ -923,7 +1017,8 @@ impl ServerConn {
             let enc_len = resp.content_length().unwrap_or(0);
             // 流式下载到临时文件，边下边上报进度——大文件也能看到中间进度，
             // 不再「等很久一直 0%」。
-            let dest = std::path::Path::new(&sync_dir).join(&f.file_name);
+            // 目标一律落在设备名目录下、只用净化后的文件名（不用对端的 relative_path）
+            let dest = root.join(crate::transfer::paths::safe_segment(&f.file_name));
             let tmp = dest.with_extension(format!("{}.clipsync.tmp", std::process::id()));
             {
                 use tokio::io::AsyncWriteExt;
@@ -936,10 +1031,10 @@ impl ServerConn {
                 let mut last_at = std::time::Instant::now();
                 while let Some(chunk) = stream.next().await {
                     // 取消检查点 2：下载中每个分片边界，大文件也能即时终止
-                    if self.cross_pull_cancel.lock().unwrap().contains(pull_id) {
+                    if self.cross_pull_cancel.lock().contains(pull_id) {
                         drop(tmpf);
                         let _ = std::fs::remove_file(&tmp);
-                        self.cross_pull_cancel.lock().unwrap().remove(pull_id);
+                        self.cross_pull_cancel.lock().remove(pull_id);
                         for p in &saved {
                             let _ = std::fs::remove_file(p);
                         }
@@ -979,36 +1074,56 @@ impl ServerConn {
                 }
                 tmpf.flush().await.ok();
             }
-            // 读取密文并解密写盘；密钥未就绪则按明文写盘（降级）
-            let raw = tokio::fs::read(&tmp)
+            // 读取下载内容并解密写盘。
+            //
+            // 解密失败 / 密钥未就绪一律**报错并清理**：早先的实现把这两种情况直接写盘
+            // （注释写着「按明文写盘」，实际写出的是密文），用户拿到打不开的文件却看到
+            // 「已保存」——这比明确失败更糟。宁可失败得清楚。
+            let mut raw = tokio::fs::read(&tmp)
                 .await
                 .map_err(|e| anyhow::anyhow!("读取临时文件失败: {e}"))?;
-            let key = *state.network_key.lock().unwrap();
-            let bytes: Vec<u8> = match key {
-                Some(k) if raw.len() >= NONCE_SIZE => {
-                    let (nonce, ct) = raw.split_at(NONCE_SIZE);
-                    let nonce_arr: Option<[u8; NONCE_SIZE]> = nonce.try_into().ok();
-                    match nonce_arr {
-                        Some(n) => match decrypt(&k, &n, ct) {
-                            Ok(p) => p,
-                            Err(e) => {
-                                tracing::warn!("跨 LAN 文件解密失败，按明文写盘: {e}");
-                                raw.to_vec()
-                            }
-                        },
-                        None => {
-                            tracing::warn!("跨 LAN 文件 nonce 长度异常，按明文写盘");
-                            raw.to_vec()
-                        }
-                    }
+            // 失败清理：删临时文件 + 已落盘的前序文件，不留半截结果
+            let cleanup = |tmp: &std::path::Path, saved: &[PathBuf]| {
+                let _ = std::fs::remove_file(tmp);
+                for p in saved {
+                    let _ = std::fs::remove_file(p);
                 }
-                _ => raw.to_vec(),
             };
+            // AppState.network_key 是 std::sync::Mutex → 需要 unwrap
+            let key = *state.network_key.lock().unwrap();
+            let Some(k) = key else {
+                cleanup(&tmp, &saved);
+                return Err(anyhow::anyhow!(
+                    "网络密钥未就绪，无法解密跨 LAN 文件（请确认已连接服务端）"
+                ));
+            };
+            if raw.len() < NONCE_SIZE + crate::crypto::aead::in_place_overhead() {
+                cleanup(&tmp, &saved);
+                return Err(anyhow::anyhow!("跨 LAN 文件格式异常（长度不足）"));
+            }
+            let nonce_arr: [u8; NONCE_SIZE] = {
+                let mut n = [0u8; NONCE_SIZE];
+                n.copy_from_slice(&raw[..NONCE_SIZE]);
+                n
+            };
+            // 原地剥掉 nonce 前缀（drain 是内存内搬移，不额外分配）
+            raw.drain(..NONCE_SIZE);
+            // 原地解密：密文缓冲区直接变明文，内存峰值从 2× 降到 ≈1×
+            if let Err(e) = crate::crypto::aead::decrypt_in_place(&k, &nonce_arr, &mut raw) {
+                cleanup(&tmp, &saved);
+                return Err(anyhow::anyhow!(
+                    "跨 LAN 文件解密失败（密钥不匹配或数据损坏）: {e}"
+                ));
+            }
             tokio::fs::remove_file(&tmp).await.ok();
             if let Some(parent) = dest.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                    return Err(anyhow::anyhow!("创建目标目录失败: {e}"));
+                }
             }
-            std::fs::write(&dest, &bytes)?;
+            if let Err(e) = tokio::fs::write(&dest, &raw).await {
+                return Err(anyhow::anyhow!("写入文件失败: {e}"));
+            }
             saved.push(dest.clone());
             done_plain += f.file_size;
             // 文件边界补报一次精确百分比

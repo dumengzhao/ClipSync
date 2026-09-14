@@ -53,29 +53,37 @@ pub async fn handle_file_stream(
     if let Some(hash) = path.strip_prefix("/file/") {
         // 去掉查询串 / 片段，仅保留 hash
         let hash = hash.split(['?', '#']).next().unwrap_or("");
+        // 1) 网络密钥未就绪 → 直接拒绝（跨 LAN 文件依赖服务端鉴权，无密钥时不外泄）
+        let key = *network_key.lock().unwrap();
+        let Some(k) = key else {
+            let _ = write_status(&mut sock, 503, "encryption key not ready").await;
+            return;
+        };
+        // 2) 请求方凭证：证明其持有同一网络密钥。缺凭证一律 401——
+        //    此前只校验 hash 是否登记过，同网段任意主机拿到 hash 就能拉走文件。
+        let presented = header_value(&header, "x-clipsync-auth").unwrap_or_default();
+        if !crate::crypto::file_auth::verify(&k, hash, &presented) {
+            tracing::warn!("拒绝文件拉取：X-Clipsync-Auth 缺失或不匹配（hash={hash}）");
+            let _ = write_status(&mut sock, 401, "unauthorized").await;
+            return;
+        }
+        // 3) 凭证通过后才查文件，避免用响应差异探测文件是否存在
         match file_share.get(hash) {
             Some(plain) => {
-                let key = *network_key.lock().unwrap();
-                match key {
-                    Some(k) => {
-                        let mut nonce = [0u8; NONCE_SIZE];
-                        rand::thread_rng().fill(&mut nonce);
-                        match encrypt(&k, &nonce, &plain) {
-                            Ok(ct) => {
-                                let mut body = Vec::with_capacity(NONCE_SIZE + ct.len());
-                                body.extend_from_slice(&nonce);
-                                body.extend_from_slice(&ct);
-                                let _ = write_body(&mut sock, &body).await;
-                            }
-                            Err(e) => {
-                                tracing::warn!("跨 LAN 文件加密失败，按明文返回: {e}");
-                                let _ = write_body(&mut sock, &plain).await;
-                            }
-                        }
+                let mut nonce = [0u8; NONCE_SIZE];
+                rand::thread_rng().fill(&mut nonce);
+                match encrypt(&k, &nonce, &plain) {
+                    Ok(ct) => {
+                        let mut body = Vec::with_capacity(NONCE_SIZE + ct.len());
+                        body.extend_from_slice(&nonce);
+                        body.extend_from_slice(&ct);
+                        let _ = write_body(&mut sock, &body).await;
                     }
-                    None => {
-                        // 跨 LAN 文件依赖服务端鉴权；未连服务端、无密钥时拒绝下载
-                        let _ = write_status(&mut sock, 503, "encryption key not ready").await;
+                    Err(e) => {
+                        // 绝不回退明文：加密失败即失败（早期版本会退回明文返回，与
+                        // 本模块「避免明文外泄」的设计意图相悖）
+                        tracing::error!("跨 LAN 文件加密失败，已拒绝响应（不回退明文）: {e}");
+                        let _ = write_status(&mut sock, 500, "encryption failed").await;
                     }
                 }
             }
@@ -86,6 +94,18 @@ pub async fn handle_file_stream(
     } else {
         let _ = write_status(&mut sock, 200, "clipsync file server").await;
     }
+}
+
+/// 从已读入的 HTTP 头文本中取指定请求头（大小写不敏感）。
+fn header_value(header: &str, name: &str) -> Option<String> {
+    header.lines().skip(1).find_map(|line| {
+        let (k, v) = line.split_once(':')?;
+        if k.trim().eq_ignore_ascii_case(name) {
+            Some(v.trim().to_string())
+        } else {
+            None
+        }
+    })
 }
 
 async fn write_status(sock: &mut TcpStream, code: u16, msg: &str) -> std::io::Result<()> {

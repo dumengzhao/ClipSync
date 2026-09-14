@@ -346,7 +346,25 @@ let _devWs = null;              // 明细页实时刷新 WebSocket
 
 function toast(msg){const t=$('#toast');t.textContent=msg;t.style.display='block';setTimeout(()=>t.style.display='none',2500);}
 function authHeaders(){return {'Content-Type':'application/json','Authorization':'Bearer '+token};}
-function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function esc(s){return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+
+// ── 统一事件委托 ──────────────────────────────────────────────────────────
+// 所有交互都走 data-act + data-*，**不再把动态数据拼进内联事件处理器**。
+// 原因：内联 onclick 里的值无法通过 HTML 转义安全化——属性值里的实体（如 &#39;）
+// 会先被 HTML 解码回 ' ，再交给 JS 解析，等于转义被绕过。device_id 由客户端自报，
+// 一旦拼进 onclick 就是存储型 XSS（可窃取管理端 localStorage 里的 JWT）。
+document.addEventListener('click',(ev)=>{
+  const el = ev.target.closest('[data-act]');
+  if(!el) return;
+  const act = el.dataset.act;
+  if(act==='nav'){ location.hash='#/net/'+encodeURIComponent(el.dataset.net||''); return; }
+  const net = el.dataset.net||'', dev = el.dataset.dev||'';
+  if(act==='enable') setEnabled(net,dev,true);
+  else if(act==='disable') setEnabled(net,dev,false);
+  else if(act==='remove') removeDevice(net,dev);
+  else if(act==='restore') restoreDevice(net,dev);
+  else if(act==='copy') copyText(el.dataset.val||'');
+});
 
 async function api(path, opts={}){
   const res = await fetch(path, Object.assign({headers:authHeaders()}, opts));
@@ -384,7 +402,7 @@ function renderNetList(){
   $('#netCount').textContent = _netCache.length ? '['+_netCache.length+']' : '';
   if(!_netCache.length){ box.innerHTML='<div class="empty">暂无网络，点击「+ 创建网络」开始。</div>'; return; }
   box.innerHTML = _netCache.map(n=>`
-    <div class="net-card" onclick="location.hash='#/net/${encodeURIComponent(n.id)}'">
+    <div class="net-card" data-act="nav" data-net="${esc(n.id)}">
       <div class="net-name"><span>${esc(n.name)}</span><span class="arrow">›</span></div>
       <div class="net-stats">
         <div class="stat"><div class="num">${n.node_count}</div><div class="lbl">节点</div></div>
@@ -456,15 +474,15 @@ function renderDevices(nodes){
     const status = !d.online ? '<span class="tag offline">离线</span>'
       : (d.enabled ? '<span class="tag on">在线 · 已启用</span>' : '<span class="tag off">在线 · 未启用</span>');
     const btn = d.enabled
-      ? `<button class="danger sm" onclick="setEnabled('${currentNet}','${d.device_id}',false)">禁用</button>`
-      : `<button class="green sm" onclick="setEnabled('${currentNet}','${d.device_id}',true)">启用</button>`;
+      ? `<button class="danger sm" data-act="disable" data-net="${esc(currentNet)}" data-dev="${esc(d.device_id)}">禁用</button>`
+      : `<button class="green sm" data-act="enable" data-net="${esc(currentNet)}" data-dev="${esc(d.device_id)}">启用</button>`;
     html+=`<tr>
       <td data-label="设备"><div><div class="dev-name">🖥 ${esc(d.name||'(未命名)')}</div><div class="dev-os">${esc(osTxt)}</div></div></td>
       <td data-label="设备ID"><code class="uid" title="${esc(uid)}">${esc(uid)}</code></td>
       <td data-label="LAN 分组"><span class="mono">${esc(d.lan_group)||'-'}</span></td>
       <td data-label="文件地址"><span class="mono">${esc(d.ext_file_ep)||'-'}</span></td>
       <td data-label="状态">${status}</td>
-      <td data-label="操作"><div class="ops">${btn}<button class="ghost sm" onclick="removeDevice('${currentNet}','${d.device_id}')">删除</button></div></td>
+      <td data-label="操作"><div class="ops">${btn}<button class="ghost sm" data-act="remove" data-net="${esc(currentNet)}" data-dev="${esc(d.device_id)}">删除</button></div></td>
     </tr>`;
   }
   html+='</tbody></table>';
@@ -509,7 +527,7 @@ async function loadRemoved(netId){
     for(const r of removed){
       html+=`<tr><td data-label="设备名">${esc(r.name||'(未知)')}</td>`+
         `<td data-label="设备 ID"><code class="uid">${esc(r.device_id)}</code></td>`+
-        `<td data-label="操作"><div class="ops"><button class="ghost sm" onclick="restoreDevice('${netId}','${r.device_id}')">恢复</button></div></td></tr>`;
+        `<td data-label="操作"><div class="ops"><button class="ghost sm" data-act="restore" data-net="${esc(netId)}" data-dev="${esc(r.device_id)}">恢复</button></div></td></tr>`;
     }
     html+='</tbody></table>';
     box.innerHTML=html;
@@ -595,7 +613,7 @@ $('#createNet').onclick=async()=>{
   const r = await api('/api/admin/networks',{method:'POST',body:JSON.stringify({name, description:$('#netDesc').value})});
   const box=$('#newToken');
   box.classList.remove('hidden');
-  box.innerHTML = `<div class="tok"><code class="tok-val" style="flex:1">${esc(r.token)}</code><button class="ghost sm" onclick="copyText('${esc(r.token)}')">复制</button></div>`;
+  box.innerHTML = `<div class="tok"><code class="tok-val" style="flex:1">${esc(r.token)}</code><button class="ghost sm" data-act="copy" data-val="${esc(r.token)}">复制</button></div>`;
   $('#netName').value=''; $('#netDesc').value='';
   toast('网络已创建');
   await loadNetworks();

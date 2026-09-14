@@ -1,5 +1,11 @@
 # ClipSync 客户端更新模块方案（中继服务内置 · 自建托管 · Option A · 无签名）
 
+> **2026-09-14 更新**：本文提到的 `server/publish-update.sh` 与 `server/gen-latest-json.mjs`
+> **已移除**，`client/package.json` 的 `build:update` 脚本同步删除。发布改由服务端维护：
+> 打开管理页（`GET /admin`）选各平台安装包 → 页面用 Web Crypto 现场算 sha256 并生成清单 →
+> 上传后服务端 `merge_manifest` 按平台键合并进线上 `latest.json`。下文相关段落为**历史方案记录**，
+> 保留以说明决策演进；实现细节以 `server/src/update.rs` 与 `server/static/admin.html` 为准。
+>
 > 状态：**已实现**（2026-09-02，按第 12 节顺序分步落地：服务端 update.rs +
 > 管理上传 + 管理页 UI + 移除 Tauri updater 插件 + 客户端自写更新器 +
 > publish-update.sh）。目标：把客户端自动更新与中继服务合建在同一进程/同一台机器上，

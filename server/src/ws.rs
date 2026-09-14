@@ -1,20 +1,53 @@
-use crate::hub::OutMsg;
+use crate::hub::{OutMsg, OUT_QUEUE_CAPACITY};
 use crate::models::{ClientToServer, ServerToClient};
 use crate::state::AppState;
 use axum::extract::{State, WebSocketUpgrade};
 use axum::response::Response;
 use futures::{SinkExt, StreamExt};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
+
+/// 单条 WS 消息上限。客户端发的都是小 JSON 信令（含文件清单），256 KiB 足够宽裕；
+/// 设上限是为了防超大帧把内存撑爆（axum 默认无上限）。
+const MAX_WS_MESSAGE_BYTES: usize = 256 * 1024;
+/// 同时在线 WS 连接上限（每连接一条任务 + 一条出站队列）。
+const MAX_WS_CONNS: usize = 2048;
+/// 空闲超时：客户端每 25s 发一次 Heartbeat，长时间收不到任何帧即视为死连接。
+const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// 当前在线 WS 连接数
+static WS_CONNS: AtomicUsize = AtomicUsize::new(0);
+
+/// 连接计数守卫：无论从哪个分支返回都会把计数减回去（避免计数只增不减）
+struct ConnGuard;
+
+impl Drop for ConnGuard {
+    fn drop(&mut self) {
+        WS_CONNS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// 设备 WS 入口：/ws
 pub async fn device_ws(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+    ws.max_message_size(MAX_WS_MESSAGE_BYTES)
+        .max_frame_size(MAX_WS_MESSAGE_BYTES)
+        .on_upgrade(move |socket| handle_socket(socket, state))
 }
 
 async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppState>) {
+    // 连接数上限：超出直接关闭，避免海量空闲连接耗尽内存与文件句柄
+    if WS_CONNS.fetch_add(1, Ordering::SeqCst) >= MAX_WS_CONNS {
+        WS_CONNS.fetch_sub(1, Ordering::SeqCst);
+        eprintln!("[clipsync-server] WS 连接数已达上限（{MAX_WS_CONNS}），拒绝新连接");
+        return;
+    }
+    let _conn_guard = ConnGuard;
+
     let (mut sender, mut receiver) = socket.split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<OutMsg>();
+    // 有界出站队列：慢客户端不再让服务端推送无限堆积（满则 try_send 丢弃）
+    let (tx, mut rx) = mpsc::channel::<OutMsg>(OUT_QUEUE_CAPACITY);
 
     // 转发任务：把服务端要发的消息写到 WS（App 消息序列化为 Text；Ping 回 Pong）
     let forward = tokio::spawn(async move {
@@ -50,13 +83,23 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppState
     });
 
     let mut authed: Option<(String, String)> = None; // (network_id, device_id)
-    while let Some(Ok(msg)) = receiver.next().await {
+    loop {
+        // 空闲超时：正常客户端每 25s 发一次 Heartbeat；长时间收不到任何帧说明
+        // 连接已死（或对端只是占坑），主动断开，不让闲置连接长期占用资源。
+        let msg = match tokio::time::timeout(WS_IDLE_TIMEOUT, receiver.next()).await {
+            Ok(Some(Ok(m))) => m,
+            Ok(_) => break,
+            Err(_) => {
+                eprintln!("[clipsync-server] WS 空闲超时（{WS_IDLE_TIMEOUT:?}），关闭连接");
+                break;
+            }
+        };
         match msg {
             axum::extract::ws::Message::Text(t) => {
                 let parsed: ClientToServer = match serde_json::from_str(&t) {
                     Ok(p) => p,
                     Err(_) => {
-                        let _ = tx.send(OutMsg::App(ServerToClient::Error {
+                        let _ = tx.try_send(OutMsg::App(ServerToClient::Error {
                             code: "bad_json".into(),
                             msg: "invalid json".into(),
                         }));
@@ -85,7 +128,7 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppState
                                 // 先把拒绝消息送入转发队列，再优雅关闭转发任务，
                                 // 确保 Removed/Error 真正刷到 socket（否则 forward.abort()
                                 // 会在消息发出前杀掉转发任务，客户端收不到）。
-                                let _ = tx.send(msg);
+                                let _ = tx.try_send(msg);
                                 drop(tx);
                                 let _ = forward.await;
                                 return;
@@ -114,7 +157,7 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppState
             }
             axum::extract::ws::Message::Close(_) => break,
             axum::extract::ws::Message::Ping(_) => {
-                let _ = tx.send(OutMsg::Pong);
+                let _ = tx.try_send(OutMsg::Pong);
             }
             _ => {}
         }

@@ -202,7 +202,8 @@ fn files_root(state: &AppState) -> PathBuf {
 /// GET /update/latest.json —— 公开读；url 按本机基址改写后返回。
 pub async fn latest_json(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let path = state.update_dir.join("latest.json");
-    let raw = match std::fs::read_to_string(&path) {
+    // 用异步读：handler 跑在 tokio worker 上，同步文件 IO 会阻塞该线程
+    let raw = match tokio::fs::read_to_string(&path).await {
         Ok(s) => s,
         Err(_) => {
             return (
@@ -282,7 +283,8 @@ pub async fn download_file(
 /// GET /api/admin/update —— 当前线上版本摘要（无发布则 404）。
 pub async fn admin_info(State(state): State<Arc<AppState>>) -> Response {
     let path = state.update_dir.join("latest.json");
-    let raw = match std::fs::read_to_string(&path) {
+    // 用异步读：这些 handler 跑在 tokio worker 上，同步文件 IO 会阻塞该线程
+    let raw = match tokio::fs::read_to_string(&path).await {
         Ok(s) => s,
         Err(_) => {
             return (
