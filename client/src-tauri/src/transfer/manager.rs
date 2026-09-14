@@ -1666,12 +1666,31 @@ impl ConnectionHub {
                         loop {
                             match listener.accept().await {
                                 Ok((sock, _)) => {
+                                    // 每连接独立任务：嗅探/握手绝不能串行阻塞 accept 循环。
+                                    // 此前 sniff 用裸 `sock.peek()` 且无超时——任何「连上但不发
+                                    // 数据」的客户端（浏览器/WebView 预连接、端口扫描、健康检查）
+                                    // 都会把整个循环卡死，之后所有入站连接（ping 探测、文件拉取、
+                                    // P2P 握手）全部排队无响应。实测表现为探测间歇性「不通」：
+                                    // 某连接占用循环 30s+ 后才被处理。
+                                    let hub = hub.clone();
+                                    let file_share = file_share.clone();
+                                    let network_key = network_key.clone();
+                                    tauri::async_runtime::spawn(async move {
                                     let ra =
                                         sock.peer_addr().map(|a| a.to_string()).unwrap_or_default();
                                     // 嗅探请求行：连通性探测 → 文件拉取 → 其余升级为 WS。
                                     // 三类路径互斥（都以前缀区分），先匹配最具体的。
+                                    // 限时 5s：慢客户端只拖慢自己，不再拖垮全局。
                                     let mut peek_buf = [0u8; 512];
-                                    let n = sock.peek(&mut peek_buf).await.unwrap_or(0);
+                                    let n = match tokio::time::timeout(
+                                        std::time::Duration::from_secs(5),
+                                        sock.peek(&mut peek_buf),
+                                    )
+                                    .await
+                                    {
+                                        Ok(Ok(n)) => n,
+                                        _ => 0,
+                                    };
                                     let req_line = {
                                         let slice = &peek_buf[..n];
                                         if let Some(lf) =
@@ -1705,16 +1724,16 @@ impl ConnectionHub {
                                         let _ = s.write_all(resp.as_bytes()).await;
                                         let _ = s.shutdown().await;
                                         tracing::debug!("ping 探测来自 {ra}");
-                                        continue;
+                                        return;
                                     }
                                     if req_line.starts_with("GET /file/") {
-                                        let fs = file_share.clone();
-                                        let nk = network_key.clone();
-                                        tauri::async_runtime::spawn(async move {
-                                            crate::file_server::handle_file_stream(sock, fs, nk)
-                                                .await;
-                                        });
-                                        continue;
+                                        crate::file_server::handle_file_stream(
+                                            sock,
+                                            file_share,
+                                            network_key,
+                                        )
+                                        .await;
+                                        return;
                                     }
                                     match tokio_tungstenite::accept_async(sock).await {
                                         Ok(ws) => {
@@ -1750,6 +1769,7 @@ impl ConnectionHub {
                                             );
                                         }
                                     }
+                                    });
                                 }
                                 Err(e) => {
                                     tracing::warn!("accept failed: {e}");

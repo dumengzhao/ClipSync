@@ -292,9 +292,16 @@ export async function firewallRuleExists(): Promise<boolean> {
   return invoke<boolean>('firewall_rule_exists');
 }
 
-/** 触发 UAC 提权执行一次 netsh 加放行规则；用户在 UAC 点「否」则规则不生效 */
+/** 用户主动点击「防火墙修复」时调用：触发 UAC 提权执行一次 netsh 加规则；用户在 UAC 点「否」则规则不生效 */
 export async function firewallFix(): Promise<void> {
   return invoke<void>('firewall_fix');
+}
+
+/* ================= 实时日志窗口（log-viewer） ================= */
+
+/** 打开（或聚焦已存在的）实时日志窗口；Rust 侧自动启动文件 tail 任务，窗口关闭任务即退 */
+export async function openLogWindow(): Promise<void> {
+  return invoke<void>('open_log_window');
 }
 
 

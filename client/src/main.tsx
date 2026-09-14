@@ -3,14 +3,17 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 import PullToast from './PullToast';
+import LogWindow from './LogWindow';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import './styles.css';
 
-const isToast = getCurrentWindow().label === 'pull-toast';
+const winLabel = getCurrentWindow().label;
+const isToast = winLabel === 'pull-toast';
+const isLogViewer = winLabel === 'log-viewer';
 
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>
-    {isToast ? <PullToast /> : <App />}
+    {isToast ? <PullToast /> : isLogViewer ? <LogWindow /> : <App />}
   </React.StrictMode>,
 );
 
