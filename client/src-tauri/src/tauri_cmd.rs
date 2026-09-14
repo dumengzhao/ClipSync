@@ -798,3 +798,34 @@ pub async fn scan_lan_server_configs(
 ) -> Result<Vec<LanServerConfigGroup>, String> {
     Ok(state.hub.scan_lan_server_configs().await)
 }
+
+/// 查询 mDNS 防火墙放行规则是否已存在（无需管理员权限，netsh show 空跑很快）。
+#[cfg(windows)]
+#[tauri::command]
+pub fn firewall_rule_exists() -> bool {
+    crate::firewall::rule_exists()
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+pub fn firewall_rule_exists() -> bool {
+    true
+}
+
+/// 用户主动点击「防火墙修复」时调用：触发 UAC 提权执行一次 netsh 加规则。
+/// 结果不直接返回（UAC 交互耗时不定），前端执行后轮询 firewall_rule_exists 确认。
+#[cfg(windows)]
+#[tauri::command]
+pub async fn firewall_fix() -> Result<(), String> {
+    // 同步子进程调用丢到阻塞线程池，避免卡住 async runtime
+    tauri::async_runtime::spawn_blocking(crate::firewall::add_rule_elevated)
+        .await
+        .map_err(|e| format!("join error: {e}"))?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+pub async fn firewall_fix() -> Result<(), String> {
+    Ok(())
+}

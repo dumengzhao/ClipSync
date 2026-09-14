@@ -111,60 +111,56 @@ impl Default for AppState {
 
 /// Windows 上 mDNS 入站多播（UDP 5353）默认被防火墙拦截，导致本机收不到对端广播、
 /// 局域网发现失效（而出站默认放行，所以本机「能被发现」却「发现不了别人」）。
-/// 启动时尽力加一条入站放行规则；非管理员权限时 netsh 会返回拒绝，此时仅记录日志
-/// 并提示手动命令，不阻断启动。规则已存在则跳过，避免重复添加与噪音。
+/// 规则管理策略（业界通行做法，LocalSend 同款交互）：
+/// - 安装版：NSIS 安装钩子以管理员权限在 POSTINSTALL 加规则、PREUNINSTALL 删规则；
+/// - 绿色版/兜底：设置页「防火墙修复」按钮，用户主动点击触发 UAC 提权执行一次 netsh；
+/// - 启动路径**不跑任何 netsh**（曾因每次启动静默跑两趟 netsh 造成闪命令窗 + 无响应）。
 #[cfg(windows)]
-fn ensure_mdns_firewall_rule() {
-    use std::process::Command;
-    // netsh 是控制台程序：不设 CREATE_NO_WINDOW 会给每个子进程闪出一个命令窗口
-    #[cfg(windows)]
+pub mod firewall {
     use std::os::windows::process::CommandExt;
+    use std::process::Command;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let rule_name = "ClipSync mDNS (UDP 5353)";
-    let exists = Command::new("netsh")
-        .args([
+    pub const RULE_NAME: &str = "ClipSync mDNS (UDP 5353)";
+
+    fn netsh(args: &[&str]) -> std::process::Output {
+        Command::new("netsh")
+            .args(args)
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .expect("netsh spawn failed")
+    }
+
+    /// 查询放行规则是否已存在（无需管理员权限）。
+    pub fn rule_exists() -> bool {
+        netsh(&[
             "advfirewall",
             "firewall",
             "show",
             "rule",
-            &format!("name={rule_name}"),
+            &format!("name={RULE_NAME}"),
         ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if exists {
-        tracing::info!("mDNS 防火墙入站规则已存在，跳过");
-        return;
+        .status
+        .success()
     }
-    match Command::new("netsh")
-        .args([
-            "advfirewall",
-            "firewall",
-            "add",
-            "rule",
-            &format!("name={rule_name}"),
-            "dir=in",
-            "action=allow",
-            "protocol=UDP",
-            "localport=5353",
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-    {
-        Ok(o) if o.status.success() => {
-            tracing::info!("已添加 Windows 防火墙入站规则（UDP 5353），局域网发现应恢复");
-        }
-        Ok(o) => {
-            let msg = String::from_utf8_lossy(&o.stderr);
-            tracing::warn!(
-                "未能自动添加防火墙规则（多半需管理员权限）：{}。\
-                 请以管理员运行一次：netsh advfirewall firewall add rule \
-                 name=\"ClipSync mDNS\" dir=in action=allow protocol=UDP localport=5353",
-                msg.trim()
-            );
-        }
-        Err(e) => tracing::warn!("执行 netsh 失败：{e}"),
+
+    /// 以管理员权限（触发 UAC）添加放行规则。返回 ()，结果由前端轮询 rule_exists 确认。
+    /// 经 powershell Start-Process -Verb runAs 提权执行；用户在 UAC 点「否」时静默失败。
+    pub fn add_rule_elevated() {
+        // powershell 本身也是控制台程序：CREATE_NO_WINDOW 防止调用瞬间闪窗；
+        // 提权后的 netsh 由 Start-Process 启动，其窗口属新提权会话，不归本进程控制，
+        // 但 netsh 执行极快且加 -WindowStyle Hidden，实际观感只是 UAC 弹窗一闪。
+        let _ = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-WindowStyle",
+                "Hidden",
+                "-Command",
+                &format!(
+                    "Start-Process netsh -ArgumentList 'advfirewall','firewall','add','rule','name={RULE_NAME}','dir=in','action=allow','protocol=UDP','localport=5353' -Verb runAs -Wait"
+                ),
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
     }
 }
 
@@ -336,12 +332,9 @@ pub fn run() {
                 {
                     tracing::error!("mDNS discovery failed to start: {e}");
                 }
-                // Windows 上 mDNS 入站多播默认被防火墙拦截，导致发现不了别人；
-                // 尽力加一条入站放行规则（需管理员权限，失败仅提示）。
-                // netsh 子进程耗时数百毫秒级且同步阻塞，放 setup 主线程会拖慢启动
-                // 甚至表现为「窗口无响应」——必须丢到后台线程执行。
-                #[cfg(windows)]
-                std::thread::spawn(ensure_mdns_firewall_rule);
+                // 防火墙规则不在启动路径处理（历史教训：每次启动静默跑 netsh 造成
+                // 闪命令窗 + 数秒无响应，且非管理员必失败从未生效）。安装版由 NSIS
+                // 钩子处理；绿色版由设置页「防火墙修复」按钮提权执行。
             }
 
             // 启动同步引擎（剪贴板监听 + 事件广播），失败仅记录不阻断启动
@@ -435,6 +428,8 @@ pub fn run() {
             tauri_cmd::cancel_pull_cross_lan,
             tauri_cmd::probe_ext_file_ep,
             tauri_cmd::scan_lan_server_configs,
+            tauri_cmd::firewall_rule_exists,
+            tauri_cmd::firewall_fix,
             tauri_cmd::show_pull_toast,
             tauri_cmd::hide_pull_toast,
             #[cfg(debug_assertions)]
