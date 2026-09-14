@@ -998,26 +998,39 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         <div className="modal-overlay" onClick={cancelLanPick}>
           <div className="modal" onClick={(e) => e.stopPropagation()} style={{ width: 'min(420px, calc(100vw - 3rem))' }}>
             <h3 className="modal-title">复制局域网设备配置</h3>
-            <p className="modal-body">
-              请选择一台设备，确认后把它的服务端配置填入本机。Token 不展示。
-            </p>
-            <ul style={{ listStyle: 'none', padding: 0, margin: '0 0 0.9rem' }}>
-              {lanPickModal.groups.map((g, i) => (
-                <li key={i} style={{ marginBottom: '0.4rem' }}>
-                  <button
-                    className="btn btn-ghost"
-                    style={{ width: '100%', textAlign: 'left', padding: '0.6rem 0.75rem' }}
-                    onClick={() => applyLanGroup(g)}
-                  >
-                    <div style={{ fontWeight: 500 }}>
-                      {g.sources.map((s) => s.device_name).join('、')}
-                    </div>
-                    <div style={{ fontSize: '0.78rem', color: '#64748b', marginTop: '0.2rem' }}>
-                      {serverUrlHost(g.server_url)}
-                    </div>
-                  </button>
-                </li>
-              ))}
+            <ul
+              style={{
+                listStyle: 'none',
+                padding: 0,
+                margin: '0 0 0.9rem',
+                maxHeight: 'min(50vh, 20rem)',
+                overflowY: 'auto',
+              }}
+            >
+              {lanPickModal.groups.map((g, i) => {
+                const tokenMasked = g.network_token
+                  ? g.network_token.slice(0, 4) + '••••' + g.network_token.slice(-4)
+                  : '（无 Token）';
+                return (
+                  <li key={i} style={{ marginBottom: '0.4rem' }}>
+                    <button
+                      className="btn btn-ghost"
+                      style={{ width: '100%', textAlign: 'left', padding: '0.6rem 0.75rem' }}
+                      onClick={() => applyLanGroup(g)}
+                    >
+                      <div style={{ fontWeight: 500 }}>
+                        {g.sources.map((s) => s.device_name).join('、')}
+                      </div>
+                      <div style={{ fontSize: '0.78rem', color: '#64748b', marginTop: '0.2rem' }}>
+                        {serverUrlHost(g.server_url)}
+                      </div>
+                      <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: '0.15rem', fontFamily: 'monospace' }}>
+                        Token: {tokenMasked}
+                      </div>
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
             <div className="modal-actions">
               <button className="btn btn-ghost" onClick={cancelLanPick}>
