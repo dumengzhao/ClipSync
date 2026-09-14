@@ -719,7 +719,7 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
       <div className="section" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem' }}>
         <span>跨局域网中转（服务端）</span>
         <button
-          className="btn btn-sm btn-ghost"
+          className="btn btn-sm"
           onClick={lanScanAndApply}
           disabled={lanScanBusy}
           style={{ marginTop: 0 }}
