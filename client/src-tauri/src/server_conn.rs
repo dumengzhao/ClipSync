@@ -366,6 +366,9 @@ impl ServerConn {
             });
         }
 
+        // 连接循环启动前，后台线程预热硬件 ID / OS 版本（reg 子进程较慢，不占连接路径）
+        self.prewarm_device_info();
+
         // 连接循环
         let conn = self.clone();
         let app = self.app.clone();
@@ -458,6 +461,22 @@ impl ServerConn {
         self.reconnect_notify.notify_one();
     }
 
+    /// 后台预热硬件 ID / OS 版本缓存（reg 子进程同步阻塞，不能放在连接关键路径上）。
+    /// 在 start() 里用独立线程调用一次；connect_once 只读缓存。
+    pub fn prewarm_device_info(self: &Arc<Self>) {
+        let conn = self.clone();
+        std::thread::spawn(move || {
+            let hw = hardware_id();
+            let os = os_version();
+            let mut hw_guard = conn.cached_hw_id.lock().unwrap();
+            if hw_guard.is_empty() {
+                *hw_guard = hw;
+            }
+            drop(hw_guard);
+            *conn.cached_os_ver.lock().unwrap() = os;
+        });
+    }
+
     /// 建立一条 WS 连接并运行，直到断开返回。返回本次连接的结束方式：
     /// 网络层错误为 `Err`，连接建立后按是否入网 / 是否被拒给出 `ConnectOutcome`。
     async fn connect_once(self: &Arc<Self>, url: &str) -> anyhow::Result<ConnectOutcome> {
@@ -471,17 +490,10 @@ impl ServerConn {
         }
         let mut hw = self.cached_hw_id.lock().unwrap().clone();
         if hw.is_empty() {
-            hw = hardware_id();
-            if hw.is_empty() {
-                hw = self.engine.device_id().0.clone();
-            }
-            *self.cached_hw_id.lock().unwrap() = hw.clone();
+            // 预热尚未完成（极快重连时可能撞上）：用 device_id 兜底，不阻塞等待子进程
+            hw = self.engine.device_id().0.clone();
         }
-        let mut os_ver = self.cached_os_ver.lock().unwrap().clone();
-        if os_ver.is_empty() {
-            os_ver = os_version();
-            *self.cached_os_ver.lock().unwrap() = os_ver.clone();
-        }
+        let os_ver = self.cached_os_ver.lock().unwrap().clone();
         let auth = ClientToServer::Auth {
             token: cfg.network_token.clone(),
             device: DeviceFields {

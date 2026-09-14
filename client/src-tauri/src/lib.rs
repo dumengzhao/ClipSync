@@ -338,8 +338,10 @@ pub fn run() {
                 }
                 // Windows 上 mDNS 入站多播默认被防火墙拦截，导致发现不了别人；
                 // 尽力加一条入站放行规则（需管理员权限，失败仅提示）。
+                // netsh 子进程耗时数百毫秒级且同步阻塞，放 setup 主线程会拖慢启动
+                // 甚至表现为「窗口无响应」——必须丢到后台线程执行。
                 #[cfg(windows)]
-                ensure_mdns_firewall_rule();
+                std::thread::spawn(ensure_mdns_firewall_rule);
             }
 
             // 启动同步引擎（剪贴板监听 + 事件广播），失败仅记录不阻断启动
