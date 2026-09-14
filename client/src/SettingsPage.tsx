@@ -14,6 +14,7 @@ import {
   scanLanServerConfigs,
   firewallRuleExists,
   firewallFix,
+  openLogWindow,
   type AppConfig,
   type UpdateInfo,
   type ProbeResult,
@@ -30,11 +31,28 @@ function isIpv4(s: string): boolean {
   return parts.every((o) => /^\d{1,3}$/.test(o) && Number(o) <= 255);
 }
 
-// 校验文本是否为合法 IPv4[:port]（端口 1..=65535，端口可省）
-function isIpv4WithPort(s: string): boolean {
-  const m = /^([0-9.]+)(?::(\d+))?$/.exec(s);
+/**
+ * 校验主机名：IPv4 或域名（RFC 1123：标签由字母/数字/连字符组成、不以连字符开头结尾、
+ * 长度 1-63，顶级域至少 2 段；整体 ≤253 字符）。用于「对外文件地址」允许填域名。
+ */
+function isHostName(s: string): boolean {
+  if (isIpv4(s)) return true;
+  if (!s || s.length > 253) return false;
+  const labels = s.split('.');
+  if (labels.length < 2) return false;
+  return labels.every(
+    (l) =>
+      l.length >= 1 &&
+      l.length <= 63 &&
+      /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$/.test(l)
+  );
+}
+
+/** 校验 `主机[:端口]`：主机可以是 IPv4 或域名；端口 1..=65535，可省 */
+function isHostWithPort(s: string): boolean {
+  const m = /^([^:]+)(?::(\d+))?$/.exec(s);
   if (!m) return false;
-  if (!isIpv4(m[1])) return false;
+  if (!isHostName(m[1])) return false;
   if (m[2] !== undefined) {
     const p = Number(m[2]);
     if (!Number.isInteger(p) || p < 1 || p > 65535) return false;
@@ -313,7 +331,7 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
   };
   const probeAndSaveExtEp = async () => {
     const v = extEpModal.value.trim();
-    if (!isIpv4WithPort(v)) {
+    if (!isHostWithPort(v)) {
       setExtEpModal((s) => ({
         ...s,
         probe: {
@@ -321,7 +339,7 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
           device_id: null,
           device_name: null,
           version: null,
-          error: '请输入合法 IPv4[:port]，端口 1-65535 可省',
+          error: '请输入合法 主机[:端口]（IPv4 或域名），端口 1-65535 可省',
         },
       }));
       return;
@@ -520,14 +538,25 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
             checked={cfg.enable_mdns}
             onChange={(e) => persist({ enable_mdns: e.target.checked })}
           />
-          {/* 防火墙修复（LocalSend 同款）：入站多播被拦时用户主动提权放行 */}
+          {/* 防火墙兜底入口（LocalSend 同款）：仅为未放行时的一个小灰字链接，
+              不做醒目提示——单子网内发现通常本就能用，放行只是边界场景加固 */}
           {fwOk === false && (
-            <button className="btn btn-sm" onClick={doFirewallFix} disabled={fwBusy}>
+            <button
+              type="button"
+              onClick={doFirewallFix}
+              disabled={fwBusy}
+              style={{
+                border: 'none',
+                background: 'transparent',
+                padding: 0,
+                cursor: fwBusy ? 'default' : 'pointer',
+                fontSize: '0.78rem',
+                color: '#94a3b8',
+                textDecoration: 'underline',
+              }}
+            >
               {fwBusy ? '修复中…' : '防火墙修复'}
             </button>
-          )}
-          {fwOk === true && (
-            <span style={{ fontSize: '0.78rem', color: '#64748b' }}>已放行</span>
           )}
         </div>
       </div>
@@ -975,6 +1004,26 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         </select>
       </div>
 
+      <div className="section">诊断</div>
+      <div className="row">
+        <label>实时日志</label>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flex: '0 0 auto' }}>
+          <button
+            className="btn btn-sm"
+            onClick={() => {
+              openLogWindow().catch((e: unknown) =>
+                setMsg('打开日志窗口失败：' + String(e)),
+              );
+            }}
+          >
+            打开日志窗口
+          </button>
+        </div>
+      </div>
+      <p className="hint">
+        独立窗口实时显示本机日志（与日志文件内容一致）；窗口关闭即销毁，不落盘、不常驻。
+      </p>
+
       <div className="section">更新</div>
       {installedBuild === null ? null : installedBuild ? (
         <>
@@ -1018,7 +1067,7 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
             <input
               className="pair-input"
               autoFocus
-              placeholder={`例如 1.2.3.4 或 1.2.3.4:${cfg.listen_port}`}
+              placeholder={`例如 1.2.3.4 或 clipsync.example.com:${cfg.listen_port}`}
               value={extEpModal.value}
               onChange={(e) =>
                 setExtEpModal((s) => ({ ...s, value: e.target.value, probe: null }))
