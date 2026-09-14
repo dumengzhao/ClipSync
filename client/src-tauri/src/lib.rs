@@ -145,18 +145,27 @@ pub mod firewall {
 
     /// 以管理员权限（触发 UAC）添加放行规则。返回 ()，结果由前端轮询 rule_exists 确认。
     /// 经 powershell Start-Process -Verb runAs 提权执行；用户在 UAC 点「否」时静默失败。
+    ///
+    /// 坑：Start-Process 的 -ArgumentList 数组模式有老 bug（dotnet/runtime#5576，
+    /// 官方不修）——含空格的元素会被拆散，除非手动再包一层双引号。规则名
+    /// "name=ClipSync mDNS (UDP 5353)" 含空格，必须整体用 \"...\" 包住，
+    /// 否则提权后的 netsh 收到四个碎片参数、静默失败（UAC 通过了规则也没加上）。
+    /// 规避：把整条 netsh 命令行作为**单个字符串**传给 -ArgumentList。
     pub fn add_rule_elevated() {
-        // powershell 本身也是控制台程序：CREATE_NO_WINDOW 防止调用瞬间闪窗；
-        // 提权后的 netsh 由 Start-Process 启动，其窗口属新提权会话，不归本进程控制，
-        // 但 netsh 执行极快且加 -WindowStyle Hidden，实际观感只是 UAC 弹窗一闪。
+        let netsh_args = format!(
+            "advfirewall firewall add rule name=\"{RULE_NAME}\" dir=in action=allow protocol=UDP localport=5353"
+        );
         let _ = Command::new("powershell")
             .args([
                 "-NoProfile",
                 "-WindowStyle",
                 "Hidden",
                 "-Command",
+                // 单字符串 ArgumentList：Start-Process 原样拼接传给 netsh，不再拆分；
+                // -Verb runAs 触发 UAC 提权，-Wait 等它执行完
                 &format!(
-                    "Start-Process netsh -ArgumentList 'advfirewall','firewall','add','rule','name={RULE_NAME}','dir=in','action=allow','protocol=UDP','localport=5353' -Verb runAs -Wait"
+                    "Start-Process netsh -ArgumentList '{}' -Verb runAs -Wait",
+                    netsh_args.replace('\'', "''")
                 ),
             ])
             .creation_flags(CREATE_NO_WINDOW)
