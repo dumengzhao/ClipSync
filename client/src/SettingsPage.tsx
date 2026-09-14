@@ -716,7 +716,17 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         可在防火墙拦截局域网发现（mDNS）时兜底直连。
       </p>
 
-      <div className="section">跨局域网中转（服务端）</div>
+      <div className="section" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem' }}>
+        <span>跨局域网中转（服务端）</span>
+        <button
+          className="btn btn-sm btn-ghost"
+          onClick={lanScanAndApply}
+          disabled={lanScanBusy}
+          style={{ marginTop: 0 }}
+        >
+          {lanScanBusy ? '扫描中…' : '复制局域网设备配置'}
+        </button>
+      </div>
       <div className="row">
         <label>服务端地址</label>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flex: '0 0 auto' }}>
@@ -746,18 +756,6 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
             onBlur={() => commitServerUrl()}
           />
           <span className="ext-ep-port">/ws</span>
-        </div>
-      </div>
-      <div className="row">
-        <label></label>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flex: '0 0 auto' }}>
-          <button
-            className="btn btn-sm btn-ghost"
-            onClick={lanScanAndApply}
-            disabled={lanScanBusy}
-          >
-            {lanScanBusy ? '扫描中…' : '复制局域网设备配置'}
-          </button>
         </div>
       </div>
       <div className="row">
