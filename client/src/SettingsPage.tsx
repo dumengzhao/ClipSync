@@ -107,6 +107,8 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
     open: boolean;
     groups: import('./api/tauri').LanServerConfigGroup[];
   }>({ open: false, groups: [] });
+  // Network Token 显隐：默认隐藏（星号）
+  const [showToken, setShowToken] = useState(false);
   // 手动地址配对时输入的对方配对码（按当前正在配对的那条地址记录）
   const [manualPairing, setManualPairing] = useState<{ addr: string; port: number } | null>(null);
   const [manualPairCode, setManualPairCode] = useState('');
@@ -760,14 +762,45 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
       </div>
       <div className="row">
         <label>Network Token（共享密钥）</label>
-        <input
-          type="text"
-          style={{ width: '260px' }}
-          placeholder="服务端创建网络时返回的一次性 Token"
-          value={cfg.network_token ?? ''}
-          onChange={(e) => update('network_token', e.target.value)}
-          {...textSave('network_token')}
-        />
+        {/* Token 输入框：加宽；显隐按钮整体包裹在输入框内（右侧内嵌） */}
+        <div
+          style={{
+            position: 'relative',
+            width: '320px',
+            display: 'inline-block',
+          }}
+        >
+          <input
+            type={showToken ? 'text' : 'password'}
+            style={{ width: '100%', paddingRight: '2.6rem' }}
+            placeholder="服务端创建网络时返回的一次性 Token"
+            value={cfg.network_token ?? ''}
+            onChange={(e) => update('network_token', e.target.value)}
+            {...textSave('network_token')}
+          />
+          <button
+            type="button"
+            aria-label={showToken ? '隐藏 Token' : '显示 Token'}
+            title={showToken ? '隐藏 Token' : '显示 Token'}
+            onClick={() => setShowToken((v) => !v)}
+            style={{
+              position: 'absolute',
+              right: '0.45rem',
+              top: '50%',
+              transform: 'translateY(-50%)',
+              border: 'none',
+              background: 'transparent',
+              cursor: 'pointer',
+              padding: '0.15rem',
+              lineHeight: 1,
+              fontSize: '0.85rem',
+              color: 'inherit',
+              opacity: 0.6,
+            }}
+          >
+            {showToken ? '🙈' : '👁'}
+          </button>
+        </div>
       </div>
       <div className="row">
         <label>对外文件地址</label>
