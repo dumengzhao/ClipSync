@@ -1003,7 +1003,8 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
                 listStyle: 'none',
                 padding: 0,
                 margin: '0 0 0.9rem',
-                maxHeight: 'min(50vh, 20rem)',
+                minHeight: '14rem',
+                maxHeight: 'min(60vh, 26rem)',
                 overflowY: 'auto',
               }}
             >
