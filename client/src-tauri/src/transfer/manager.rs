@@ -2891,7 +2891,10 @@ impl ConnectionHub {
         out
     }
 
-    /// 收到 Config::Query 时调用：本端若有服务端配置，回 Reply；否则回 NotConfigured。
+    /// 收到 Config::Query 时调用：读本机服务端配置，把 Reply/NotConfigured 帧
+    /// 通过 peers 表里询问方（from）的 tx **发回线路**。
+    /// 注意：request_id 是**询问方**本地 oneshot 表的 key，本端（被询问方）表里
+    /// 必然查不到——绝不能在本地表里找投递通道，那会导致 Reply 永远发不回去。
     async fn handle_config_query(&self, request_id: String, kind: u8, from: &str) {
         // 暂时仅支持 kind=0（服务端配置）；其他忽略
         if kind != 0 {
@@ -2905,21 +2908,26 @@ impl ConnectionHub {
             (cfg.server_url.clone(), cfg.network_token.clone())
         };
         drop(app_guard); // 提前释放互斥锁（lock 已不需要）
-        let reply = if !server_url.trim().is_empty() {
-            ConfigReply::HasConfig {
+        let has_cfg = !server_url.trim().is_empty();
+        let pt = if has_cfg {
+            bincode::serialize(&ConfigFrame::Reply {
+                request_id,
                 server_url,
                 network_token,
-            }
+            })
+            .unwrap_or_default()
         } else {
-            ConfigReply::NotConfigured
+            bincode::serialize(&ConfigFrame::NotConfigured { request_id }).unwrap_or_default()
         };
-        // 仅当 request_id 仍未被消费（防重放或异常路径）
-        let Some(tx) = self.config_queries.lock().unwrap().remove(&request_id) else {
-            // 没有任何等待方（被询问方不可能发起 Query）：直接忽略，不要把 reply 反向发给对端
-            return;
-        };
-        let _ = tx.send(reply);
-        let _ = from;
+        let frame = MessageFrame::new(MessageType::Config, pt);
+        let sent = self
+            .peers
+            .lock()
+            .unwrap()
+            .get(from)
+            .map(|p| p.tx.send(Outgoing::Config(frame)).is_ok())
+            .unwrap_or(false);
+        tracing::info!("LAN 配置查询：已回复 {}（has_config={}）", from, sent && has_cfg);
     }
 
     /// 收到 Config::Reply / NotConfigured 时调用：通过 request_id 投递到等待方。
