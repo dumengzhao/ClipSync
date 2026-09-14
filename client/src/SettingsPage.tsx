@@ -334,10 +334,8 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
     await persist({ ext_file_ep: '' }, '已清空对外文件地址');
   };
 
-  /// 从局域网其他已配对设备获取服务端配置：扫描 → 0/1/多分支。
-  /// - 0 个：toast 提示「未找到」；
-  /// - 1 个：直接写入（点按钮即视为确认，不二次弹窗）；
-  /// - ≥2 个：弹选择窗（显示设备名 + server_url host:port，token 不显，可取消）。
+  /// 从局域网其他已配对设备获取服务端配置：扫描 → 弹窗列出所有候选设备。
+  /// 不管扫到几组，一律弹窗由用户挑一台设备确认后再写入本机；0 个 toast 提示。
   const lanScanAndApply = async () => {
     if (lanScanBusy) return;
     setLanScanBusy(true);
@@ -347,25 +345,7 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         setMsg('未在已配对局域网设备中找到可用的服务端配置');
         return;
       }
-      if (groups.length === 1) {
-        const g = groups[0];
-        const curUrl = persistedRef.current?.server_url ?? '';
-        const curToken = persistedRef.current?.network_token ?? '';
-        if (curUrl === g.server_url && curToken === g.network_token) {
-          setMsg('服务端配置未变化');
-          return;
-        }
-        await persist(
-          { server_url: g.server_url, network_token: g.network_token },
-          '已从局域网其他设备获取服务端配置',
-        );
-        // 同步「服务端地址」拆分的输入框（splice srvScheme/srvHost）
-        const parsed = parseServerUrl(g.server_url);
-        setSrvScheme(parsed.scheme);
-        setSrvHost(parsed.host);
-        return;
-      }
-      // 多组：弹选择
+      // 一律弹选择窗：用户挑一台设备确认后再写入（不自动直写）
       setLanPickModal({ open: true, groups });
     } catch (e) {
       setMsg('扫描失败: ' + String(e), 'err');
@@ -776,11 +756,8 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
             onClick={lanScanAndApply}
             disabled={lanScanBusy}
           >
-            {lanScanBusy ? '扫描中…' : '从局域网其他已配对设备获取…'}
+            {lanScanBusy ? '扫描中…' : '复制局域网设备配置'}
           </button>
-          <span className="hint" style={{ marginTop: 0 }}>
-            候选 = 本机已配对 + 当前在线 + 同局域网；查询经 P2P 加密通道，不携带对端对外文件地址。
-          </span>
         </div>
       </div>
       <div className="row">
@@ -1018,14 +995,13 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         </div>
       )}
 
-      {/* 「从局域网其他已配对设备获取」选择弹窗：仅 ≥2 组合时弹出 */}
+      {/* 「复制局域网设备配置」选择弹窗：列出候选设备，点一台确认写入 */}
       {lanPickModal.open && (
         <div className="modal-overlay" onClick={cancelLanPick}>
           <div className="modal" onClick={(e) => e.stopPropagation()} style={{ width: 'min(420px, calc(100vw - 3rem))' }}>
-            <h3 className="modal-title">选择服务端配置</h3>
+            <h3 className="modal-title">复制局域网设备配置</h3>
             <p className="modal-body">
-              找到 {lanPickModal.groups.length} 组不同的服务端配置，请挑一组写入。
-              Token 不展示。
+              请选择一台设备，确认后把它的服务端配置填入本机。Token 不展示。
             </p>
             <ul style={{ listStyle: 'none', padding: 0, margin: '0 0 0.9rem' }}>
               {lanPickModal.groups.map((g, i) => (
@@ -1035,9 +1011,11 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
                     style={{ width: '100%', textAlign: 'left', padding: '0.6rem 0.75rem' }}
                     onClick={() => applyLanGroup(g)}
                   >
-                    <div style={{ fontWeight: 500 }}>{serverUrlHost(g.server_url)}</div>
+                    <div style={{ fontWeight: 500 }}>
+                      {g.sources.map((s) => s.device_name).join('、')}
+                    </div>
                     <div style={{ fontSize: '0.78rem', color: '#64748b', marginTop: '0.2rem' }}>
-                      来自 {g.sources.map((s) => s.device_name).join('、')}（{g.sources.length} 台）
+                      {serverUrlHost(g.server_url)}
                     </div>
                   </button>
                 </li>
