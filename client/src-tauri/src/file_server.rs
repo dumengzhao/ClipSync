@@ -22,23 +22,30 @@ pub async fn handle_file_stream(
     file_share: Arc<FileShare>,
     network_key: Arc<Mutex<Option<[u8; 32]>>>,
 ) {
-    // 读取 HTTP 头直到 \r\n\r\n
+    // 读取 HTTP 头直到 \r\n\r\n。
+    // 整个头读取限时 10s：否则慢客户端（连上不发数据/逐字节滴数据）会一直
+    // 占着并发许可，64 个此类连接即可耗尽 MAX_CONCURRENT_CONNS 拒绝所有入站。
     let mut buf = Vec::with_capacity(1024);
     let mut tmp = [0u8; 1024];
     let header_len = loop {
-        match sock.read(&mut tmp).await {
-            Ok(0) => return,
-            Ok(n) => {
-                buf.extend_from_slice(&tmp[..n]);
-                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                    break pos + 4;
-                }
-                if buf.len() > 16 * 1024 {
-                    let _ = write_status(&mut sock, 400, "bad request").await;
-                    return;
-                }
+        let n = match tokio::time::timeout(std::time::Duration::from_secs(10), sock.read(&mut tmp))
+            .await
+        {
+            Ok(Ok(0)) => return,
+            Ok(Ok(n)) => n,
+            Ok(Err(_)) => return,
+            Err(_) => {
+                let _ = write_status(&mut sock, 408, "request timeout").await;
+                return;
             }
-            Err(_) => return,
+        };
+        buf.extend_from_slice(&tmp[..n]);
+        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break pos + 4;
+        }
+        if buf.len() > 16 * 1024 {
+            let _ = write_status(&mut sock, 400, "bad request").await;
+            return;
         }
     };
     let header = String::from_utf8_lossy(&buf[..header_len]);

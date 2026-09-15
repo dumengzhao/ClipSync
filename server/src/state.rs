@@ -22,7 +22,10 @@ pub struct AppState {
     pub networks: Mutex<Vec<Network>>,
     pub hub: Hub,
     /// 管理后台 WebSocket 推送通道：net_id -> 该网络下所有管理页面连接（用于实时刷新设备状态）
-    pub admin_ws: Mutex<HashMap<String, Vec<Arc<mpsc::UnboundedSender<String>>>>>,
+    /// 管理后台 WebSocket 推送通道：net_id -> 该网络下所有管理页面连接。
+    /// 有界队列 + 满即丢：推送的始终是**全量快照**，新版覆盖旧版语义，
+    /// 挂起不消费的管理页不会把服务端内存撑爆。
+    pub admin_ws: Mutex<HashMap<String, Vec<Arc<mpsc::Sender<String>>>>>,
     /// 会话签名密钥：登录签发/HMAC 校验 admin 会话
     pub server_key: String,
     pub admin_user: String,
@@ -85,7 +88,11 @@ impl AppState {
         let net_id = nets[idx].id.clone();
         let now = now_secs();
         // 黑名单：被移除（拉黑）的设备重连直接拒绝，避免删除后被复活
-        if nets[idx].removed_devices.iter().any(|r| r.device_id == device.id) {
+        if nets[idx]
+            .removed_devices
+            .iter()
+            .any(|r| r.device_id == device.id)
+        {
             return Err("device_removed".to_string());
         }
         let enabled = {
@@ -151,14 +158,7 @@ impl AppState {
     }
 
     /// 文字中继门控：源与目标均须 enabled=true，且跨 lan_group（同 LAN 走直连不经服务端）。
-    pub fn relay_text(
-        &self,
-        net_id: &str,
-        from_dev: &str,
-        to: &str,
-        ct: &str,
-        tx: &Tx,
-    ) {
+    pub fn relay_text(&self, net_id: &str, from_dev: &str, to: &str, ct: &str, tx: &Tx) {
         let can_relay = {
             let nets = self.networks.lock().unwrap();
             let net = match nets.iter().find(|n| n.id == net_id) {
@@ -341,15 +341,14 @@ impl AppState {
         let conns = self.admin_ws.lock().unwrap();
         if let Some(txs) = conns.get(net_id) {
             for tx in txs {
-                // 注意：这是管理端 WS 的通道（String），与 hub 的设备 Tx 是不同类型，
-                // 用 send 而非 try_send。
-                let _ = tx.send(payload.clone());
+                // 满即丢：快照语义，被丢弃的旧快照由下一次推送覆盖
+                let _ = tx.try_send(payload.clone());
             }
         }
     }
 
     /// 注册一个管理后台 WS 连接（按网络分组）。
-    pub fn register_admin_ws(&self, net_id: &str, tx: Arc<mpsc::UnboundedSender<String>>) {
+    pub fn register_admin_ws(&self, net_id: &str, tx: Arc<mpsc::Sender<String>>) {
         self.admin_ws
             .lock()
             .unwrap()
@@ -359,7 +358,7 @@ impl AppState {
     }
 
     /// 注销管理后台 WS 连接。
-    pub fn unregister_admin_ws(&self, net_id: &str, tx: &Arc<mpsc::UnboundedSender<String>>) {
+    pub fn unregister_admin_ws(&self, net_id: &str, tx: &Arc<mpsc::Sender<String>>) {
         let mut g = self.admin_ws.lock().unwrap();
         if let Some(v) = g.get_mut(net_id) {
             v.retain(|t| !Arc::ptr_eq(t, tx));

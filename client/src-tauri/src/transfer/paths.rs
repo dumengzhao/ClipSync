@@ -28,18 +28,20 @@ const RESERVED_NAMES: [&str; 22] = [
 
 /// 取路径的最后一段：同时处理 `/` 与 `\`，丢弃盘符与所有目录部分。
 ///
-/// 依赖 `Path::file_name()` 的平台语义——Windows 上它能识别两种分隔符，
-/// 且对 `..` / `.` / 空串返回 `None`（正是我们想要的拒绝行为）。
+/// 不能直接依赖 `Path::file_name()` 的平台语义——它只识别**本平台**的分隔符
+/// （Linux 上不认 `\`，会把 `C:\Windows\x.bat` 整串当文件名）。对端可能发来
+/// Windows 风格路径，因此先把 `\` 归一成 `/` 再取最后一段，三平台行为一致。
 fn last_segment(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
     }
-    if let Some(name) = Path::new(trimmed).file_name() {
+    let normalized = trimmed.replace('\\', "/");
+    if let Some(name) = Path::new(&normalized).file_name() {
         return Some(name.to_string_lossy().into_owned());
     }
     // 退化路径（例如整串就是 `/` 或只剩分隔符）：再手工取一次最后一段
-    let tail = trimmed.rsplit(['/', '\\']).next().unwrap_or("");
+    let tail = normalized.rsplit('/').next().unwrap_or("");
     if tail.is_empty() || tail == "." || tail == ".." {
         None
     } else {
@@ -72,11 +74,7 @@ pub fn safe_segment(raw: &str) -> String {
         cleaned = cleaned.chars().take(MAX_SEGMENT_CHARS).collect();
     }
     // 保留名：追加下划线前缀（同时覆盖「带扩展名」的写法，如 CON.txt）
-    let stem_upper = cleaned
-        .split('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_uppercase();
+    let stem_upper = cleaned.split('.').next().unwrap_or("").to_ascii_uppercase();
     if RESERVED_NAMES.contains(&stem_upper.as_str()) {
         cleaned = format!("_{cleaned}");
     }

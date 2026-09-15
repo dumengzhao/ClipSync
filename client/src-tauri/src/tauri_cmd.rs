@@ -25,9 +25,9 @@ use crate::AppState;
 
 #[cfg(debug_assertions)]
 use crate::clipboard::types::FileMeta;
+use crate::transfer::manager::LanServerConfigGroup;
 #[cfg(debug_assertions)]
 use crate::transfer::manager::Outgoing;
-use crate::transfer::manager::LanServerConfigGroup;
 #[cfg(debug_assertions)]
 use crate::transfer::websocket::FileFrame;
 #[cfg(debug_assertions)]
@@ -646,11 +646,7 @@ pub async fn pull_cross_lan(
 /// 导致循环以 `Err("已取消")` 退出，`pull_cross_lan` 命令会照常补发
 /// `file-pull-complete(ok:false)`，前端把它当作一次失败收口（文案区分取消与失败）。
 #[tauri::command]
-pub fn cancel_pull_cross_lan(
-    state: State<AppState>,
-    app: AppHandle,
-    pull_id: String,
-) {
+pub fn cancel_pull_cross_lan(state: State<AppState>, app: AppHandle, pull_id: String) {
     let sc = state.server_conn.lock().clone();
     let Some(sc) = sc else { return };
     let cancelled = sc.cancel_cross_pull(&pull_id);
@@ -766,8 +762,14 @@ pub async fn probe_ext_file_ep(
             });
         }
     };
-    let id = v.get("device_id").and_then(|x| x.as_str()).map(String::from);
-    let name = v.get("device_name").and_then(|x| x.as_str()).map(String::from);
+    let id = v
+        .get("device_id")
+        .and_then(|x| x.as_str())
+        .map(String::from);
+    let name = v
+        .get("device_name")
+        .and_then(|x| x.as_str())
+        .map(String::from);
     let ver = v.get("version").and_then(|x| x.as_str()).map(String::from);
     if id.is_none() || name.is_none() || ver.is_none() {
         return Ok(ProbeResult {

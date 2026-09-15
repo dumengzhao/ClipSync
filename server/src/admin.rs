@@ -2,7 +2,7 @@ use crate::crypto::{gen_token, hash_token, issue_session, verify_session};
 use crate::models::Network;
 use crate::state::AppState;
 use crate::storage;
-use axum::extract::{Path, Request, State};
+use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::StatusCode;
 use axum::middleware::Next;
@@ -10,6 +10,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use rust_embed::RustEmbed;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -29,13 +30,15 @@ struct LoginThrottle {
     lock_len: Duration,
 }
 
-static LOGIN_THROTTLE: LazyLock<Mutex<LoginThrottle>> = LazyLock::new(|| {
-    Mutex::new(LoginThrottle {
-        fails: 0,
-        locked_until: None,
-        lock_len: LOGIN_BASE_LOCK,
-    })
-});
+/// 登录退避：**按源 IP** 各自计数。此前是全局退避，任意远程主机发 5 次
+/// 错误口令即可让真实管理员被无限期锁死（锁死成本为零）。按 IP 区分后
+/// 攻击者只能锁死自己；同一 NAT 后多用户互锁属可接受取舍。
+/// 表项上限 1024，超出时清理已过期的锁定项（防内存被伪造源打爆）。
+static LOGIN_THROTTLES: LazyLock<Mutex<HashMap<std::net::IpAddr, LoginThrottle>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 单 IP 失败表上限：超过即做一轮过期清理（攻击者伪造海量源时防内存膨胀）
+const LOGIN_THROTTLE_MAX_IPS: usize = 1024;
 
 /// 内嵌管理页面资源（编译时打包进二进制，免部署静态文件）。
 #[derive(RustEmbed)]
@@ -53,7 +56,11 @@ pub async fn admin_auth(State(state): State<Arc<AppState>>, req: Request, next: 
         .map(|t| verify_session(&state.server_key, t).is_some())
         .unwrap_or(false);
     if !ok {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"}))).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "unauthorized"})),
+        )
+            .into_response();
     }
     next.run(req).await
 }
@@ -77,44 +84,65 @@ pub struct LoginBody {
 }
 
 /// 登录：校验密码后签发标准 JWT 会话令牌（HS256，7 天有效，无状态）。
-pub async fn admin_login(State(state): State<Arc<AppState>>, Json(body): Json<LoginBody>) -> Json<Value> {
-    // 1) 退避检查：锁定期内直接拒绝，且**不做口令校验**（也就不会消耗 Argon2）
+pub async fn admin_login(
+    State(state): State<Arc<AppState>>,
+    // ConnectInfo 可选：单测的 oneshot 请求没有对端地址，此时退避退化为全局键
+    peer_addr: Option<ConnectInfo<std::net::SocketAddr>>,
+    Json(body): Json<LoginBody>,
+) -> Json<Value> {
+    let throttle_key = peer_addr
+        .map(|c| c.0.ip())
+        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+    // 1) 退避检查（按源 IP）：锁定期内直接拒绝，且**不做口令校验**（也就不会消耗 Argon2）
     {
-        let t = LOGIN_THROTTLE.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(until) = t.locked_until {
-            let now = Instant::now();
-            if now < until {
-                let left = (until - now).as_secs() + 1;
-                return Json(json!({
-                    "error": format!("登录尝试过于频繁，请 {left} 秒后再试")
-                }));
+        let t = LOGIN_THROTTLES.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(th) = t.get(&throttle_key) {
+            if let Some(until) = th.locked_until {
+                let now = Instant::now();
+                if now < until {
+                    let left = (until - now).as_secs() + 1;
+                    return Json(json!({
+                        "error": format!("登录尝试过于频繁，请 {left} 秒后再试")
+                    }));
+                }
             }
         }
     }
     if body.user != state.admin_user || !storage::verify_pass(&state.admin_pass_hash, &body.pass) {
         // 2) 失败计数与递增锁定
         {
-            let mut t = LOGIN_THROTTLE.lock().unwrap_or_else(|e| e.into_inner());
-            t.fails = t.fails.saturating_add(1);
-            if t.fails >= LOGIN_MAX_FAILS {
+            let mut t = LOGIN_THROTTLES.lock().unwrap_or_else(|e| e.into_inner());
+            if t.len() >= LOGIN_THROTTLE_MAX_IPS {
+                // 防伪造源撑爆内存：清掉已过期的锁定项
                 let now = Instant::now();
-                t.locked_until = Some(now + t.lock_len);
+                t.retain(|_, th| th.locked_until.map(|u| now < u).unwrap_or(true));
+            }
+            let th = t.entry(throttle_key).or_insert_with(|| LoginThrottle {
+                fails: 0,
+                locked_until: None,
+                lock_len: LOGIN_BASE_LOCK,
+            });
+            th.fails = th.fails.saturating_add(1);
+            if th.fails >= LOGIN_MAX_FAILS {
+                let now = Instant::now();
+                th.locked_until = Some(now + th.lock_len);
                 eprintln!(
-                    "[clipsync-server] 管理登录连续失败 {} 次，锁定 {:?}",
-                    t.fails, t.lock_len
+                    "[clipsync-server] {throttle_key} 管理登录连续失败 {} 次，锁定 {:?}",
+                    th.fails, th.lock_len
                 );
-                t.lock_len = (t.lock_len * 2).min(LOGIN_MAX_LOCK);
-                t.fails = 0;
+                th.lock_len = (th.lock_len * 2).min(LOGIN_MAX_LOCK);
+                th.fails = 0;
             }
         }
         return Json(json!({"error": "invalid credentials"}));
     }
     // 3) 成功：清零退避状态
     {
-        let mut t = LOGIN_THROTTLE.lock().unwrap_or_else(|e| e.into_inner());
-        t.fails = 0;
-        t.locked_until = None;
-        t.lock_len = LOGIN_BASE_LOCK;
+        // 成功即清除该 IP 的退避状态
+        LOGIN_THROTTLES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&throttle_key);
     }
     let token = issue_session(&state.server_key, &state.admin_user);
     Json(json!({ "token": token }))

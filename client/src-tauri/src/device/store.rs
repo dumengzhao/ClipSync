@@ -160,16 +160,18 @@ pub fn save_devices(app: &tauri::AppHandle, devices: &[PairedDevice]) {
     match serde_json::to_string_pretty(&records) {
         Ok(text) => {
             {
-                let mut last = LAST_SAVED_DEVICES
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
+                let mut last = LAST_SAVED_DEVICES.lock().unwrap_or_else(|e| e.into_inner());
                 if last.as_deref() == Some(text.as_str()) {
                     return;
                 }
-                *last = Some(text.clone());
-            }
-            if let Err(e) = std::fs::write(dir.join(DEVICES_FILE), text) {
-                tracing::warn!("写入已配对设备表失败：{e}");
+                // 注意：`last` 必须在**写盘成功后**才更新。若先记内存再写盘，
+                // 一次瞬时写盘失败（磁盘满/文件被锁）后，内容相同的后续保存
+                // 会全部命中跳过分支，设备表从此不再落盘，重启即丢。
+                if let Err(e) = std::fs::write(dir.join(DEVICES_FILE), &text) {
+                    tracing::warn!("写入已配对设备表失败：{e}");
+                    return;
+                }
+                *last = Some(text);
             }
         }
         Err(e) => tracing::warn!("序列化已配对设备表失败：{e}"),

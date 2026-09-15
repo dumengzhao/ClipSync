@@ -250,7 +250,8 @@ fn spawn_tail_task(app: tauri::AppHandle, mut initial_offset: Option<u64>) {
                                 let lines = split_lines(complete);
                                 for chunk in lines.chunks(MAX_LINES_PER_TICK) {
                                     // 负载为纯字符串数组，与前端 `listen<string[]>('log-line')` 对齐
-                                    let _ = app.emit_to(LOG_WINDOW_LABEL, "log-line", chunk.to_vec());
+                                    let _ =
+                                        app.emit_to(LOG_WINDOW_LABEL, "log-line", chunk.to_vec());
                                 }
                             }
                         }
