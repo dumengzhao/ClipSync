@@ -848,14 +848,12 @@ impl ServerConn {
     ) -> anyhow::Result<()> {
         let files: Vec<FileMeta> = serde_json::from_value(manifest)?;
         let state = self.app.state::<AppState>();
+        // 落盘根目录：与 P2P 路径**共用同一套解析规则**（sync_dir 配置优先 → 系统下载目录）。
+        // 早先这里单独回退到 temp_dir()/clipsync，且 sync_dir 只对 P2P 生效 ——
+        // 同一台设备按传输路径不同会落到两处，配置项对跨 LAN 也不起作用。
         let sync_dir = {
-            let cfg = state.config.lock();
-            cfg.sync_dir.clone().unwrap_or_else(|| {
-                std::env::temp_dir()
-                    .join("clipsync")
-                    .to_string_lossy()
-                    .to_string()
-            })
+            let configured = state.config.lock().sync_dir.clone();
+            crate::transfer::paths::resolve_sync_dir(Some(&self.app), configured)
         };
         // 落盘目录：`sync_dir/<设备名>/`（与 P2P 路径一致：平铺、同名覆盖）。
         // 设备名优先取已配对 registry 的显示名，取不到（未配对/已解配）才回退 device_id；

@@ -612,20 +612,11 @@ impl ConnectionHub {
             .collect()
     }
 
-    /// 解析文件同步落盘目录：配置优先，否则回退系统下载目录。
+    /// 解析文件同步落盘目录（薄封装，实际规则见 `transfer::paths::resolve_sync_dir`，
+    /// 与跨 LAN 路径共用同一套：配置优先 → 系统下载目录）。
     fn resolve_sync_dir(&self, app: Option<&AppHandle>) -> PathBuf {
         let configured = app.and_then(|a| a.state::<AppState>().config.lock().sync_dir.clone());
-        if let Some(dir) = configured {
-            if !dir.trim().is_empty() {
-                return PathBuf::from(dir.trim());
-            }
-        }
-        if let Some(a) = app {
-            if let Ok(dir) = a.path().download_dir() {
-                return dir;
-            }
-        }
-        PathBuf::from("Downloads")
+        crate::transfer::paths::resolve_sync_dir(app, configured)
     }
 
     /// 是否应自动拉取：配置总开关 `auto_pull_enabled` 开启、且对端传来的总大小严格小于

@@ -16,6 +16,7 @@
 //!   不会让 `PathBuf::join` 丢弃前缀（join 遇绝对路径会整体替换，实测确认过）。
 
 use std::path::Path;
+use tauri::Manager;
 
 /// 单段名字的最大字符数（超出截断；Windows 单段上限 255，这里取更保守的值）
 const MAX_SEGMENT_CHARS: usize = 120;
@@ -81,10 +82,34 @@ pub fn safe_segment(raw: &str) -> String {
     cleaned
 }
 
+/// 解析落盘根目录 —— **P2P 与跨 LAN 两条传输路径共用同一套规则**。
+///
+/// 优先级：显式配置的 `sync_dir`（去空白后非空）→ 系统「下载」目录 → 相对路径 `"Downloads"`。
+///
+/// 之所以提取到公共位置：早先跨 LAN 路径**单独回退到 `temp_dir()/clipsync`**，而配置项
+/// `sync_dir` 只在 P2P 路径生效，结果是**同一台设备按传输路径不同把文件落到两个地方**
+/// （下载目录 vs 临时目录），既不一致也难排查。
+pub fn resolve_sync_dir(
+    app: Option<&tauri::AppHandle>,
+    configured: Option<String>,
+) -> std::path::PathBuf {
+    if let Some(dir) = configured {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            return std::path::PathBuf::from(trimmed);
+        }
+    }
+    if let Some(a) = app {
+        if let Ok(dir) = a.path().download_dir() {
+            return dir;
+        }
+    }
+    std::path::PathBuf::from("Downloads")
+}
+
 #[cfg(test)]
 mod tests {
     use super::safe_segment;
-
     #[test]
     fn strips_traversal_and_absolute_paths() {
         assert_eq!(safe_segment("../../../../x.txt"), "x.txt");
