@@ -69,12 +69,21 @@ pub struct DeviceInfo {
 #[derive(Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientToServer {
-    Auth { token: String, device: DeviceInfo },
+    Auth {
+        token: String,
+        device: DeviceInfo,
+    },
     Heartbeat,
     /// 文字中继（ct = base64 密文，服务端只透传，不解密）
-    RelayText { to: String, ct: String },
+    RelayText {
+        to: String,
+        ct: String,
+    },
     /// 文件待复制通知（仅 manifest + 本机 ext_file_ep，服务端不碰字节）
-    FileNotify { manifest: serde_json::Value, ext_file_ep: String },
+    FileNotify {
+        manifest: serde_json::Value,
+        ext_file_ep: String,
+    },
 }
 
 // ---- 服务端 → 设备侧 消息 ----

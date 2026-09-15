@@ -86,10 +86,7 @@ pub fn is_valid_platform(p: &str) -> bool {
 /// 3) 否则 `Origin` 头本身为 `https://...` 时用 Origin；
 /// 4) 都没有 → Err（**仅接受 https**：TLS 是无签名模型唯一安全边界，
 ///    宁可 500 也不生成 http 更新链接）。
-pub fn effective_base(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> Result<String, String> {
+pub fn effective_base(state: &AppState, headers: &HeaderMap) -> Result<String, String> {
     if let Some(b) = &state.update_public_base {
         let b = b.trim_end_matches('/').to_string();
         if !b.is_empty() {
@@ -113,7 +110,10 @@ pub fn effective_base(
     if proto == "https" && !host.is_empty() {
         return Ok(format!("https://{host}"));
     }
-    if let Some(origin) = headers.get(axum::http::header::ORIGIN).and_then(|v| v.to_str().ok()) {
+    if let Some(origin) = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    {
         if origin.starts_with("https://") {
             return Ok(origin.trim_end_matches('/').to_string());
         }
@@ -123,7 +123,10 @@ pub fn effective_base(
 
 /// 把 manifest 中各平台 url 改写为 `<base>/update/files/<platform>/<basename>`。
 pub fn rewrite_urls(manifest: &mut Value, base: &str) {
-    let Some(platforms) = manifest.get_mut("platforms").and_then(|p| p.as_object_mut()) else {
+    let Some(platforms) = manifest
+        .get_mut("platforms")
+        .and_then(|p| p.as_object_mut())
+    else {
         return;
     };
     for (platform, entry) in platforms.iter_mut() {
@@ -237,11 +240,7 @@ pub async fn latest_json(State(state): State<Arc<AppState>>, headers: HeaderMap)
         }
     };
     rewrite_urls(&mut v, &base);
-    (
-        [(CONTENT_TYPE, "application/json")],
-        v.to_string(),
-    )
-        .into_response()
+    ([(CONTENT_TYPE, "application/json")], v.to_string()).into_response()
 }
 
 /// GET /update/files/:platform/:file —— 公开读，流式整文件返回。
@@ -361,9 +360,7 @@ pub async fn admin_upload(State(state): State<Arc<AppState>>, mut mp: Multipart)
         let field = match mp.next_field().await {
             Ok(Some(f)) => f,
             Ok(None) => break,
-            Err(e) => {
-                return err(StatusCode::BAD_REQUEST, format!("multipart error: {e}")).await
-            }
+            Err(e) => return err(StatusCode::BAD_REQUEST, format!("multipart error: {e}")).await,
         };
         let name = field.name().unwrap_or("").to_string();
         match name.as_str() {
@@ -401,11 +398,8 @@ pub async fn admin_upload(State(state): State<Arc<AppState>>, mut mp: Multipart)
                         }
                         Ok(None) => break,
                         Err(e) => {
-                            return err(
-                                StatusCode::BAD_REQUEST,
-                                format!("manifest field: {e}"),
-                            )
-                            .await
+                            return err(StatusCode::BAD_REQUEST, format!("manifest field: {e}"))
+                                .await
                         }
                     }
                 }
@@ -428,8 +422,11 @@ pub async fn admin_upload(State(state): State<Arc<AppState>>, mut mp: Multipart)
                     }
                 };
                 if !is_valid_platform(&platform) {
-                    return err(StatusCode::BAD_REQUEST, format!("unknown platform: {platform}"))
-                        .await;
+                    return err(
+                        StatusCode::BAD_REQUEST,
+                        format!("unknown platform: {platform}"),
+                    )
+                    .await;
                 }
                 let filename = match pending_filename.take() {
                     Some(f) if !f.is_empty() => f,
@@ -503,21 +500,13 @@ pub async fn admin_upload(State(state): State<Arc<AppState>>, mut mp: Multipart)
                         Ok(None) => break,
                         Err(e) => {
                             let _ = tokio::fs::remove_file(&tmp).await;
-                            return err(
-                                StatusCode::BAD_REQUEST,
-                                format!("file stream: {e}"),
-                            )
-                            .await;
+                            return err(StatusCode::BAD_REQUEST, format!("file stream: {e}")).await;
                         }
                     }
                 }
                 if let Err(e) = out.sync_all().await {
                     let _ = tokio::fs::remove_file(&tmp).await;
-                    return err(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("sync file: {e}"),
-                    )
-                    .await;
+                    return err(StatusCode::INTERNAL_SERVER_ERROR, format!("sync file: {e}")).await;
                 }
                 drop(out);
                 if let Err(e) = tokio::fs::rename(&tmp, &dst).await {
@@ -553,13 +542,11 @@ pub async fn admin_upload(State(state): State<Arc<AppState>>, mut mp: Multipart)
     // 与线上已有的 latest.json 合并：本次上传只覆盖自己涉及的平台条目与版本信息，
     // 其余平台保留。服务端 latest.json 因此成为「固定不动、按平台累积」的持久文件。
     let latest_dst = state.update_dir.join("latest.json");
-    let existing: Option<UpdateManifest> = match tokio::fs::read_to_string(&latest_dst).await {
-        Ok(s) => match serde_json::from_str::<UpdateManifest>(&s) {
-            Ok(m) => Some(m),
-            Err(_) => None, // 现有文件坏了：以本次上传为准重建，不让一次解析失败卡死发布
-        },
-        Err(_) => None,
-    };
+    let existing: Option<UpdateManifest> = tokio::fs::read_to_string(&latest_dst)
+        .await
+        .ok()
+        // 现有文件坏了：以本次上传为准重建，不让一次解析失败卡死发布
+        .and_then(|s| serde_json::from_str::<UpdateManifest>(&s).ok());
     let previous_version = existing.as_ref().map(|e| e.version.clone());
     let merged_from_existing = existing.is_some();
     let m = merge_manifest(existing, incoming);
@@ -639,13 +626,17 @@ mod tests {
 
     #[test]
     fn manifest_validation() {
-        let ok = r#"{"version":"0.1.1","platforms":{"windows-x86_64":{"url":"a.exe","sha256":"aa"}}}"#;
+        let ok =
+            r#"{"version":"0.1.1","platforms":{"windows-x86_64":{"url":"a.exe","sha256":"aa"}}}"#;
         assert!(validate_manifest(ok).is_ok());
-        let bad_platform = r#"{"version":"0.1.1","platforms":{"etc/passwd":{"url":"a","sha256":"aa"}}}"#;
+        let bad_platform =
+            r#"{"version":"0.1.1","platforms":{"etc/passwd":{"url":"a","sha256":"aa"}}}"#;
         assert!(validate_manifest(bad_platform).is_err());
-        let no_sha = r#"{"version":"0.1.1","platforms":{"windows-x86_64":{"url":"a.exe","sha256":""}}}"#;
+        let no_sha =
+            r#"{"version":"0.1.1","platforms":{"windows-x86_64":{"url":"a.exe","sha256":""}}}"#;
         assert!(validate_manifest(no_sha).is_err());
-        let no_version = r#"{"version":"","platforms":{"windows-x86_64":{"url":"a.exe","sha256":"aa"}}}"#;
+        let no_version =
+            r#"{"version":"","platforms":{"windows-x86_64":{"url":"a.exe","sha256":"aa"}}}"#;
         assert!(validate_manifest(no_version).is_err());
     }
 
@@ -707,8 +698,7 @@ mod tests {
         assert_eq!(out.platforms.len(), 2, "darwin 条目必须保留");
         assert_eq!(out.platforms["windows-x86_64"].sha256, "new-win");
         assert_eq!(
-            out.platforms["darwin-aarch64"].url,
-            "ClipSync-0.1.0.dmg",
+            out.platforms["darwin-aarch64"].url, "ClipSync-0.1.0.dmg",
             "未涉及的平台原样保留"
         );
     }
@@ -746,7 +736,10 @@ mod tests {
     fn base_requires_https() {
         let state = test_state(None);
         let mut h = HeaderMap::new();
-        h.insert(axum::http::header::HOST, "sync.example.com".parse().unwrap());
+        h.insert(
+            axum::http::header::HOST,
+            "sync.example.com".parse().unwrap(),
+        );
         // 无 https 依据 → 拒绝
         assert!(effective_base(&state, &h).is_err());
         // X-Forwarded-Proto: https → 接受
@@ -767,7 +760,10 @@ mod tests {
         );
         // UPDATE_PUBLIC_BASE 优先
         let state2 = test_state(Some("https://cdn.example.com/"));
-        assert_eq!(effective_base(&state2, &HeaderMap::new()).unwrap(), "https://cdn.example.com");
+        assert_eq!(
+            effective_base(&state2, &HeaderMap::new()).unwrap(),
+            "https://cdn.example.com"
+        );
     }
 
     fn test_state(public_base: Option<&str>) -> AppState {
@@ -806,10 +802,16 @@ mod tests {
         let mut b = Vec::new();
         let push = |b: &mut Vec<u8>, s: &str| b.extend_from_slice(s.as_bytes());
         push(&mut b, &format!("--{boundary}\r\n"));
-        push(&mut b, "Content-Disposition: form-data; name=\"platform\"\r\n\r\n");
+        push(
+            &mut b,
+            "Content-Disposition: form-data; name=\"platform\"\r\n\r\n",
+        );
         push(&mut b, &format!("{platform}\r\n"));
         push(&mut b, &format!("--{boundary}\r\n"));
-        push(&mut b, "Content-Disposition: form-data; name=\"filename\"\r\n\r\n");
+        push(
+            &mut b,
+            "Content-Disposition: form-data; name=\"filename\"\r\n\r\n",
+        );
         push(&mut b, &format!("{filename}\r\n"));
         push(&mut b, &format!("--{boundary}\r\n"));
         push(
@@ -821,15 +823,16 @@ mod tests {
         b.extend_from_slice(file_bytes);
         push(&mut b, "\r\n");
         push(&mut b, &format!("--{boundary}\r\n"));
-        push(&mut b, "Content-Disposition: form-data; name=\"manifest\"\r\n\r\n");
+        push(
+            &mut b,
+            "Content-Disposition: form-data; name=\"manifest\"\r\n\r\n",
+        );
         push(&mut b, manifest);
         push(&mut b, "\r\n");
         push(&mut b, &format!("--{boundary}--\r\n"));
         (
-            axum::http::HeaderValue::from_str(&format!(
-                "multipart/form-data; boundary={boundary}"
-            ))
-            .unwrap(),
+            axum::http::HeaderValue::from_str(&format!("multipart/form-data; boundary={boundary}"))
+                .unwrap(),
             b,
         )
     }

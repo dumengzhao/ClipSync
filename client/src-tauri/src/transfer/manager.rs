@@ -19,10 +19,10 @@
 //!   都能自愈。
 //! - 用 AES-GCM 加密通道传输剪贴板同步包（`SyncEnvelope`）。
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
-use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -57,7 +57,9 @@ use crate::device::identity::DeviceIdentity;
 use crate::device::registry::{PairedDevice, TrustLevel};
 use crate::discovery::DiscoveredPeer;
 use crate::sync::engine::{SyncEngine, SyncEvent};
-use crate::transfer::websocket::{ConfigFrame, FileChunkResponsePayload, FileFrame, MessageFrame, MessageType};
+use crate::transfer::websocket::{
+    ConfigFrame, FileChunkResponsePayload, FileFrame, MessageFrame, MessageType,
+};
 use crate::AppState;
 use std::path::PathBuf;
 
@@ -96,13 +98,22 @@ pub(crate) const OUT_QUEUE_CAPACITY: usize = 64;
 /// - `Closed`：接收端已关闭 → 连接断了。
 ///
 /// 早期文案一律写「通道已关闭」，队列满时会把排查引向错误方向。
-fn log_outgoing_dropped(peer: &str, what: &str, e: &mpsc::error::TrySendError<Outgoing>) {
-    match e {
-        mpsc::error::TrySendError::Full(_) => tracing::warn!(
-            "对端 {peer} 出站队列已满（容量 {OUT_QUEUE_CAPACITY}），{what} 被丢弃（对端消费过慢）"
-        ),
-        mpsc::error::TrySendError::Closed(_) => {
-            tracing::warn!("对端 {peer} 连接已关闭，{what} 未送达")
+/// 载荷类消息（剪贴板内容 / 可拉取清单 / 拉取请求）入队。
+///
+/// **不能 try_send 静默丢弃**：这些是实际载荷，丢了剪贴板内容就同步丢失、
+/// 丢了清单/拉取请求会出现「成功完成但 0 个文件」的假完成。队列满时等待
+/// 对端消费（背压），最多 10s——仍满视为对端卡死，放弃并记日志。
+async fn send_payload(
+    tx: &tokio::sync::mpsc::Sender<Outgoing>,
+    what: &str,
+    peer: &str,
+    msg: Outgoing,
+) {
+    match tokio::time::timeout(std::time::Duration::from_secs(10), tx.send(msg)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => tracing::debug!("对端 {peer} 已断开，{what} 未发送"),
+        Err(_) => {
+            tracing::warn!("对端 {peer} 出站队列 {what} 等待 10s 仍满，已丢弃（对端疑似卡死）")
         }
     }
 }
@@ -661,15 +672,13 @@ impl ConnectionHub {
     /// 从 map 与插入顺序队列中同时移除某条记录（拉取完成 / 取消 / 传输结束）。
     fn forget_key<T>(map: &Mutex<HashMap<String, T>>, order: &Mutex<VecDeque<String>>, key: &str) {
         map.lock().remove(key);
-        order
-            .lock()
-            .retain(|k| k != key);
+        order.lock().retain(|k| k != key);
     }
 
     /// 本地拷贝了文件/目录：生成传输 ID，展开为文件清单，向所有已连接对端广播「可拉取」。
     ///
     /// 绝对路径**只留在本端** `active_offers`，从不进网络；对端仅收到 `FileMeta` 元数据。
-    pub fn offer_local_files(&self, paths: Vec<PathBuf>) {
+    pub async fn offer_local_files(&self, paths: Vec<PathBuf>) {
         let existing: Vec<PathBuf> = paths.into_iter().filter(|p| p.exists()).collect();
         if existing.is_empty() {
             return;
@@ -754,9 +763,7 @@ impl ConnectionHub {
             has_folder,
         };
         for (id, p) in &peers {
-            if let Err(e) = p.tx.try_send(Outgoing::File(frame.clone())) {
-                log_outgoing_dropped(id, "可拉取清单", &e);
-            }
+            send_payload(&p.tx, "可拉取清单", id, Outgoing::File(frame.clone())).await;
         }
         tracing::info!(
             "已广播文件可拉取清单 {transfer_id} 给 {} 个对端",
@@ -871,11 +878,7 @@ impl ConnectionHub {
                 file_indices,
             } => {
                 // 本端是发送方：流式读取本地文件并发片
-                let offer = self
-                    .active_offers
-                    .lock()
-                    .get(&transfer_id)
-                    .cloned();
+                let offer = self.active_offers.lock().get(&transfer_id).cloned();
                 let Some(offer) = offer else {
                     tracing::warn!("收到拉取请求但本端没有该传输 {transfer_id}");
                     return;
@@ -992,24 +995,32 @@ impl ConnectionHub {
                             .collect();
                         let msg = format!("{} 个文件未能传输：{}", failed.len(), names.join("；"));
                         tracing::error!("传输 {transfer_id} {msg}");
-                        let _ = tx.try_send(Outgoing::File(FileFrame::Error {
-                            transfer_id: transfer_id.clone(),
-                            message: msg,
-                            failed_indices: failed.iter().map(|(i, _)| *i).collect(),
-                        }));
+                        send_payload(
+                            &tx,
+                            "传输失败通知",
+                            &transfer_id,
+                            Outgoing::File(FileFrame::Error {
+                                transfer_id: transfer_id.clone(),
+                                message: msg,
+                                failed_indices: failed.iter().map(|(i, _)| *i).collect(),
+                            }),
+                        )
+                        .await;
                     }
                     // 完成通知必须可见地记录失败：丢弃会让接收方只能靠空闲超时收场
-                    if let Err(e) = tx.try_send(Outgoing::File(FileFrame::Complete {
-                        transfer_id: transfer_id.clone(),
-                    })) {
-                        log_outgoing_dropped(&transfer_id, "传输完成通知", &e);
-                    }
+                    send_payload(
+                        &tx,
+                        "传输完成通知",
+                        &transfer_id,
+                        Outgoing::File(FileFrame::Complete {
+                            transfer_id: transfer_id.clone(),
+                        }),
+                    )
+                    .await;
                     // 传输结束即清理：此前只在 PullCancel 时移除，成功传输后会一直
                     // 留着原文件路径，进程不重启就持续累积。
                     hub.active_offers.lock().remove(&transfer_id);
-                    hub.active_offer_order
-                        .lock()
-                        .retain(|k| k != &transfer_id);
+                    hub.active_offer_order.lock().retain(|k| k != &transfer_id);
                     tracing::info!("传输 {transfer_id} 分片发送完毕");
                 });
             }
@@ -1047,12 +1058,15 @@ impl ConnectionHub {
                 }
             }
             FileFrame::Complete { transfer_id } => {
-                let tx_opt = self
+                // 完成即摘除条目：写盘任务收到 None 后收尾。不摘除会导致
+                // active_pulls 随成功拉取逐次泄漏，且陈旧条目会被 cancel_pull
+                // 命中——误删已经成功收到、可能已写入剪贴板的文件。
+                let ctx_opt = self
                     .active_pulls
                     .lock()
-                    .get(&transfer_id)
-                    .map(|s| s.chunk_tx.clone());
-                if let Some(ctx) = tx_opt {
+                    .remove(&transfer_id)
+                    .map(|s| s.chunk_tx);
+                if let Some(ctx) = ctx_opt {
                     let _ = ctx.send(None).await;
                 }
             }
@@ -1330,10 +1344,16 @@ impl ConnectionHub {
                 cancelled: cancelled_flag.clone(),
             },
         );
-        let _ = peer_tx.try_send(Outgoing::File(FileFrame::PullRequest {
-            transfer_id: transfer_id.clone(),
-            file_indices: (0..offer.files.len()).collect(),
-        }));
+        send_payload(
+            &peer_tx,
+            "拉取请求",
+            &offer.device_id,
+            Outgoing::File(FileFrame::PullRequest {
+                transfer_id: transfer_id.clone(),
+                file_indices: (0..offer.files.len()).collect(),
+            }),
+        )
+        .await;
         if let Some(a) = &app {
             let _ = a.emit(
                 "file-pull-start",
@@ -1349,6 +1369,7 @@ impl ConnectionHub {
             );
         }
         // 写盘任务
+        let hub_for_cleanup = self.clone();
         let engine = self.engine.clone();
         let tid = transfer_id.clone();
         let device_name = offer.device_name.clone();
@@ -1379,6 +1400,18 @@ impl ConnectionHub {
         // 声明尺寸：用于校验对端提供的 offset/data 长度，防止构造超大稀疏文件
         let declared_sizes: Vec<u64> = offer.files.iter().map(|f| f.file_size).collect();
         tauri::async_runtime::spawn(async move {
+            // 条目清理守卫：写盘任务无论从哪条路径退出（完成/取消/空闲超时/写盘
+            // 失败）都摘除 active_pulls 条目，杜绝泄漏与陈旧条目误删文件
+            struct EntryGuard<F: FnMut()>(F);
+            impl<F: FnMut()> Drop for EntryGuard<F> {
+                fn drop(&mut self) {
+                    (self.0)();
+                }
+            }
+            let tid_cleanup = tid.clone();
+            let _entry_guard = EntryGuard(|| {
+                hub_for_cleanup.active_pulls.lock().remove(&tid_cleanup);
+            });
             use tokio::io::AsyncSeekExt;
             use tokio::io::AsyncWriteExt;
             let mut written: u64 = 0;
@@ -1405,6 +1438,11 @@ impl ConnectionHub {
                 let Some(payload) = chunk else {
                     break;
                 };
+                // 用户已取消：立即停止消费分片。cancel_pull 已删除半截文件，
+                // 这里若继续写入会把刚删除的文件重新写出来（竞态）。
+                if cancelled_flag.load(Ordering::Relaxed) {
+                    break;
+                }
                 // 越界索引 / 目录条目（None）直接忽略
                 let Some(path) = targets.get(payload.file_index).and_then(|p| p.as_ref()) else {
                     continue;
@@ -1412,7 +1450,10 @@ impl ConnectionHub {
                 // offset 由对端提供：限制在声明尺寸内，避免稀疏文件与越界覆写
                 let declared = declared_sizes.get(payload.file_index).copied().unwrap_or(0);
                 let end = payload.offset.saturating_add(payload.data.len() as u64);
-                if declared > 0 && end > declared {
+                // declared==0（空文件）也必须无任何分片——之前的
+                // `declared > 0 &&` 前置条件使 0 尺寸条目完全绕过校验，
+                // 恶意对端可借此构造超大稀疏文件
+                if end > declared {
                     tracing::warn!(
                         "分片越界已丢弃 index={} offset={} len={} declared={declared}",
                         payload.file_index,
@@ -1477,6 +1518,11 @@ impl ConnectionHub {
             // 再发 complete 会把「已取消」覆盖成「已保存」。
             if cancelled_flag.load(Ordering::Relaxed) {
                 tracing::info!("拉取 {tid} 已取消，写盘任务退出（写入 {written} 字节后终止）");
+                // 复删半截文件：cancel_pull 删除后，写盘任务可能在标志可见前
+                // 又写入了个别分片，这里兜底清干净
+                for p in targets.iter().flatten() {
+                    let _ = std::fs::remove_file(p);
+                }
                 return;
             }
             if let Some(a) = &app {
@@ -1734,15 +1780,19 @@ impl ConnectionHub {
                                 peers.len()
                             );
                             for (id, p) in peers {
-                                if let Err(e) = p.tx.try_send(Outgoing::Sync(env.clone())) {
-                                    log_outgoing_dropped(&id, "剪贴板同步内容", &e);
-                                }
+                                send_payload(
+                                    &p.tx,
+                                    "剪贴板同步内容",
+                                    &id,
+                                    Outgoing::Sync(env.clone()),
+                                )
+                                .await;
                             }
                         }
                         SyncEvent::LocalFilesCopied { paths } => {
                             // 本地拷贝了文件/目录：广播「可拉取」清单给所有对端。
                             // 注意不把绝对路径外传——对端只拿到元数据，文件内容走拉取。
-                            hub.offer_local_files(paths);
+                            hub.offer_local_files(paths).await;
                         }
                         SyncEvent::RemoteClipboardApplied { .. } => {
                             // 来自对端的剪贴板更新已在本机落盘/写剪贴板，无需再转发回去
@@ -1793,101 +1843,115 @@ impl ConnectionHub {
                                     let file_share = file_share.clone();
                                     let network_key = network_key.clone();
                                     tauri::async_runtime::spawn(async move {
-                                    // 许可随任务存活，任务结束（含所有分支 return）即释放
-                                    let _permit = permit;
-                                    let ra =
-                                        sock.peer_addr().map(|a| a.to_string()).unwrap_or_default();
-                                    // 嗅探请求行：连通性探测 → 文件拉取 → 其余升级为 WS。
-                                    // 三类路径互斥（都以前缀区分），先匹配最具体的。
-                                    // 限时 5s：慢客户端只拖慢自己，不再拖垮全局。
-                                    let mut peek_buf = [0u8; 512];
-                                    let n = match tokio::time::timeout(
-                                        std::time::Duration::from_secs(5),
-                                        sock.peek(&mut peek_buf),
-                                    )
-                                    .await
-                                    {
-                                        Ok(Ok(n)) => n,
-                                        _ => 0,
-                                    };
-                                    let req_line = {
-                                        let slice = &peek_buf[..n];
-                                        if let Some(lf) =
-                                            slice.windows(2).position(|w| w == b"\r\n")
+                                        // 许可随任务存活，任务结束（含所有分支 return）即释放
+                                        let _permit = permit;
+                                        let ra = sock
+                                            .peer_addr()
+                                            .map(|a| a.to_string())
+                                            .unwrap_or_default();
+                                        // 嗅探请求行：连通性探测 → 文件拉取 → 其余升级为 WS。
+                                        // 三类路径互斥（都以前缀区分），先匹配最具体的。
+                                        // 限时 5s：慢客户端只拖慢自己，不再拖垮全局。
+                                        let mut peek_buf = [0u8; 512];
+                                        let n = match tokio::time::timeout(
+                                            std::time::Duration::from_secs(5),
+                                            sock.peek(&mut peek_buf),
+                                        )
+                                        .await
                                         {
-                                            String::from_utf8_lossy(&slice[..lf]).to_string()
-                                        } else {
-                                            String::new()
-                                        }
-                                    };
-                                    if req_line.starts_with("GET /clipsync/ping") {
-                                        // 对外文件地址连通性探测：返回本机身份 + 版本号。
-                                        // 不携带任何密钥/敏感信息（仅供探测端校验
-                                        // 「连到的就是 ClipSync、对端确实是配置里那个设备」）。
-                                        let my_id = hub.identity.id.0.clone();
-                                        let my_name = hub.identity.name.clone();
-                                        let my_ver = env!("CARGO_PKG_VERSION").to_string();
-                                        let body = serde_json::json!({
-                                            "device_id": my_id,
-                                            "device_name": my_name,
-                                            "version": my_ver,
-                                        })
-                                        .to_string();
-                                        let resp = format!(
+                                            Ok(Ok(n)) => n,
+                                            _ => 0,
+                                        };
+                                        let req_line = {
+                                            let slice = &peek_buf[..n];
+                                            if let Some(lf) =
+                                                slice.windows(2).position(|w| w == b"\r\n")
+                                            {
+                                                String::from_utf8_lossy(&slice[..lf]).to_string()
+                                            } else {
+                                                String::new()
+                                            }
+                                        };
+                                        if req_line.starts_with("GET /clipsync/ping") {
+                                            // 对外文件地址连通性探测：返回本机身份 + 版本号。
+                                            // 不携带任何密钥/敏感信息（仅供探测端校验
+                                            // 「连到的就是 ClipSync、对端确实是配置里那个设备」）。
+                                            let my_id = hub.identity.id.0.clone();
+                                            let my_name = hub.identity.name.clone();
+                                            let my_ver = env!("CARGO_PKG_VERSION").to_string();
+                                            let body = serde_json::json!({
+                                                "device_id": my_id,
+                                                "device_name": my_name,
+                                                "version": my_ver,
+                                            })
+                                            .to_string();
+                                            let resp = format!(
                                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                                             body.len(),
                                             body
                                         );
-                                        use tokio::io::AsyncWriteExt;
-                                        let mut s = sock;
-                                        let _ = s.write_all(resp.as_bytes()).await;
-                                        let _ = s.shutdown().await;
-                                        tracing::debug!("ping 探测来自 {ra}");
-                                        return;
-                                    }
-                                    if req_line.starts_with("GET /file/") {
-                                        crate::file_server::handle_file_stream(
-                                            sock,
-                                            file_share,
-                                            network_key,
+                                            use tokio::io::AsyncWriteExt;
+                                            let mut s = sock;
+                                            let _ = s.write_all(resp.as_bytes()).await;
+                                            let _ = s.shutdown().await;
+                                            tracing::debug!("ping 探测来自 {ra}");
+                                            return;
+                                        }
+                                        if req_line.starts_with("GET /file/") {
+                                            crate::file_server::handle_file_stream(
+                                                sock,
+                                                file_share,
+                                                network_key,
+                                            )
+                                            .await;
+                                            return;
+                                        }
+                                        // 握手限时：慢客户端只拖慢自己。否则持有
+                                        // 并发许可无限等待握手，64 个慢连接即可
+                                        // 占满许可，之后所有入站连接全被拒绝。
+                                        match tokio::time::timeout(
+                                            std::time::Duration::from_secs(5),
+                                            tokio_tungstenite::accept_async(sock),
                                         )
-                                        .await;
-                                        return;
-                                    }
-                                    match tokio_tungstenite::accept_async(sock).await {
-                                        Ok(ws) => {
-                                            let hub = hub.clone();
-                                            tauri::async_runtime::spawn(async move {
-                                                // 响应方握手/配对失败必须留痕：此前错误被直接
-                                                // 丢弃，对端发起的配对失败在本机日志里完全静默，
-                                                // 排查「配对失败」时无从下手。
-                                                if let Err(e) = hub
-                                                    .run_connection(
-                                                        ws,
-                                                        Role::Responder,
-                                                        "incoming".to_string(),
-                                                        "incoming".to_string(),
-                                                        ra.clone(),
-                                                        None,
-                                                    )
-                                                    .await
-                                                {
-                                                    tracing::warn!(
+                                        .await
+                                        {
+                                            // 握手超时：与其它错误同等对待，记日志后释放许可
+                                            Err(_) => {
+                                                tracing::warn!("ws accept 握手超时 (from {ra})");
+                                            }
+                                            Ok(Ok(ws)) => {
+                                                let hub = hub.clone();
+                                                tauri::async_runtime::spawn(async move {
+                                                    // 响应方握手/配对失败必须留痕：此前错误被直接
+                                                    // 丢弃，对端发起的配对失败在本机日志里完全静默，
+                                                    // 排查「配对失败」时无从下手。
+                                                    if let Err(e) = hub
+                                                        .run_connection(
+                                                            ws,
+                                                            Role::Responder,
+                                                            "incoming".to_string(),
+                                                            "incoming".to_string(),
+                                                            ra.clone(),
+                                                            None,
+                                                        )
+                                                        .await
+                                                    {
+                                                        tracing::warn!(
                                                         "incoming connection from {ra} ended: {e}"
                                                     );
-                                                }
-                                            });
-                                        }
-                                        Err(e) => {
-                                            // 记录来源地址 + 嗅探缓冲区首字节：非 WS 客户端
-                                            // （扫描器/协议不兼容的对端）能直接看出对方发的是什么。
-                                            let head = String::from_utf8_lossy(&peek_buf[..n]);
-                                            let head: String = head.chars().take(64).collect();
-                                            tracing::warn!(
+                                                    }
+                                                });
+                                            }
+                                            Ok(Err(e)) => {
+                                                // 记录来源地址 + 嗅探缓冲区首字节：非 WS 客户端
+                                                // （扫描器/协议不兼容的对端）能直接看出对方发的是什么。
+                                                let head = String::from_utf8_lossy(&peek_buf[..n]);
+                                                let head: String = head.chars().take(64).collect();
+                                                tracing::warn!(
                                                 "ws accept failed (from {ra}): {e}; head: {head:?}"
                                             );
+                                            }
                                         }
-                                    }
                                     });
                                 }
                                 Err(e) => {
@@ -2466,9 +2530,7 @@ impl ConnectionHub {
             // 记录当前已连地址，供兜底重连去重（同样只在发起方有效，
             // 此时 peer_addr 才是对端真实监听地址 host:port）。
             if matches!(role, Role::Initiator) {
-                self.connected_addrs
-                    .lock()
-                    .insert(peer_addr.clone());
+                self.connected_addrs.lock().insert(peer_addr.clone());
             }
 
             let _ = app.emit(
@@ -2619,9 +2681,13 @@ impl ConnectionHub {
                                                             if id == peer_id {
                                                                 continue;
                                                             }
-                                                            if let Err(e) = p.tx.try_send(Outgoing::Sync(relay.clone())) {
-                                                                log_outgoing_dropped(&id, "中继转发内容", &e);
-                                                            }
+                                                            send_payload(
+                                                                &p.tx,
+                                                                "中继转发内容",
+                                                                &id,
+                                                                Outgoing::Sync(relay.clone()),
+                                                            )
+                                                            .await;
                                                         }
                                                         tracing::debug!(
                                                             "中继剪贴板消息 {msg_id} 至其他 {other_count} 个对端 (ttl={})",
@@ -2945,7 +3011,8 @@ impl ConnectionHub {
         let started = std::time::Instant::now();
         let overall_deadline = started + LAN_SCAN_TIMEOUT;
         let mut rx_map = std::collections::HashMap::new(); // request_id -> (device_id, device_name, oneshot::Receiver<ConfigReply>)
-        let mut pending: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new(); // device_id -> (request_id, device_name)
+        let mut pending: std::collections::HashMap<String, (String, String)> =
+            std::collections::HashMap::new(); // device_id -> (request_id, device_name)
         for (device_id, device_name, _lg) in &candidate_devices {
             let request_id = format!(
                 "scan-{:016x}-{}",
@@ -2953,10 +3020,11 @@ impl ConnectionHub {
                 &device_id[..device_id.len().min(8)]
             );
             let (tx, rx) = tokio::sync::oneshot::channel::<ConfigReply>();
-            self.config_queries
-                .lock()
-                .insert(request_id.clone(), tx);
-            rx_map.insert(request_id.clone(), (device_id.clone(), device_name.clone(), rx));
+            self.config_queries.lock().insert(request_id.clone(), tx);
+            rx_map.insert(
+                request_id.clone(),
+                (device_id.clone(), device_name.clone(), rx),
+            );
             pending.insert(device_id.clone(), (request_id.clone(), device_name.clone()));
         }
         // 3) 发出 Query（每端各发一次；共享加密通道走 peers 表里的 tx）
@@ -3002,7 +3070,10 @@ impl ConnectionHub {
             std::collections::HashMap::new();
         for (device_id, device_name, reply) in replies {
             let (server_url, network_token) = match reply {
-                ConfigReply::HasConfig { server_url, network_token } => (server_url, network_token),
+                ConfigReply::HasConfig {
+                    server_url,
+                    network_token,
+                } => (server_url, network_token),
                 ConfigReply::NotConfigured => continue,
             };
             // 空 url + 空 token 视为「该端虽回复但实际未配置」，丢弃
@@ -3027,8 +3098,16 @@ impl ConnectionHub {
         let mut out: Vec<LanServerConfigGroup> = groups.into_values().collect();
         // 稳定排序：按首个出现的 source.device_name 字典序，方便 UI 稳定显示
         out.sort_by(|a, b| {
-            let an = a.sources.first().map(|s| s.device_name.clone()).unwrap_or_default();
-            let bn = b.sources.first().map(|s| s.device_name.clone()).unwrap_or_default();
+            let an = a
+                .sources
+                .first()
+                .map(|s| s.device_name.clone())
+                .unwrap_or_default();
+            let bn = b
+                .sources
+                .first()
+                .map(|s| s.device_name.clone())
+                .unwrap_or_default();
             an.cmp(&bn)
         });
         // 总耗时未到也没关系——已经收完；故意超时也只是提前返回已收到的
@@ -3071,7 +3150,11 @@ impl ConnectionHub {
             .get(from)
             .map(|p| p.tx.try_send(Outgoing::Config(frame)).is_ok())
             .unwrap_or(false);
-        tracing::info!("LAN 配置查询：已回复 {}（has_config={}）", from, sent && has_cfg);
+        tracing::info!(
+            "LAN 配置查询：已回复 {}（has_config={}）",
+            from,
+            sent && has_cfg
+        );
     }
 
     /// 收到 Config::Reply / NotConfigured 时调用：通过 request_id 投递到等待方。
@@ -3187,7 +3270,7 @@ mod tests {
         // 1) 模拟本机复制一个真实存在的文件 → 进入 active_offers（不进本机待拉取）
         let tmp = std::env::temp_dir().join("clipsync_echo_test.txt");
         std::fs::write(&tmp, b"hello clipsync").unwrap();
-        hub.offer_local_files(vec![tmp.clone()]);
+        hub.offer_local_files(vec![tmp.clone()]).await;
         assert!(
             !hub.active_offers.lock().is_empty(),
             "本机复制后 active_offers 应非空"

@@ -34,7 +34,10 @@ fn load_state() -> Arc<AppState> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "admin".to_string());
-    let admin_pass = match std::env::var("ADMIN_PASS").ok().map(|s| s.trim().to_string()) {
+    let admin_pass = match std::env::var("ADMIN_PASS")
+        .ok()
+        .map(|s| s.trim().to_string())
+    {
         Some(p) if p.len() >= 8 && p != "clipsync" => p,
         Some(_) => {
             eprintln!(
@@ -132,10 +135,7 @@ fn build_router(state: Arc<AppState>) -> axum::Router {
         .route("/admin", get(admin::admin_page))
         .route("/admin/static/:p", get(admin::admin_static))
         .route("/update/latest.json", get(update::latest_json))
-        .route(
-            "/update/files/:platform/:file",
-            get(update::download_file),
-        )
+        .route("/update/files/:platform/:file", get(update::download_file))
         .merge(protected)
         .with_state(state.clone())
 }
@@ -159,10 +159,13 @@ async fn serve(
         .await
         .expect("bind listen addr");
     println!("[clipsync-server] listening on {listen}");
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown)
-        .await
-        .expect("serve");
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await
+    .expect("serve");
 }
 
 #[tokio::main]
@@ -171,7 +174,8 @@ async fn main() {
     #[cfg(windows)]
     {
         if std::env::args().any(|a| a == "--service") {
-            if let Err(e) = windows_service::service_dispatcher::start("ClipSyncServer", service_main_wrapper)
+            if let Err(e) =
+                windows_service::service_dispatcher::start("ClipSyncServer", service_main_wrapper)
             {
                 eprintln!("[clipsync-server] service dispatcher error: {e}");
                 std::process::exit(1);

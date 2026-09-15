@@ -15,10 +15,10 @@ use crate::sync::engine::{SyncEngine, SyncEvent};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
+use parking_lot::Mutex;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use parking_lot::Mutex;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -329,14 +329,14 @@ const MAX_CROSS_LAN_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const RELAY_QUEUE_CAPACITY: usize = 64;
 
 /// 记录一次中继出站消息被丢弃的原因（Full = 队列满丢弃 / Closed = 连接已关闭）。
-fn log_relay_dropped(what: &str, e: &mpsc::error::TrySendError<ClientToServer>) {
-    match e {
-        mpsc::error::TrySendError::Full(_) => tracing::warn!(
-            "中继出站队列已满（容量 {RELAY_QUEUE_CAPACITY}），{what} 被丢弃（服务端消费过慢）"
-        ),
-        mpsc::error::TrySendError::Closed(_) => {
-            tracing::debug!("中继连接已关闭，{what} 未发送")
-        }
+/// 载荷类消息（剪贴板中继内容 / 文件通知）入中继队列。
+/// 不能 try_send 静默丢弃——丢了剪贴板内容就是同步丢失、丢了文件通知对端
+/// 永远看不到待拉取条目。满时等待服务端消费（背压）最多 10s，仍满视为卡死。
+async fn send_relay_payload(tx: &mpsc::Sender<ClientToServer>, what: &str, msg: ClientToServer) {
+    match tokio::time::timeout(Duration::from_secs(10), tx.send(msg)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => tracing::debug!("中继连接已关闭，{what} 未发送"),
+        Err(_) => tracing::warn!("中继出站队列 {what} 等待 10s 仍满，已丢弃（服务端疑似卡死）"),
     }
 }
 
@@ -390,7 +390,7 @@ impl ServerConn {
                     };
                     match ev {
                         SyncEvent::LocalClipboardChanged { mark, content } => {
-                            conn.route_text(&mark, &content);
+                            conn.route_text(&mark, &content).await;
                         }
                         SyncEvent::LocalFilesCopied { paths } => {
                             conn.route_files(&paths).await;
@@ -612,12 +612,7 @@ impl ServerConn {
                 // 同步到 AppState，供内嵌 HTTP 文件服务加密 / 拉取端解密复用同一个网络密钥
                 // 注意：AppState.network_key 是 std::sync::Mutex（与 ServerConn 自身那个
                 // parking_lot::Mutex 类型不同），所以这里仍需 .unwrap()
-                *self
-                    .app
-                    .state::<AppState>()
-                    .network_key
-                    .lock()
-                    .unwrap() = Some(key);
+                *self.app.state::<AppState>().network_key.lock().unwrap() = Some(key);
                 // 成功入网即清除拉黑标记（管理员恢复设备 / 误报后自愈），下次循环不再走拉黑重试分支
                 self.removed.store(false, Ordering::SeqCst);
                 self.set_status(ServerStatus::from_str(&status));
@@ -750,7 +745,7 @@ impl ServerConn {
     }
 
     /// 本机文字变化 → 对跨 LAN 已启用节点做中继。
-    fn route_text(&self, mark: &SyncMark, content: &ClipboardContent) {
+    async fn route_text(&self, mark: &SyncMark, content: &ClipboardContent) {
         if self.status() != ServerStatus::Active {
             return;
         }
@@ -774,28 +769,31 @@ impl ServerConn {
                     continue;
                 }
             };
-            let mut rng = rand::thread_rng();
-            let mut nonce = [0u8; NONCE_SIZE];
-            rng.fill(&mut nonce);
-            let cipher = match encrypt(&key, &nonce, &plaintext) {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!("relay_text 加密失败: {e}");
-                    continue;
-                }
+            // rng（ThreadRng，!Send）必须在 await 前析构，故置于独立作用域
+            let ct = {
+                let mut rng = rand::thread_rng();
+                let mut nonce = [0u8; NONCE_SIZE];
+                rng.fill(&mut nonce);
+                let cipher = match encrypt(&key, &nonce, &plaintext) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!("relay_text 加密失败: {e}");
+                        continue;
+                    }
+                };
+                let mut blob = Vec::with_capacity(NONCE_SIZE + cipher.len());
+                blob.extend_from_slice(&nonce);
+                blob.extend_from_slice(&cipher);
+                B64.encode(blob)
             };
-            let mut blob = Vec::with_capacity(NONCE_SIZE + cipher.len());
-            blob.extend_from_slice(&nonce);
-            blob.extend_from_slice(&cipher);
-            let ct = B64.encode(blob);
             let msg = ClientToServer::RelayText {
                 to: n.device_id.clone(),
                 ct,
             };
-            if let Some(tx) = self.ws_tx.lock().as_ref() {
-                if let Err(e) = tx.try_send(msg) {
-                    log_relay_dropped("剪贴板中继内容", &e);
-                }
+            // Sender 先克隆再 await：不能拿着 MutexGuard 跨 await（future 会变 !Send）
+            let tx_clone = self.ws_tx.lock().as_ref().cloned();
+            if let Some(tx) = tx_clone {
+                send_relay_payload(&tx, "剪贴板中继内容", msg).await;
             }
         }
     }
@@ -819,10 +817,9 @@ impl ServerConn {
             manifest,
             ext_file_ep: cfg.ext_file_ep.clone(),
         };
-        if let Some(tx) = self.ws_tx.lock().as_ref() {
-            if let Err(e) = tx.try_send(msg) {
-                log_relay_dropped("文件通知", &e);
-            }
+        let tx_clone = self.ws_tx.lock().as_ref().cloned();
+        if let Some(tx) = tx_clone {
+            send_relay_payload(&tx, "文件通知", msg).await;
         }
     }
 
@@ -830,9 +827,7 @@ impl ServerConn {
     /// 取消标记是「尽力而为」的集合：登记后即使该拉取已结束也无副作用，由
     /// 下载循环收尾时清除；条目极小，无需淘汰策略。
     pub fn cancel_cross_pull(&self, pull_id: &str) -> bool {
-        self.cross_pull_cancel
-            .lock()
-            .insert(pull_id.to_string())
+        self.cross_pull_cancel.lock().insert(pull_id.to_string())
     }
 
     /// 跨 LAN 拉取：按发送方 device_id 优先走内网直连，回退 ext_file_ep。
@@ -951,9 +946,7 @@ impl ServerConn {
             // 未持密钥的同网段主机无法拉取共享文件）。密钥未就绪则为空串，
             // 对端会以 401 拒绝——这正是期望行为（无密钥不该能取文件）。
             let auth = {
-                let key = *self
-                    .network_key
-                    .lock();
+                let key = *self.network_key.lock();
                 key.map(|k| crate::crypto::file_auth::auth_token(&k, &hash))
                     .unwrap_or_default()
             };
@@ -999,8 +992,9 @@ impl ServerConn {
                 match chosen {
                     Some(c) => c,
                     None => {
-                        return Err(last_err
-                            .unwrap_or_else(|| anyhow::anyhow!("所有拉取地址均不可达")));
+                        return Err(
+                            last_err.unwrap_or_else(|| anyhow::anyhow!("所有拉取地址均不可达"))
+                        );
                     }
                 }
             };

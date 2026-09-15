@@ -86,7 +86,11 @@ pub fn issue_session(key: &str, user: &str) -> String {
         iat: now,
         exp: now + SESSION_TTL as usize,
     };
-    let header_json = serde_json::to_string(&JwtHeader { alg: "HS256", typ: "JWT" }).expect("jwt header");
+    let header_json = serde_json::to_string(&JwtHeader {
+        alg: "HS256",
+        typ: "JWT",
+    })
+    .expect("jwt header");
     let payload_json = serde_json::to_string(&claims).expect("jwt payload");
     let header_b64 = b64url_encode(header_json.as_bytes());
     let payload_b64 = b64url_encode(payload_json.as_bytes());

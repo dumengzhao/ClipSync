@@ -29,13 +29,10 @@ pub async fn admin_ws(
     ws.on_upgrade(move |socket| handle_admin(socket, state, net_id))
 }
 
-async fn handle_admin(
-    socket: axum::extract::ws::WebSocket,
-    state: Arc<AppState>,
-    net_id: String,
-) {
+async fn handle_admin(socket: axum::extract::ws::WebSocket, state: Arc<AppState>, net_id: String) {
     let (mut sender, mut receiver) = socket.split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    // 有界队列：管理页挂起不消费时丢弃旧快照，防服务端内存无上限增长
+    let (tx, mut rx) = mpsc::channel::<String>(64);
     let tx = Arc::new(tx);
     state.register_admin_ws(&net_id, tx.clone());
     // 连接即推一次当前快照

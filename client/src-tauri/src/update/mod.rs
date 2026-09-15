@@ -309,8 +309,7 @@ pub async fn download_update(
         let server_url = state.config.lock().server_url.clone();
         update_base_from_server_url(&server_url)
     };
-    let expected = expected_base
-        .ok_or_else(|| "未配置服务端地址，无法校验更新来源".to_string())?;
+    let expected = expected_base.ok_or_else(|| "未配置服务端地址，无法校验更新来源".to_string())?;
     let target = reqwest::Url::parse(&url).map_err(|e| format!("更新地址非法: {e}"))?;
     let allowed = reqwest::Url::parse(&expected).map_err(|e| format!("服务端地址非法: {e}"))?;
     if target.scheme() != allowed.scheme()
@@ -336,10 +335,8 @@ pub async fn download_update(
     // 每次下载使用**独占的随机目录**。此前是固定的 `temp/clipsync-update` +
     // 可预测文件名，本机其它进程可以预置同名文件/符号链接，配合「先校验后安装」
     // 的时序做替换（TOCTOU）。
-    let dir: PathBuf = std::env::temp_dir().join(format!(
-        "clipsync-update-{}",
-        uuid::Uuid::new_v4().simple()
-    ));
+    let dir: PathBuf =
+        std::env::temp_dir().join(format!("clipsync-update-{}", uuid::Uuid::new_v4().simple()));
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| format!("创建临时目录失败: {e}"))?;
