@@ -15,6 +15,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -146,7 +147,13 @@ pub fn rewrite_urls(manifest: &mut Value, base: &str) {
     }
 }
 
-/// 校验 manifest 结构：version 非空、platforms 非空、键在白名单内、每项含 url+sha256。
+/// 校验 manifest 结构：version 非空、platforms 非空、键在白名单内、每项含 url。
+///
+/// **`sha256` 允许为空**：哈希由服务端在落盘时自行计算并覆盖（见 `admin_upload`）。
+/// 早先要求前端提供，导致管理页必须用浏览器 Web Crypto —— 而 `crypto.subtle` 只在
+/// 安全上下文（https / localhost）存在，用 `http://<公网IP>/admin` 打开时直接报
+/// 「当前环境不支持 Web Crypto」，发布功能完全不可用。
+/// 由服务端算还有个好处：哈希必然对应**实际存盘的那份字节**，比前端算的更权威。
 pub fn validate_manifest(raw: &str) -> Result<UpdateManifest, String> {
     let m: UpdateManifest =
         serde_json::from_str(raw).map_err(|e| format!("manifest invalid: {e}"))?;
@@ -162,9 +169,6 @@ pub fn validate_manifest(raw: &str) -> Result<UpdateManifest, String> {
         }
         if e.url.trim().is_empty() {
             return Err(format!("platform {p}: url required"));
-        }
-        if e.sha256.trim().is_empty() {
-            return Err(format!("platform {p}: sha256 required"));
         }
     }
     Ok(m)
@@ -353,7 +357,8 @@ pub async fn admin_upload(State(state): State<Arc<AppState>>, mut mp: Multipart)
     let mut pending_platform: Option<String> = None;
     let mut pending_filename: Option<String> = None;
     // (platform, filename, size)
-    let mut uploaded: Vec<(String, String, u64)> = Vec::new();
+    // (platform, filename, size, sha256_hex)
+    let mut uploaded: Vec<(String, String, u64, String)> = Vec::new();
     let mut total: u64 = 0;
 
     loop {
@@ -470,12 +475,16 @@ pub async fn admin_upload(State(state): State<Arc<AppState>>, mut mp: Multipart)
                     }
                 };
                 let mut size: u64 = 0;
+                // 边收边算 SHA-256：哈希必须对应**实际落盘的那份字节**，
+                // 因此由服务端算，不再依赖前端（浏览器 Web Crypto 仅安全上下文可用）。
+                let mut hasher = Sha256::new();
                 let mut f = field;
                 loop {
                     match f.chunk().await {
                         Ok(Some(c)) => {
                             size += c.len() as u64;
                             total += c.len() as u64;
+                            hasher.update(&c);
                             if total > max_total {
                                 drop(out);
                                 let _ = tokio::fs::remove_file(&tmp).await;
@@ -517,7 +526,7 @@ pub async fn admin_upload(State(state): State<Arc<AppState>>, mut mp: Multipart)
                     )
                     .await;
                 }
-                uploaded.push((platform, filename, size));
+                uploaded.push((platform, filename, size, hex::encode(hasher.finalize())));
             }
             _ => {
                 // 未知字段：读掉避免连接挂起
@@ -549,7 +558,14 @@ pub async fn admin_upload(State(state): State<Arc<AppState>>, mut mp: Multipart)
         .and_then(|s| serde_json::from_str::<UpdateManifest>(&s).ok());
     let previous_version = existing.as_ref().map(|e| e.version.clone());
     let merged_from_existing = existing.is_some();
-    let m = merge_manifest(existing, incoming);
+    let mut m = merge_manifest(existing, incoming);
+    // 用服务端自算的哈希覆盖清单里对应平台的 sha256：
+    // 前端传来的值一律不作数（浏览器端可能算错，也可能根本算不了——见 validate_manifest 注释）。
+    for (platform, _filename, _size, digest) in &uploaded {
+        if let Some(entry) = m.platforms.get_mut(platform) {
+            entry.sha256 = digest.clone();
+        }
+    }
 
     let pretty = match serde_json::to_string_pretty(&m) {
         Ok(s) => s,
@@ -588,7 +604,7 @@ pub async fn admin_upload(State(state): State<Arc<AppState>>, mut mp: Multipart)
             "previous_version": previous_version,
             "merged": merged_from_existing,
             "platforms": platforms,
-            "uploaded": uploaded.iter().map(|(p, f, s)| json!({
+            "uploaded": uploaded.iter().map(|(p, f, s, _h)| json!({
                 "platform": p, "filename": f, "size": s
             })).collect::<Vec<_>>(),
         })
@@ -632,9 +648,13 @@ mod tests {
         let bad_platform =
             r#"{"version":"0.1.1","platforms":{"etc/passwd":{"url":"a","sha256":"aa"}}}"#;
         assert!(validate_manifest(bad_platform).is_err());
+        // sha256 允许为空：哈希由服务端落盘时计算并覆盖（浏览器 Web Crypto 仅安全上下文可用）
         let no_sha =
             r#"{"version":"0.1.1","platforms":{"windows-x86_64":{"url":"a.exe","sha256":""}}}"#;
-        assert!(validate_manifest(no_sha).is_err());
+        assert!(validate_manifest(no_sha).is_ok());
+        // url 仍必须提供
+        let no_url = r#"{"version":"0.1.1","platforms":{"windows-x86_64":{"url":"","sha256":""}}}"#;
+        assert!(validate_manifest(no_url).is_err());
         let no_version =
             r#"{"version":"","platforms":{"windows-x86_64":{"url":"a.exe","sha256":"aa"}}}"#;
         assert!(validate_manifest(no_version).is_err());
@@ -1099,8 +1119,16 @@ mod tests {
         let raw = std::fs::read_to_string(state.update_dir.join("latest.json")).unwrap();
         let m: UpdateManifest = serde_json::from_str(&raw).unwrap();
         assert_eq!(m.platforms.len(), 2, "两个平台都应留在 manifest 里");
-        assert_eq!(m.platforms["windows-x86_64"].sha256, "win-sha");
-        assert_eq!(m.platforms["darwin-aarch64"].sha256, "mac-sha");
+        // sha256 由服务端按**实际落盘内容**自算并覆盖（manifest 里前端提供的 "win-sha"/"mac-sha" 不作数）。
+        // 下面两个值分别是 sha256(b"win-bytes") 与 sha256(b"mac-bytes")。
+        assert_eq!(
+            m.platforms["windows-x86_64"].sha256,
+            "178ed8b6329d27f975e0f095ccbb31bc244efbf892dbaff1ba7b5fc0b847caf9"
+        );
+        assert_eq!(
+            m.platforms["darwin-aarch64"].sha256,
+            "daf3b7dea44a6ce63b987f3214ae5fb0c3f3c57fdd2a6c50467cea2aaae83001"
+        );
         assert_eq!(m.notes, "mac", "描述以最后一次上传为准");
 
         // 公开读：两个平台的 url 都被改写

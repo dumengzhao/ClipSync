@@ -42,8 +42,10 @@ impl Hub {
     }
     /// 向某设备发应用层消息（自动包装为 OutMsg::App）；返回是否成功（连接存在且未断开）。
     ///
-    /// 用 `try_send`：Hub 的调用点都是同步上下文（不能 await），且队列满意味着
-    /// 该客户端消费不过来——这时丢弃本条比无限堆积更安全（配合有界队列做背压）。
+    /// 用 `try_send`：只适用于**通知/快照类**消息（Welcome、Error、激活状态、
+    /// 节点列表快照——过时即失效，且下一次变更会立即重发）。
+    /// **载荷类消息（中继的剪贴板内容、文件通知）必须用 `send_payload`**：
+    /// 它们承载实际数据，队列满时丢弃等于「静默丢一次同步」。
     pub fn send(&self, device_id: &str, msg: ServerToClient) -> bool {
         let guard = self.conns.lock().unwrap();
         if let Some((_, tx)) = guard.get(device_id) {
@@ -51,4 +53,33 @@ impl Hub {
         }
         false
     }
+
+    /// 向某设备投递**载荷类**消息：队列满时等待消费（背压），超时才放弃并记日志。
+    ///
+    /// 此前中继剪贴板/文件通知走 `try_send` 且**丢弃返回值**——队列满（客户端卡住）
+    /// 时对端完全收不到，也没有任何日志，表现为「偶发不同步，查无痕迹」。
+    pub async fn send_payload(&self, device_id: &str, msg: ServerToClient) -> bool {
+        // 锁内只取 tx 的克隆，绝不跨 await 持锁（std Mutex 跨 await 会阻塞整个 runtime）
+        let tx = {
+            let guard = self.conns.lock().unwrap();
+            match guard.get(device_id) {
+                Some((_, tx)) => tx.clone(),
+                None => return false,
+            }
+        };
+        match tokio::time::timeout(PAYLOAD_SEND_TIMEOUT, tx.send(OutMsg::App(msg))).await {
+            Ok(Ok(())) => true,
+            Ok(Err(_)) => false,
+            Err(_) => {
+                eprintln!(
+                    "[clipsync-server] 设备 {device_id} 出站队列等待 {}s 仍满，本条载荷已丢弃（客户端疑似卡死）",
+                    PAYLOAD_SEND_TIMEOUT.as_secs()
+                );
+                false
+            }
+        }
+    }
 }
+
+/// 载荷类消息的投递超时：与客户端侧 `send_payload` 的语义一致（队列满→背压→超时放弃）。
+const PAYLOAD_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);

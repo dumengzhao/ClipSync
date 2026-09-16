@@ -158,7 +158,7 @@ impl AppState {
     }
 
     /// 文字中继门控：源与目标均须 enabled=true，且跨 lan_group（同 LAN 走直连不经服务端）。
-    pub fn relay_text(&self, net_id: &str, from_dev: &str, to: &str, ct: &str, tx: &Tx) {
+    pub async fn relay_text(&self, net_id: &str, from_dev: &str, to: &str, ct: &str, tx: &Tx) {
         let can_relay = {
             let nets = self.networks.lock().unwrap();
             let net = match nets.iter().find(|n| n.id == net_id) {
@@ -199,17 +199,22 @@ impl AppState {
         if !can_relay {
             return;
         }
-        self.hub.send(
-            to,
-            ServerToClient::RelayText {
-                from: from_dev.to_string(),
-                ct: ct.to_string(),
-            },
-        );
+        // 载荷类消息：队列满时等消费（背压），绝不 try_send 静默丢弃。
+        // 此前用 hub.send（try_send 且丢弃返回值）→ 队列满时对端收不到中继内容，
+        // 日志里也毫无痕迹（「偶发不同步，查无痕迹」）。
+        self.hub
+            .send_payload(
+                to,
+                ServerToClient::RelayText {
+                    from: from_dev.to_string(),
+                    ct: ct.to_string(),
+                },
+            )
+            .await;
     }
 
     /// 文件通知：仅向其它已启用节点广播（manifest + 源 ext_file_ep），服务端不存字节。
-    pub fn file_notify(
+    pub async fn file_notify(
         &self,
         net_id: &str,
         from_dev: &str,
@@ -254,9 +259,13 @@ impl AppState {
             };
             (targets, msg)
         };
-        for t in targets {
-            self.hub.send(&t, msg.clone());
-        }
+        // 并发投递：串行 await 会让单个卡死客户端拖慢所有其它设备（与客户端侧
+        // broadcast_payload 同一教训）。文件通知是载荷，满了要背压等待而非静默丢弃
+        //（丢了它，对端永远看不到「待拉取」条目）。
+        let futs = targets
+            .iter()
+            .map(|t| self.hub.send_payload(t, msg.clone()));
+        futures::future::join_all(futs).await;
     }
 
     /// 设备断开：标记 offline，广播 nodes_update（仅含 enabled 在线节点）。
@@ -467,5 +476,33 @@ impl AppState {
             Some(n) => n.removed_devices.clone(),
             None => vec![],
         }
+    }
+
+    /// 彻底删除某设备的记录：从黑名单永久移除，并清掉该 id 在节点表里的任何残留。
+    ///
+    /// 与 [`restore_device`](Self::restore_device) 的区别在**语义**：
+    /// - 「恢复」= 解除拉黑，设备可重新配对入网 —— 用于误删、临时移除；
+    /// - 「彻底删除」= 清理这条记录 —— 用于设备已废弃、换机、同一台机器换了 device_id
+    ///   留下的旧身份。它同时清掉可能残留的节点条目，避免设备列表里永久挂着一个
+    ///   「离线」的幽灵设备（服务端本就不清理离线节点）。
+    pub fn purge_device(&self, net_id: &str, dev_id: &str) -> bool {
+        let existed = {
+            let mut nets = self.networks.lock().unwrap();
+            let net = match nets.iter_mut().find(|n| n.id == net_id) {
+                Some(n) => n,
+                None => return false,
+            };
+            let before_removed = net.removed_devices.len();
+            net.removed_devices.retain(|r| r.device_id != dev_id);
+            let before_nodes = net.nodes.len();
+            net.nodes.retain(|n| n.device_id != dev_id);
+            net.removed_devices.len() != before_removed || net.nodes.len() != before_nodes
+        };
+        if !existed {
+            return false;
+        }
+        self.save().ok();
+        self.broadcast_nodes_update(net_id);
+        true
     }
 }
