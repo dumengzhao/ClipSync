@@ -6,12 +6,12 @@
 
 ## 应用简介
 
-ClipSync 是跨平台剪贴板同步工具，基于 Tauri v2 + Rust，支持 Windows / macOS / Linux 三端文本、图片、文件实时同步。核心亮点是文件延迟渲染（粘贴时才传输），端到端加密。
+ClipSync 是跨平台剪贴板同步工具，基于 Tauri v2 + Rust，支持 Windows / macOS / Linux 三端文本、图片、文件实时同步，端到端加密。文件走「清单通告 + 按需拉取」：复制方只广播元数据，接收方拉取时才传字节（默认 1 MiB 以下自动拉取，以上等用户点）。**OS 级延迟渲染（IStream / NSPasteboardItemDataProvider）尚未实现**，当前用真实文件路径写入剪贴板。
 
 - **连接模式**：默认 P2P 直连（客户端监听 20071）；并提供一个**可选的自建中继服务**（`server/`，用于跨 NAT 转发信令/文本/文件通知）。中继与客户端自动更新管理合建在同一进程（见更新方案）。
 - **仓库**：https://github.com/dumengzhao/ClipSync
 - **许可**：MIT
-- **当前阶段**：外壳 + 中继 server 已可用；核心同步链路（阶段一 MVP）仍在实现中。
+- **当前阶段**：外壳、中继 server、核心同步链路（三平台剪贴板、P2P 加密通道、SPAKE2 配对、mDNS 发现、文件按需拉取、跨 LAN 中继、无签名自更新）均已实现并在实机验证；仍缺 OS 级延迟渲染与剪贴板历史。
 
 ## 仓库结构
 
@@ -27,13 +27,18 @@ ClipSync/
 │   │   │   ├── crypto/       # AES-GCM + X25519 + SPAKE2
 │   │   │   ├── sync/         # 同步引擎 + 防回环 + Lamport 时钟
 │   │   │   ├── device/ config/ cache/ update/ obs/
+│   │   │   ├── server_conn.rs # 跨 LAN 中继客户端（鉴权 + 网络密钥 + 拉取选路）
+│   │   │   ├── file_server.rs # 复用 20071 的跨 LAN 文件直取端点（GET /file/<hash>）
+│   │   │   ├── file_share.rs  # 已复制文件登记表（hash → 本地路径）
+│   │   │   ├── outbox.rs      # 有界队列的载荷投递（背压语义，P2P/中继共用）
+│   │   │   ├── log_viewer.rs  # 实时日志窗口（动态建窗 + tail）
 │   │   │   ├── error.rs      # thiserror 类型化错误
 │   │   │   ├── lib.rs        # 应用入口 + 托盘/窗口逻辑
 │   │   │   └── tauri_cmd.rs  # 前端可调用命令
 │   │   ├── Cargo.toml
 │   │   └── tauri.conf.json
 │   └── package.json
-├── server/             # 中继服务 + 客户端更新管理（Rust axum，已实现并部署）
+├── server/             # 中继服务 + 客户端更新管理（Rust axum，已实现；产物已构建待部署）
 │   ├── src/            # main / hub / ws / admin / admin_ws / crypto / models / state / storage
 │   ├── static/         # 内嵌管理页
 │   ├── UPDATE_MODULE_PLAN.md  # 无签名自托管更新方案
@@ -80,43 +85,24 @@ ClipSync/
 - ✅ **macOS Keychain 集成**：`crypto/keystore.rs` 实际可读写
 - ✅ **配置结构**：`AppConfig` 含默认窗口宽高字段；存储已迁移到用户目录 `~/ClipSync`（`03dc866` 配置 / `d46d3d0` 配对设备）
 
-## 自动更新（方案已定，待实现）
+## 自动更新（已实现）
 
 - **方案**：无签名自托管。详见 `server/UPDATE_MODULE_PLAN.md`（commit `d4d5568` 起）。
 - 中继 server 同时托管更新：`GET /update/latest.json` + `GET /update/files/:platform/:file`（公开读），`POST /api/admin/update`（admin 鉴权上传）。
-- **客户端**：因 Tauri 内置 `updater` 插件**强制签名、无法关闭**，改为**自写更新器**（`check_update` / `download_update` / `install_update` + SHA256 完整性校验）。计划移除 `tauri.conf.json` 的 `updater` 插件（当前仍在，待删）。
+- **客户端**：因 Tauri 内置 `updater` 插件**强制签名、无法关闭**，改为**自写更新器**（`check_update` / `download_update` / `install_update` + SHA256 完整性校验）。`tauri.conf.json` 的 `updater` 插件**已移除**。
+- **`install_update` 的参数绑定**：只接受 `AppState.pending_update` 里记录的（路径, sha256）——即本进程本次下载并校验通过的包，且启动前**复算哈希**。绝不可放宽为「接受前端传入的任意路径」：那等于给渲染器一个拉任意程序并退出主进程的入口。
 - **信任模型**：自托管，信任锚 = 用户自己的中继服务器 + TLS；**不做 ed25519 签名**。更新地址必须取自用户配置的 relay 地址，不硬编码作者服务器。
 - 因此 `tauri build` 不再需要 `TAURI_SIGNING_PRIVATE_KEY`（签名密钥生成脚本 `scripts/generate-update-key.sh` 当前已无用）。
 
-## 未实现功能（stub 占位）
+## 功能现状与剩余未实现项
 
-> 以下按 development-plan 的阶段划分，未包含上面「已实现」里的外壳/中继增强。核心同步链路仍待实现。
+### 已实现（曾经列在本节「stub 占位」里的项，均已完成）
+三平台剪贴板读写与监听、WebSocket 单通道（信令 + 分片复用）、手动地址连接、SPAKE2 配对、同步引擎与防回环（内容哈希 + Lamport）、mDNS 自动发现、设备列表 UI、文件完整传输（边读边发 + 落盘平铺）、图片同步、流式传输、LRU + TTL 文件缓存（秒传）、跨 LAN 中继（文本/文件通知）、实时日志窗口、无签名自更新。
 
-### 阶段一 MVP（最高优先级）
-- ❌ 剪贴板读写与监听（三平台 `ClipboardProvider` 实现都是 stub）
-- ❌ WebSocket 单通道（信令 + 文件分片复用）
-- ❌ 手动地址连接
-- ❌ SPAKE2 设备配对流程
-- ❌ 同步引擎协调逻辑
-- ❌ 防回环标记读写
-- ❌ Tauri 命令实际逻辑（`get_device_id` / `get_paired_devices` 返回占位数据）
-
-### 阶段二
-- ❌ mDNS 自动发现
-- ❌ 设备列表 UI
-- ❌ 文件完整传输
-- ❌ 图片同步
-- ❌ 历史记录
-
-### 阶段三/四/五（延迟渲染）
-- ❌ Windows IStream + IDataObject
-- ❌ macOS NSPasteboardItemDataProvider
-- ❌ Linux X11/Wayland 延迟渲染
-- ❌ 文件流式传输
-- ❌ LRU 缓存
-
-### 阶段六
-- 🟡 自动更新：方案已定（无签名自托管），服务端路由 + 客户端自写更新器待实现（见上）
+### 仍未实现
+- ❌ **OS 级延迟渲染**：Windows `IStream` + `IDataObject`、macOS `NSPasteboardItemDataProvider`、Linux X11/Wayland 延迟写入（`clipboard/linux.rs` 的延迟写路径目前是 `bail!`）。当前实现是「真实路径 + CF_HDROP / 真实文件」，功能可用但不是延迟渲染。
+- ❌ **剪贴板历史记录**：只有「当前剪贴板 + 待拉取清单」，没有历史列表与检索。
+- 🟡 服务端产物已构建但**尚未部署**（见「当前待办」）。
 
 ## 开发命令
 
@@ -143,6 +129,12 @@ RUSTC_BOOTSTRAP=1 package.sh                   # 产出 server/dist/clipsync-ser
 
 Rust 工具链由 `rust-toolchain.toml` 自动锁定为 stable（MSRV 1.85）。
 
+**CI 门禁**（`.github/workflows/ci.yml`，三平台矩阵 ubuntu-22.04 / macos-14 / windows-latest）：
+`cargo fmt --all -- --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test --all --all-features`、`npm run lint`。改完先本地跑一遍 `scripts/local-ci.sh`。
+
+**已知环境限制**：Windows 本机跑不动客户端单测——`cargo test --lib` 无论 debug 还是 release 都以
+`0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND` 退出（测试进程加载失败，与应用本身无关）。要真实执行客户端单测，靠 CI 或 Linux/macOS 环境；本机只能做到 `cargo check --all-targets`（编译验证）。
+
 ## 开发要求
 
 ### 必须遵守
@@ -151,6 +143,18 @@ Rust 工具链由 `rust-toolchain.toml` 自动锁定为 stable（MSRV 1.85）。
 - **错误处理**：对外 API 用 `thiserror`，内部可用 `anyhow`；禁止 `unwrap()` / `expect()` 在非测试代码中
 - **commit message** 遵循 Conventional Commits（`feat:` / `fix:` / `refactor:` 等）
 - **PR 前运行** `scripts/local-ci.sh` 确保通过 CI 检查
+
+### 安全与架构约定（改代码前必读）
+这些都是踩过坑之后定下的，改动时不要绕过：
+- **密钥不进渲染器**：本机 `network_token` 在 `get_config` 里换成哨兵 `__clipsync_token_unchanged__`（`set_config` 见哨兵即保持现值）；「局域网配置复制」返回的是脱敏摘要（`group_id` + 掩码），明文只存 Rust 侧缓存（TTL 300s、取用即消费），由 `apply_lan_server_config(group_id)` 在后端应用。
+- **配置写入走单一入口**：所有「写配置」必须经 `tauri_cmd::apply_config`（校验 → 落盘 → 同步 mDNS/自启/手动地址簿/服务端重连），别另写一份。命令参数（路径/URL/地址）一律视为不可信。
+- **命令参数绑定信任边界**：`install_update` 只认本进程下载记录（路径 + 复算 sha256）；`probe_ext_file_ep` / `ext_file_ep` 只用 `server_conn::ext_file_ep_is_valid` 认可的 `host[:port]` 形态。
+- **载荷必须走背压**：剪贴板内容/文件清单/拉取请求等载荷用 `crate::outbox::send_payload`（满队列等待 + 超时）；只有心跳/通知类控制消息可 `try_send` 丢弃。**广播绝不写 `for … await`**（用 `manager::broadcast_payload` 并发，单个卡死对端才能不拖累其它对端）。
+- **关键信号不用有界队列**：断连走 `Peer.close: Arc<Notify>`，不要用 `try_send(Outgoing::Close)`（队列满即静默失效）。
+- **限速的键用纯 IP**（`IP:port` 每次连接都不同 → 永不累积 → 形同虚设）。
+- **对不可信输入**：字符串截取用 `chars().take(n)`（禁用 `&s[..n]`，非 ASCII 会 panic）；超时给**总时限**（`timeout_at`）而非单次 IO 限时；Windows 剪贴板扫描以 `GlobalSize` 为界（NUL 终结不可信）；对端可控字符串进日志前过 `obs::logging::log_safe`。
+- **上限类配置必须真的被读**：`max_file_size_mb` / `max_image_size_mb` 曾长期是纯展示字段（全仓零引用），新增此类配置要同时写清读写点。
+- **CSP 非 null**：前端新增内联脚本/外部资源前先确认 CSP（`connect-src` 已含 `ipc:` 与 `http://ipc.localhost`），改完必须实测 IPC 与渲染。
 
 ### 签名约定
 - **不购买付费证书**：不上架 App Store，不买 Apple Developer ID，不买 Windows EV 证书
@@ -169,7 +173,7 @@ Rust 工具链由 `rust-toolchain.toml` 自动锁定为 stable（MSRV 1.85）。
 - **Tauri v2**（非 v1）：tray-icon 内置，image-png feature 需显式启用
 - **objc2 + icrate**（非 objc）：macOS AppKit 绑定，强类型 + 引用计数安全
 - **mdns-sd**（非 mdns crate）：纯 Rust，无 C 依赖
-- **SPAKE2 配对**：防中间人，配对码 6 位数字 10 分钟有效
+- **SPAKE2 配对**：配对码是 **12 位 base32（60 bit）常驻值**（每台设备一个，首配对时由发起方输入「对端界面上显示的码」；重连走 link secret 不再用它）。曾用 6 位数字：确认标签是会话密钥的确定性函数，**谁先发标签谁就把低熵口令暴露成可离线穷举的 oracle**，故现在 (a) 确认必须**有序**——应答方先核对、通过后才出证，不匹配只回 Reject；(b) 失败限速按**纯 IP** 指数退避（`IP:port` 每次连接都变，等于不限速）。
 - **Lamport 时钟**：不依赖系统时钟解决多设备冲突
 - **BLAKE3**（非 SHA-256）：文件哈希，性能更好
 - **自建中继 server（Rust axum + rustls）**：与客户端更新管理合建同一进程；纯 Rust 无 C 依赖，可交叉编译为 Linux musl 静态二进制；20070 中继 / 20071 客户端 P2P
@@ -187,14 +191,15 @@ Rust 工具链由 `rust-toolchain.toml` 自动锁定为 stable（MSRV 1.85）。
 
 ## 当前待办
 
-下一步应实现**阶段一 MVP** 的核心同步链路：
+核心同步链路已完成，剩余事项按优先级：
 
-1. 用 `arboard` 实现文本读写与监听（三平台）
-2. 防回环标记读写（自定义 MIME 格式）
-3. WebSocket 信令通道（tokio-tungstenite）
-4. 手动地址连接 UI
-5. SPAKE2 设备配对最简流程
-6. 同步引擎协调：监听 -> 防回环 -> 加密 -> 发送 -> 对端接收 -> 写入
+1. **部署服务端**：`server/dist/clipsync-server-linux/` 已构建（scp + `install.sh`），线上仍是旧逻辑。
+   部署前先确认 `ADMIN_PASS` 不是默认值（新版本会拒绝弱口令启动）。
+2. **提交并推一次 CI**：客户端单测在本机不可执行（见上），推上去让三平台矩阵真实跑一遍。
+3. **版本与安装包**：0.2.0 之后有一批**破坏性**变更（配对码格式、握手确认顺序、CSP、大小上限生效），
+   发布前决定新版本号并重打 NSIS 包（`cd client && npx tauri build`，仅发 NSIS）。
+4. **OS 级延迟渲染**（阶段三/四/五）：Windows `IStream`/`IDataObject`、macOS `NSPasteboardItemDataProvider`、
+   Linux X11/Wayland 延迟写入。
+5. **剪贴板历史记录**（可选）。
 
-详细设计见 [docs/development-plan.md](docs/development-plan.md) 第四、五、六、七章。
-自动更新（阶段六）方案已定，可在核心同步就绪后并行推进（见 `server/UPDATE_MODULE_PLAN.md`）。
+详细设计见 [docs/development-plan.md](docs/development-plan.md)；自更新方案见 `server/UPDATE_MODULE_PLAN.md`。
