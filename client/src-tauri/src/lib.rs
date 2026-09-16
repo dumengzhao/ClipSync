@@ -13,6 +13,7 @@ pub mod file_server;
 pub mod file_share;
 pub mod log_viewer;
 pub mod obs;
+pub mod outbox;
 pub mod server_conn;
 pub mod sync;
 pub mod tauri_cmd;
@@ -28,6 +29,7 @@ use tauri::{
 use tauri_plugin_autostart::ManagerExt;
 
 use crate::cache::file_cache::FileCache;
+use crate::clipboard::types::DeviceId;
 use crate::config::AppConfig;
 use crate::device::identity::DeviceIdentity;
 use crate::device::registry::DeviceRegistry;
@@ -69,13 +71,23 @@ pub struct AppState {
     /// 跨 LAN 文件传输密钥（服务端 Welcome 派生，与文字中继共用 network_key）。
     /// 供内嵌 HTTP 文件服务加密、拉取端解密；未连服务端时为 None。
     pub network_key: Arc<std::sync::Mutex<Option<[u8; 32]>>>,
+    /// 本次会话「已下载并校验通过、待安装」的更新包：(绝对路径, sha256)。
+    ///
+    /// `install_update` **只接受这里记录的路径**：命令参数由前端传入，若不做绑定，
+    /// 渲染器一旦被注入（或前端逻辑出错）就能用 `install_update(path=任意 exe)`
+    /// 拉起任意程序并让本进程退出——那是等价于代码执行的越权入口。
+    pub pending_update: Mutex<Option<(std::path::PathBuf, String)>>,
 }
 
 impl AppState {
-    pub fn new() -> Self {
-        let config = AppConfig::default();
-        let identity = DeviceIdentity::load_or_create(&config.device_name)
-            .expect("failed to load or create device identity");
+    /// 由真实配置构建应用状态。
+    ///
+    /// identity / engine / hub 由此一次性创建：设备 ID 来自配置中的权威值
+    /// （`config.device_id`，首次启动已由 setup 解析并落盘，见 `resolve_device_id`），
+    /// 因此本函数必须在 `load_config` 之后调用。
+    pub fn build(config: AppConfig) -> Self {
+        let identity = DeviceIdentity::new(DeviceId(config.device_id.clone()), &config.device_name)
+            .expect("failed to load device identity");
         let engine = Arc::new(SyncEngine::new(identity.clone()));
         let hub = ConnectionHub::new(Arc::new(identity.clone()), engine.clone());
 
@@ -100,13 +112,8 @@ impl AppState {
             server_conn: Mutex::new(None),
             cross_lan_offers: Mutex::new(Vec::new()),
             network_key: Arc::new(std::sync::Mutex::new(None)),
+            pending_update: Mutex::new(None),
         }
-    }
-}
-
-impl Default for AppState {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -123,25 +130,36 @@ pub mod firewall {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     pub const RULE_NAME: &str = "ClipSync mDNS (UDP 5353)";
 
-    fn netsh(args: &[&str]) -> std::process::Output {
+    /// 执行一次 netsh（隐藏窗口）。
+    ///
+    /// 不在此处 panic：`Command::output()` 在某些环境下会因找不到可执行文件 /
+    /// 权限问题直接失败，而这是**用户主动点击**触发的查询路径——把它变成
+    /// 崩溃违反本项目「命令层不 panic」的约定（由调用方降级为「规则未生效」并记日志）。
+    fn netsh(args: &[&str]) -> std::io::Result<std::process::Output> {
         Command::new("netsh")
             .args(args)
             .creation_flags(CREATE_NO_WINDOW)
             .output()
-            .expect("netsh spawn failed")
     }
 
     /// 查询放行规则是否已存在（无需管理员权限）。
+    /// 查询失败（netsh 起不来 / 无输出）一律按「不存在」处理并记日志，
+    /// 让设置页仍可提供「防火墙修复」入口。
     pub fn rule_exists() -> bool {
-        netsh(&[
+        let args = [
             "advfirewall",
             "firewall",
             "show",
             "rule",
             &format!("name={RULE_NAME}"),
-        ])
-        .status
-        .success()
+        ];
+        match netsh(&args) {
+            Ok(out) => out.status.success(),
+            Err(e) => {
+                tracing::warn!("执行 netsh 查询防火墙规则失败（按未设置处理）: {e}");
+                false
+            }
+        }
     }
 
     /// 以管理员权限（触发 UAC）添加放行规则。返回 ()，结果由前端轮询 rule_exists 确认。
@@ -179,7 +197,6 @@ pub fn run() {
     crate::obs::logging::init_file_logging();
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -189,23 +206,51 @@ pub fn run() {
             // 第二个实例启动时不再新建窗口，而是聚焦已运行的第一个实例主窗口
             show_main_window(app);
         }))
-        .manage(AppState::new())
         .setup(|app| {
-            build_tray(app)?;
-
-            // 加载持久化配置（覆盖默认），使改过的端口等设置重启后仍生效
+            // 加载持久化配置（覆盖默认），使改过的端口等设置重启后仍生效。
             let handle = app.handle().clone();
             let persisted = {
                 let mut cfg = crate::config::load_config(&handle);
-                // 配对码默认随机生成：若为空或仍是出厂默认值 "000000"，则生成一个新的
-                // 随机码并持久化，保证每台设备安装后都有独立配对码（无需用户手动设置）。
-                if cfg.pairing_code.trim().is_empty() || cfg.pairing_code.trim() == "000000" {
+                // 配对码：空 / 出厂占位 / **历史低熵格式**（6 位数字等）一律换成新的
+                // 高熵码（12 位 base32，60 bit）。旧码熵不足，而配对码是常驻的，
+                // 一旦被离线穷举还原即可被长期冒充——不做兼容保留。
+                if !crate::crypto::pake::pairing_code_is_current(&cfg.pairing_code) {
                     cfg.pairing_code = crate::crypto::pake::generate_pairing_code();
-                    let _ = crate::config::save_config(&handle, &cfg);
                 }
-                *app.state::<AppState>().config.lock() = cfg.clone();
+
+                // 解析设备 ID（仅首次）：配置已有值则直接沿用；否则取机器码，
+                // 机器码也取不到则生成 `000000` 前缀的 fallback 值。解析结果
+                // 一律写回配置——config 从此是 device_id 的权威存储，重启直接读。
+                {
+                    let (id, fresh) = crate::device::identity::resolve_device_id(
+                        &cfg.device_id,
+                        &crate::device::hardware::hardware_id(),
+                    );
+                    if cfg.device_id.trim().is_empty() || fresh {
+                        if cfg.device_id.trim().is_empty() {
+                            tracing::info!("首次解析设备 ID 并写入配置：{id}");
+                        } else {
+                            tracing::info!("设备 ID 配置为空，重新解析并写入：{id}");
+                        }
+                        cfg.device_id = id;
+                    }
+                }
+
+                // 状态注入必须**先于** save_config 等耗时落盘操作：tauri.conf.json 的窗口
+                // 先于 setup 闭包创建，webview 加载前端与 setup 并行竞跑，前端首帧就可能
+                // 发来 get_config / get_device_id 等命令——manage 晚了这些命令会失败
+                // （历史 bug：标题栏设备名空白）。尽早 manage，落盘慢一步无碍。
+                app.manage(AppState::build(cfg.clone()));
+
+                if let Err(e) = crate::config::save_config(&handle, &cfg) {
+                    // 落盘失败必须让用户看见：尤其 fallback ID（000000 前缀）若没写进
+                    // 配置，下次启动会重新生成不同的随机值，身份将不稳定。
+                    tracing::error!("启动时写配置失败（device_id/pairing_code 可能未持久化）: {e}");
+                }
                 cfg
             };
+
+            build_tray(app)?;
 
             // 对齐「开机自启」与系统自启条目：配置为开则注册、为关则移除，
             // 使重启或状态漂移后自启行为与设置一致（用户在设置页切换也走 set_config 副作用）。
@@ -440,6 +485,7 @@ pub fn run() {
             tauri_cmd::cancel_pull_cross_lan,
             tauri_cmd::probe_ext_file_ep,
             tauri_cmd::scan_lan_server_configs,
+            tauri_cmd::apply_lan_server_config,
             tauri_cmd::firewall_rule_exists,
             tauri_cmd::firewall_fix,
             tauri_cmd::show_pull_toast,
@@ -627,8 +673,13 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
                                         {
                                             Ok(path) => {
                                                 tracing::info!("托盘更新下载完成（sha256 校验通过）：{path}，启动安装器");
+                                                let state = app_dl.state::<AppState>();
                                                 if let Err(e) =
-                                                    crate::update::install_update(path).await
+                                                    crate::update::install_verified_update(
+                                                        &state,
+                                                        std::path::Path::new(&path),
+                                                    )
+                                                    .await
                                                 {
                                                     tracing::error!("托盘更新启动安装失败：{e}");
                                                     app_dl

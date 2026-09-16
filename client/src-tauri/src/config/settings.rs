@@ -7,6 +7,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub device_name: String,
+    /// 本机设备身份（权威存储）。首次启动时解析一次并落盘：
+    /// 优先取机器码（Win MachineGuid / macOS IOPlatformUUID / Linux machine-id），
+    /// 取不到则生成 `000000` 前缀 + 12 位随机 hex（用户可据此识别该设备无唯一机器码）。
+    /// 之后每次启动直接读本字段，不再重新解析——即使 OS 重装导致机器码变化也沿用旧值，身份稳定优先。
+    #[serde(default)]
+    pub device_id: String,
     pub auto_start: bool,
     /// 开机自启后是否显示主窗口（仅当 `auto_start` 为真时生效）。默认显示。
     #[serde(default = "default_true")]
@@ -14,13 +20,19 @@ pub struct AppConfig {
     pub sync_text: bool,
     pub sync_image: bool,
     pub sync_file: bool,
+    /// 入站文件大小上限（MB）。语义：**只约束对端发来的内容**——本机自己复制大文件
+    /// 是用户主动行为，不受限。0 = 不限制；单文件与单次 Offer 总量都按此值拦截。
+    /// （2026-09-16 之前该字段是纯展示项，没有任何代码读取，等于不设防。）
     pub max_file_size_mb: u64,
+    /// 入站剪贴板图片上限（MB）。0 = 不限制。对端推送的超限图片直接丢弃并记警告
+    /// （此前同样没有任何代码读取）。
     pub max_image_size_mb: u32,
     pub listen_port: u16,
     pub enable_mdns: bool,
-    /// SPAKE2 配对口令（即设置中的「预留配对码」）。**两端必须设置成完全相同的值**，
-    /// 才能互相配对；它同时作为首配对与重连的口令，不再每次随机生成。
-    /// 默认值仅用于开发/测试；正式使用请在各端手动设置同一串强口令。
+    /// 本机配对码（12 位 base32，60 bit 熵）。**两端各自独立**：首配对时由发起方
+    /// 输入「对端界面上显示的码」，应答方用本机这个码作为 SPAKE2 口令；重连走 link
+    /// secret，不再使用它。常驻不轮换，因此熵必须足够——低熵码一旦被离线穷举还原，
+    /// 攻击者可长期冒充本机。启动时会把历史低熵格式（如 6 位数字）自动替换为新码。
     #[serde(default = "default_pairing_code")]
     pub pairing_code: String,
     pub manual_addresses: Vec<ManualAddress>,
@@ -144,6 +156,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             device_name: default_device_name(),
+            device_id: String::new(),
             auto_start: false,
             sync_text: true,
             sync_image: true,

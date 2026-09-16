@@ -124,16 +124,29 @@ impl MdnsDiscovery {
                             .map(|a| a.to_string())
                             .unwrap_or_default();
 
+                        // 广告内容全部来自网络（同网段任意主机都能播）：名称净化后
+                        // 再进 UI/日志，地址与端口做基本校验（端口 0 无意义）。
                         let peer = crate::discovery::DiscoveredPeer {
                             device_id: did.to_string(),
-                            device_name: info
-                                .get_property_val_str("device_name")
-                                .unwrap_or("")
-                                .to_string(),
+                            device_name: crate::obs::logging::log_safe(
+                                info.get_property_val_str("device_name").unwrap_or(""),
+                            ),
                             addr: peer_addr,
                             // 端口来自对端广告的 SRV 记录，而非写死常量
                             port: info.get_port(),
                         };
+                        if peer.port == 0 {
+                            tracing::debug!("忽略端口为 0 的 mDNS 广告：{}", peer.device_name);
+                            continue;
+                        }
+                        if peer.addr.parse::<std::net::IpAddr>().is_err() {
+                            tracing::debug!(
+                                "忽略地址非法的 mDNS 广告：{} addr={}",
+                                peer.device_name,
+                                peer.addr
+                            );
+                            continue;
+                        }
 
                         // 写入共享存储（重连监控按此表发现已配对对端），仍要保留
                         let st = app2.state::<crate::AppState>();

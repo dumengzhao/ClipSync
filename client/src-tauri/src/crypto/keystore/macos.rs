@@ -78,6 +78,15 @@ fn file_store(service: &str, account: &str, data: &[u8]) -> Result<(), String> {
     }
     let mut f = std::fs::File::create(&p).map_err(|e| e.to_string())?;
     f.write_all(data).map_err(|e| e.to_string())?;
+    // 权限收紧到「仅属主可读写」：回退文件里放的是身份私钥 / link secret / network_token，
+    // 默认 umask（022）下同机其它用户可直接读取——那等于密钥明文泄露。
+    // device/store.rs 的降级口令文件已做同样处理（restrict_permissions），这里补齐。
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)) {
+            tracing::warn!("收紧回退密钥文件权限失败 {:?}: {e}", p);
+        }
+    }
     Ok(())
 }
 

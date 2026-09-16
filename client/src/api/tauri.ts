@@ -1,11 +1,38 @@
 import { invoke } from '@tauri-apps/api/core';
 
+/**
+ * 挂载期安全调用：tauri.conf.json 里的窗口先于 Rust `setup` 闭包创建，
+ * webview 加载前端与 `setup` 内的 `app.manage(AppState)` 并行竞跑——首帧发出的
+ * 命令若依赖 State 会直接失败（`get_version` 这类无 State 命令不受影响），
+ * 而失败常被 `.catch(() => {})` 吞掉、又没有事件兜底路径（如标题栏设备名），
+ * 就会永久空白。这里做有界重试：默认 300ms 一次、最多 10 次（约 3 秒），
+ * 足以覆盖 setup 完成前的窗口期。仅限挂载期的幂等读操作使用；
+ * 用户交互触发的调用不应重试（其它错误重试只会拖慢报错路径）。
+ */
+export async function mountCall<T>(
+  fn: () => Promise<T>,
+  tries = 10,
+  delayMs = 300,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < tries; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      if (i < tries - 1) await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  throw lastErr;
+}
+
 export async function getVersion(): Promise<string> {
   return invoke<string>('get_version');
 }
 
+/** 挂载期读取本机 device_id（setup 完成前调用会失败，需重试，见 mountCall） */
 export async function getDeviceId(): Promise<string> {
-  return invoke<string>('get_device_id');
+  return mountCall(() => invoke<string>('get_device_id'));
 }
 
 export async function getPairedDevices(): Promise<PairedDeviceInfo[]> {
@@ -40,12 +67,12 @@ export interface ConnectedPeer {
 
 /** 列出当前已发现的局域网设备 */
 export async function listDiscoveredPeers(): Promise<DiscoveredPeer[]> {
-  return invoke<DiscoveredPeer[]>('list_discovered_peers');
+  return mountCall(() => invoke<DiscoveredPeer[]>('list_discovered_peers'));
 }
 
 /** 列出当前已建立加密通道的对端 device_id（用于挂载时回填在线状态） */
 export async function listConnectedPeers(): Promise<string[]> {
-  return invoke<string[]>('list_connected_peers');
+  return mountCall(() => invoke<string[]>('list_connected_peers'));
 }
 
 /** 手动发起配对：作为发起方用对方显示的配对码连接指定对端（局域网发现列表内） */
@@ -111,18 +138,17 @@ export async function listPendingOffers(): Promise<PendingOffer[]> {
   return invoke<PendingOffer[]>('list_pending_offers');
 }
 
-/** 读取本机剪贴板当前文字内容；剪贴板无文字或读取失败时返回 null */
+/** 读取本机剪贴板当前文字内容；剪贴板无文字或读取失败时返回 null。
+ *  挂载期调用也走这里：内部用 mountCall 重试（setup 完成前的首帧调用会失败）。 */
 export async function getClipboardText(): Promise<string | null> {
-  try {
-    return await invoke<string>('get_clipboard');
-  } catch {
-    return null;
-  }
+  return mountCall(() => invoke<string | null>('get_clipboard')).catch(() => null);
 }
 
 /** 应用配置（与 Rust 端 `AppConfig` 字段保持一致） */
 export interface AppConfig {
   device_name: string;
+  /** 本机设备身份（权威值，启动时解析一次并落盘；取不到机器码时为 000000 前缀的生成值） */
+  device_id?: string;
   auto_start: boolean;
   /** 开机自启后是否显示主窗口（仅 auto_start 为真时生效）；默认 true */
   show_main_window_on_launch?: boolean;
@@ -165,7 +191,7 @@ export interface AppConfig {
 }
 
 export async function getConfig(): Promise<AppConfig> {
-  return invoke<AppConfig>('get_config');
+  return mountCall(() => invoke<AppConfig>('get_config'));
 }
 
 export async function setConfig(cfg: AppConfig): Promise<void> {
@@ -187,9 +213,9 @@ export async function quitApp(): Promise<void> {
 
 // ===== 跨局域网中转（服务端） =====
 
-/** 服务端连接状态：0 未连接 / 1 待审批(pending) / 2 已启用(active) */
+/** 服务端连接状态：0 未连接 / 1 待审批(pending) / 2 已启用(active)（挂载时回填，需重试） */
 export async function getServerStatus(): Promise<number> {
-  return invoke<number>('get_server_status');
+  return mountCall(() => invoke<number>('get_server_status'));
 }
 
 /** 跨局域网已启用节点（来自服务端下发） */
@@ -273,16 +299,29 @@ export interface LanServerConfigSource {
   lan_group: string;
 }
 
-/** 一组「相同 (server_url, network_token)」的局域网设备聚合（来自 `LanServerConfigGroup`） */
-export interface LanServerConfigGroup {
+/** 一组「相同 (server_url, network_token)」的局域网设备聚合（来自 `LanServerConfigGroup`）。
+ *  注意：这是给渲染器用的**脱敏版本**——明文 Token 留在 Rust 侧（`group_id` 索引），
+ *  渲染器只拿掩码，选中时回传 group_id 由 `applyLanServerConfig` 在后端应用。 */
+export interface LanServerConfigSummary {
+  /** 一次性标识：回传给 `applyLanServerConfig` */
+  group_id: string;
+  /** 服务端地址（非机密：弹窗展示 host、供用户核对） */
   server_url: string;
-  network_token: string;
+  /** Token 掩码（如 `abcd••••wxyz`），无 Token 时为空串 */
+  token_masked: string;
+  has_token: boolean;
   sources: LanServerConfigSource[];
 }
 
-/** 扫描本机已配对 + 局域网内可达的对端，返回按 (server_url, network_token) 分组的聚合结果 */
-export async function scanLanServerConfigs(): Promise<LanServerConfigGroup[]> {
-  return invoke<LanServerConfigGroup[]>('scan_lan_server_configs');
+/** 扫描本机已配对 + 局域网内可达的对端，返回按 (server_url, network_token) 分组的**脱敏**聚合结果 */
+export async function scanLanServerConfigs(): Promise<LanServerConfigSummary[]> {
+  return invoke<LanServerConfigSummary[]>('scan_lan_server_configs');
+}
+
+/** 应用选中的那组服务端配置：只回传 group_id，明文 Token 全程不出 Rust。
+ *  返回后端给出的结果文案（已应用 / 未变化）。 */
+export async function applyLanServerConfig(groupId: string): Promise<string> {
+  return invoke<string>('apply_lan_server_config', { groupId });
 }
 
 /* ================= mDNS 防火墙修复（LocalSend 同款交互） ================= */

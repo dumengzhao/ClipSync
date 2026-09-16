@@ -387,7 +387,7 @@ export default function App() {
   // 事件驱动：监听同步引擎 emit 的「剪贴板变化」事件（本地复制 / 远端同步写入都会触发），
   // 仅在变化时刷新首页，取代原先每秒跨进程轮询读取的写法。
   useEffect(() => {
-    // 首屏挂载时先读取一次，避免空白。
+    // 首屏挂载时先读取一次，避免空白（setup 完成前调用会失败，mountCall 内部重试）。
     getClipboardText().then(setClipboardText).catch(() => {});
     const unlisten = listen<{ text: string | null; kind: string }>(
       'clipboard-changed',

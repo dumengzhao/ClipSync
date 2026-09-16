@@ -49,6 +49,9 @@ static TAIL_STARTED: AtomicBool = AtomicBool::new(false);
 /// 不按「当天日期」拼文件名——`tracing_appender::rolling::daily` 的日期拆分时区
 /// 不可控（UTC vs 本地），跨天瞬间拼错就会读不到文件。按 mtime 取最新，
 /// 跨天轮转、文件重建都能自动跟上。
+///
+/// 调用方（tail 任务）**按需**调用本函数（首次 + 每约 10s + 读取失败时），
+/// 不是每轮 400ms 都扫：整目录列举属于纯重复开销。
 async fn current_log_path() -> Option<std::path::PathBuf> {
     let dir = crate::obs::logging::log_dir();
     let mut rd = tokio::fs::read_dir(&dir).await.ok()?;
@@ -190,6 +193,9 @@ fn spawn_tail_task(app: tauri::AppHandle, mut initial_offset: Option<u64>) {
         // UTF-8 多字节字符/未结束行被截断在读取边界的残段，留待下次拼接
         let mut partial: Vec<u8> = Vec::new();
         let mut first_file = true;
+        // 「当前正在写入哪个文件」的重扫节流计数（见下方注释）
+        const RESCAN_TICKS: u32 = 25; // 25 × 400ms = 10s
+        let mut ticks_since_scan: u32 = 0;
 
         loop {
             // 窗口没了 → 任务退出（「仅窗口存在才刷新」的核心保证）
@@ -197,29 +203,42 @@ fn spawn_tail_task(app: tauri::AppHandle, mut initial_offset: Option<u64>) {
                 break;
             }
 
-            // 每轮重取「当前正在写入」的日志文件（跨天轮转时自动切换到新文件）
-            let Some(path) = current_log_path().await else {
+            // 「当前正在写入」的日志文件**按需重扫**，不是每轮（400ms）都扫。
+            // 日志目录里是按天滚动的 7 个文件，每轮 read_dir + 逐条 metadata 属于
+            // 纯重复开销（实测日志窗口开着就一直在做无用功）。策略：
+            //   - 首次必扫；
+            //   - 其后每 RESCAN_TICKS 轮（≈10s）扫一次，跨天轮转最多晚 10s 跟随
+            //     （新文件内容少，晚读不会丢数据）；
+            //   - 当前文件读不到时（被清理/轮转）立刻置空 → 下一轮强制重扫。
+            if cur_path.is_none() || ticks_since_scan >= RESCAN_TICKS {
+                ticks_since_scan = 0;
+                let Some(found) = current_log_path().await else {
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
+                };
+                if cur_path.as_deref() != Some(found.as_path()) {
+                    cur_path = Some(found.clone());
+                    partial.clear();
+                    offset = if first_file {
+                        first_file = false;
+                        match initial_offset.take() {
+                            Some(off) => off,
+                            None => tokio::fs::metadata(&found)
+                                .await
+                                .map(|m| m.len())
+                                .unwrap_or(0),
+                        }
+                    } else {
+                        // 跨天轮转：新文件从头读
+                        0
+                    };
+                }
+            }
+            ticks_since_scan = ticks_since_scan.saturating_add(1);
+            let Some(path) = cur_path.clone() else {
                 tokio::time::sleep(POLL_INTERVAL).await;
                 continue;
             };
-
-            if cur_path.as_deref() != Some(path.as_path()) {
-                cur_path = Some(path.clone());
-                partial.clear();
-                offset = if first_file {
-                    first_file = false;
-                    match initial_offset.take() {
-                        Some(off) => off,
-                        None => tokio::fs::metadata(&path)
-                            .await
-                            .map(|m| m.len())
-                            .unwrap_or(0),
-                    }
-                } else {
-                    // 跨天轮转：新文件从头读
-                    0
-                };
-            }
 
             match tokio::fs::metadata(&path).await {
                 Ok(meta) => {
@@ -257,7 +276,8 @@ fn spawn_tail_task(app: tauri::AppHandle, mut initial_offset: Option<u64>) {
                         }
                     }
                 }
-                Err(_) => { /* 文件暂不可读：下轮重试 */ }
+                // 文件暂不可读：置空以便下一轮强制重扫（可能已轮转/被清理）
+                Err(_) => cur_path = None,
             }
 
             tokio::time::sleep(POLL_INTERVAL).await;
