@@ -439,11 +439,24 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
   /// 真实 Token 在 Rust 侧（前端只有哨兵），所以输入框平时显示为空——若把空串当
   /// 「清空」提交，一次失焦就会删掉密钥链条目、跨 LAN 直接断连（2026-09-16 实际
   /// 发生过，且服务端只存 hash 无法找回）。清空必须点「清空」按钮走显式命令。
-  const commitNetworkToken = (raw: string) => {
+  const commitNetworkToken = async (raw: string) => {
     const v = raw.trim();
     if (!v) return; // 留空 = 不改动
-    if (v === cfg?.network_token) return;
-    persist({ network_token: v });
+    // 判重必须对「上次持久化的值」（persistedRef），不能对 cfg：
+    // onChange 已把输入同步进 cfg，二者恒等会导致永远不提交（2026-09-16 二进宫：
+    // 用户连填几遍 Token 都没保存、跨 LAN 一直未连接）。
+    const persisted = persistedRef.current?.network_token ?? '';
+    if (persisted !== TOKEN_SENTINEL && v === persisted) return; // 无变化不写盘
+    await persist({ network_token: v });
+    // persist 成功后 cfg 里残留明文：立即从后端刷新，让状态回到哨兵、输入框清空，
+    // 真实 Token 不在前端状态/界面上停留。
+    try {
+      const c = await getConfig();
+      setCfg(c);
+      persistedRef.current = c;
+    } catch {
+      /* 刷新失败不影响保存结果 */
+    }
   };
 
   /// 清空 Token：走显式命令（后端标记为「用户主动清空」并删除密钥链条目）
