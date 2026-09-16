@@ -340,11 +340,26 @@ pub async fn download_update(
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| format!("创建临时目录失败: {e}"))?;
-    // 顺手清理历史遗留的下载目录（本次之外的 clipsync-update*），避免残留堆积
+    // 顺手清理历史遗留的下载目录（本次之外的 clipsync-update*），避免残留堆积。
+    // **只删「足够旧」的目录**：如果无条件删除，同一时刻的另一次下载（用户重试、
+    // 或另一个窗口）刚创建的临时目录会被这次清理顺手删掉——Windows 上因目录内含
+    // 打开的文件而删不掉才侥幸无事，Linux 上文件被 unlink 后安装阶段就找不到包了。
+    // 本进程刚创建的目录 mtime 必然很新，按 mtime 过滤即可彻底避免误删。
+    const STALE_DOWNLOAD_DIR_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
     if let Ok(mut rd) = tokio::fs::read_dir(std::env::temp_dir()).await {
         while let Ok(Some(entry)) = rd.next_entry().await {
             let n = entry.file_name().to_string_lossy().into_owned();
-            if n.starts_with("clipsync-update") && entry.path() != dir {
+            if !n.starts_with("clipsync-update") || entry.path() == dir {
+                continue;
+            }
+            let is_stale = entry
+                .metadata()
+                .await
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > STALE_DOWNLOAD_DIR_AGE);
+            if is_stale {
                 let _ = tokio::fs::remove_dir_all(entry.path()).await;
             }
         }
@@ -427,6 +442,12 @@ pub async fn download_update(
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("重命名失败: {e}"));
     }
+    // 登记「本次下载且校验通过」的安装包：install_update 只认这条记录，
+    // 避免该命令被用来拉起任意本地程序（参数来自前端渲染器）。
+    {
+        let state = app.state::<crate::AppState>();
+        *state.pending_update.lock() = Some((path.clone(), got.clone()));
+    }
     emit(
         "done",
         size,
@@ -439,13 +460,53 @@ pub async fn download_update(
 /// 随后退出当前进程，避免安装时文件被占用。
 /// macOS：open 引导用户；Linux：AppImage 加执行位后拉起 / deb 走 pkexec dpkg -i。
 #[tauri::command]
-pub async fn install_update(path: String) -> Result<(), String> {
+pub async fn install_update(
+    state: tauri::State<'_, crate::AppState>,
+    path: String,
+) -> Result<(), String> {
+    install_verified_update(&state, std::path::Path::new(&path)).await
+}
+
+/// 安装的核心实现（命令与托盘菜单共用）。
+///
+/// **只允许安装本进程本次下载并校验通过的那个包**：命令参数由渲染器传入，
+/// 若不与 `AppState::pending_update` 绑定，脚本注入即可 `install_update(path=任意 exe)`
+/// 拉起任意程序（紧接着还会 exit 掉主进程）——那等价于一个代码执行入口。
+pub async fn install_verified_update(
+    state: &crate::AppState,
+    path: &std::path::Path,
+) -> Result<(), String> {
     if !is_installed_build() {
         return Err("当前为免安装版，不支持在线更新（请使用 NSIS 安装版）".to_string());
     }
-    let p = PathBuf::from(&path);
+    let p = path.to_path_buf();
+    let expected = {
+        let guard = state.pending_update.lock();
+        match guard.as_ref() {
+            Some(v) => v.clone(),
+            None => return Err("没有待安装的更新包（请先在本界面完成下载）".to_string()),
+        }
+    };
+    if expected.0 != p {
+        return Err("拒绝安装：路径与本次下载的更新包不一致".to_string());
+    }
     if !p.exists() {
-        return Err(format!("安装包不存在: {path}"));
+        return Err(format!("安装包不存在: {}", p.display()));
+    }
+    // 启动前再核对一次哈希：下载→安装之间文件可能被替换（同机低权限进程、
+    // 杀软隔离后重写），只在下完时校验一次不足以防这个 TOCTOU 窗口。
+    {
+        let mut hasher = Sha256::new();
+        let mut f = std::fs::File::open(&p).map_err(|e| format!("打开安装包失败: {e}"))?;
+        std::io::copy(&mut f, &mut hasher).map_err(|e| format!("读取安装包失败: {e}"))?;
+        let got = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        if got != expected.1 {
+            return Err("拒绝安装：安装包内容与下载校验结果不一致（可能已被替换）".to_string());
+        }
     }
     // Windows：先退出当前进程再由安装器接管，避免文件占用
     #[cfg(target_os = "windows")]
@@ -474,7 +535,8 @@ pub async fn install_update(path: String) -> Result<(), String> {
     }
     #[cfg(target_os = "linux")]
     {
-        let s = path.as_str();
+        let s = p.to_string_lossy().into_owned();
+        let s = s.as_str();
         if s.ends_with(".AppImage") {
             use std::os::unix::fs::PermissionsExt;
             let mut perm = std::fs::metadata(&p)

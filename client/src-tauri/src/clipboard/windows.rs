@@ -116,13 +116,18 @@ fn read_clipboard() -> Result<ClipboardContent> {
         if unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT.0 as u32) }.is_ok() {
             let h = unsafe { GetClipboardData(CF_UNICODETEXT.0 as u32)? };
             let hg = HGLOBAL(h.0);
+            // 用 GlobalSize 作为扫描上界：**不能只靠 NUL 终结**——本机其它进程可以往
+            // 剪贴板放一个「没有 NUL 终结」的缓冲区，只按 NUL 游走会读到分配区之外
+            // （崩溃或把相邻堆内容同步出去）。
+            let size = unsafe { GlobalSize(hg) } as usize;
+            let max_units = size / std::mem::size_of::<u16>();
             let ptr = unsafe { GlobalLock(hg) } as *const u16;
             if ptr.is_null() {
                 return Err(anyhow!("GlobalLock failed"));
             }
             let len = unsafe {
                 let mut len = 0usize;
-                while *ptr.add(len) != 0 {
+                while len < max_units && *ptr.add(len) != 0 {
                     len += 1;
                 }
                 len
@@ -205,27 +210,35 @@ fn read_clipboard_files() -> Result<Vec<PathBuf>> {
             Err(_) => return Ok(Vec::new()),
         };
         let hg = HGLOBAL(h.0);
+        let size = unsafe { GlobalSize(hg) } as usize;
         let ptr = unsafe { GlobalLock(hg) } as *const DROPFILES;
         if ptr.is_null() {
             return Ok(Vec::new());
         }
         let drop = unsafe { *ptr };
-        // 文件列表位于 pFiles 偏移处，宽字符、双 \0 结尾
-        let files_ptr = (ptr as *const u8).wrapping_add(drop.pFiles as usize) as *const u16;
+        // 文件列表位于 pFiles 偏移处，宽字符、双 \0 结尾。
+        // **必须有上界**：pFiles 与字符串内容都由剪贴板持有者（本机任意进程）决定，
+        // 只按 NUL 游走可越界读（同 CF_UNICODETEXT 的处理）。
+        let pfiles = drop.pFiles as usize;
+        let units_total = size.saturating_sub(pfiles) / std::mem::size_of::<u16>();
+        let files_ptr = (ptr as *const u8).wrapping_add(pfiles) as *const u16;
         let mut paths = Vec::new();
         let mut cur = 0usize;
         loop {
             let mut end = cur;
-            while unsafe { *files_ptr.add(end) } != 0 {
+            while end < units_total && unsafe { *files_ptr.add(end) } != 0 {
                 end += 1;
             }
             if end == cur {
-                break; // 空串 => 列表结束
+                break; // 空串 => 列表结束（或已到分配区末尾）
             }
             let s = String::from_utf16_lossy(unsafe {
                 std::slice::from_raw_parts(files_ptr.add(cur), end - cur)
             });
             paths.push(PathBuf::from(s));
+            if end >= units_total {
+                break; // 没有终结符就到此为止，不再越过分配区
+            }
             cur = end + 1;
         }
         let _ = unsafe { GlobalUnlock(hg) };

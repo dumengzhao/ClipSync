@@ -11,6 +11,7 @@ use crate::clipboard::types::{ClipboardContent, FileMeta, SyncMark};
 use crate::clipboard::ClipboardProvider;
 use crate::crypto::aead::{decrypt, encrypt, KEY_SIZE, NONCE_SIZE};
 use crate::crypto::kdf::derive_network_key;
+use crate::device::hardware::hardware_id;
 use crate::sync::engine::{SyncEngine, SyncEvent};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
@@ -101,64 +102,6 @@ struct DeviceFields {
     hardware_id: String,
     /// 操作系统版本号（如 macOS 14.5 / Windows 11 Pro），由客户端上报供管理后台展示
     os_version: String,
-}
-
-/// 跨平台硬件唯一标识（用于服务端区分同一台物理机器）。
-/// 优先级：macOS IOPlatformUUID / Windows MachineGuid / Linux /etc/machine-id；
-/// 均失败时返回空串，由调用方以 device_id（持久化 UUID）兜底。
-fn hardware_id() -> String {
-    #[cfg(target_os = "macos")]
-    {
-        if let Ok(out) = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | grep IOPlatformUUID")
-            .output()
-        {
-            let s = String::from_utf8_lossy(&out.stdout);
-            // 形如：  "IOPlatformUUID" = "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"
-            let parts: Vec<&str> = s.split('"').collect();
-            if parts.len() >= 4 {
-                let h = parts[3].trim().to_string();
-                if !h.is_empty() {
-                    return h;
-                }
-            }
-        }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        // reg 是控制台程序：不设 CREATE_NO_WINDOW 会闪出命令窗口
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        if let Ok(out) = std::process::Command::new("reg")
-            .args([
-                "query",
-                "HKLM\\SOFTWARE\\Microsoft\\Cryptography",
-                "/v",
-                "MachineGuid",
-            ])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-        {
-            let s = String::from_utf8_lossy(&out.stdout);
-            if let Some(h) = s.split_whitespace().last() {
-                let h = h.trim().to_string();
-                if !h.is_empty() {
-                    return h;
-                }
-            }
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(s) = std::fs::read_to_string("/etc/machine-id") {
-            let s = s.trim().to_string();
-            if !s.is_empty() {
-                return s;
-            }
-        }
-    }
-    String::new()
 }
 
 /// 跨平台获取操作系统版本号（如 macOS 14.5 / Windows 11 Pro / Ubuntu 22.04.3 LTS）。
@@ -328,16 +271,74 @@ const MAX_CROSS_LAN_FILE_BYTES: u64 = 512 * 1024 * 1024;
 /// 好过无界堆积（剪贴板中继与文件通知都会持续产生）。
 const RELAY_QUEUE_CAPACITY: usize = 64;
 
-/// 记录一次中继出站消息被丢弃的原因（Full = 队列满丢弃 / Closed = 连接已关闭）。
-/// 载荷类消息（剪贴板中继内容 / 文件通知）入中继队列。
-/// 不能 try_send 静默丢弃——丢了剪贴板内容就是同步丢失、丢了文件通知对端
-/// 永远看不到待拉取条目。满时等待服务端消费（背压）最多 10s，仍满视为卡死。
-async fn send_relay_payload(tx: &mpsc::Sender<ClientToServer>, what: &str, msg: ClientToServer) {
-    match tokio::time::timeout(Duration::from_secs(10), tx.send(msg)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(_)) => tracing::debug!("中继连接已关闭，{what} 未发送"),
-        Err(_) => tracing::warn!("中继出站队列 {what} 等待 10s 仍满，已丢弃（服务端疑似卡死）"),
+/// 规范化「对外文件地址」（`ext_file_ep`）：省略端口时补默认端口。
+///
+/// 合法写法是 `IPv4[:port]`（也允许域名），端口可省——但**省略时的含义必须在所有
+/// 使用点一致**。此前 `probe_ext_file_ep`（设置页「测试并保存」）按 `:{listen_port}`
+/// 拼 URL 并据此放行保存，而跨 LAN 拉取直接拼 `http://{ep}` 落到 **80 端口**：
+/// 于是「探测通过才能保存」的地址，保存后拉取必然失败（两个使用点各写一份逻辑导致
+/// 分叉）。抽成一个函数后不可能再分叉。
+/// 校验「对外文件地址」是否是可接受的形式：`host[:port]`，其中 host 为 IPv4/IPv6
+/// 字面量或合法域名，端口 1..=65535。
+///
+/// 拒绝一切多余成分（scheme / 路径 / 查询 / userinfo / 空白 / 控制字符）：
+/// 该值会来自**远端**（对端通告、中继下发）并被直接拼成 HTTP 请求地址，
+/// 宽松解析等于让远端选择本机去请求谁（SSRF 面）与请求路径形态。
+pub(crate) fn ext_file_ep_is_valid(ep: &str) -> bool {
+    let ep = ep.trim();
+    if ep.is_empty() {
+        return false;
     }
+    if ep.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return false;
+    }
+    // scheme / 路径 / 查询 / 片段 / userinfo 一律不允许
+    if ep.contains("://")
+        || ep.contains('/')
+        || ep.contains('?')
+        || ep.contains('#')
+        || ep.contains('@')
+    {
+        return false;
+    }
+    match ep.parse::<std::net::SocketAddr>() {
+        Ok(_) => true,
+        Err(_) => {
+            // host[:port] 形式：host 必须是合法域名或 IP；给了端口就要在 1..=65535
+            let (host, port) = match ep.rsplit_once(':') {
+                Some((h, p)) => (h, Some(p)),
+                None => (ep, None),
+            };
+            if host.is_empty() || host.len() > 253 {
+                return false;
+            }
+            let host_ok = host.parse::<std::net::IpAddr>().is_ok()
+                || host.split('.').all(|label| {
+                    !label.is_empty()
+                        && label.len() <= 63
+                        && label
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                        && !label.starts_with('-')
+                        && !label.ends_with('-')
+                });
+            if !host_ok {
+                return false;
+            }
+            match port {
+                None => true,
+                Some(p) => p.parse::<u16>().map(|v| v != 0).unwrap_or(false),
+            }
+        }
+    }
+}
+
+pub(crate) fn normalize_ext_file_ep(ep: &str, default_port: u16) -> String {
+    let ep = ep.trim();
+    if ep.is_empty() || ep.contains(':') {
+        return ep.to_string();
+    }
+    format!("{ep}:{default_port}")
 }
 
 impl ServerConn {
@@ -793,7 +794,14 @@ impl ServerConn {
             // Sender 先克隆再 await：不能拿着 MutexGuard 跨 await（future 会变 !Send）
             let tx_clone = self.ws_tx.lock().as_ref().cloned();
             if let Some(tx) = tx_clone {
-                send_relay_payload(&tx, "剪贴板中继内容", msg).await;
+                crate::outbox::send_payload(
+                    &tx,
+                    "剪贴板中继内容",
+                    "中继连接",
+                    msg,
+                    crate::outbox::PAYLOAD_SEND_TIMEOUT,
+                )
+                .await;
             }
         }
     }
@@ -819,7 +827,14 @@ impl ServerConn {
         };
         let tx_clone = self.ws_tx.lock().as_ref().cloned();
         if let Some(tx) = tx_clone {
-            send_relay_payload(&tx, "文件通知", msg).await;
+            crate::outbox::send_payload(
+                &tx,
+                "文件通知",
+                "中继连接",
+                msg,
+                crate::outbox::PAYLOAD_SEND_TIMEOUT,
+            )
+            .await;
         }
     }
 
@@ -877,6 +892,7 @@ impl ServerConn {
         // 候选链：① 内网直连（本机 mDNS 发现表 SRV 真实端口）→ ② 对端 ext_file_ep
         //   拉取端直接按对端通告的「完整地址（IPv4[:port]）」直连，不读取本机 listen_port
         //   ——对端若走内网穿透，代理端口很可能 ≠ 20071，本机端口作兜底会拼错。
+        //   省略端口时补默认端口，规则与设置页探测共用 normalize_ext_file_ep。
         let mut routes: Vec<(String, &'static str)> = Vec::new();
         {
             let lan = state
@@ -890,7 +906,22 @@ impl ServerConn {
                 routes.push(r);
             }
         }
-        let ep = ext_file_ep.trim();
+        // 对端（或中继）提供的地址**不可信**：形态非法一律丢弃该候选，
+        // 绝不拿它去发请求（宽松解析 = 让远端选择本机请求谁与请求路径形态）。
+        let ep = {
+            let raw = ext_file_ep.trim();
+            if raw.is_empty() {
+                String::new()
+            } else if ext_file_ep_is_valid(raw) {
+                normalize_ext_file_ep(raw, state.config.lock().listen_port)
+            } else {
+                tracing::warn!(
+                    "忽略形态非法的对外文件地址：{}",
+                    crate::obs::logging::log_safe(raw)
+                );
+                String::new()
+            }
+        };
         if !ep.is_empty() {
             let wan = (format!("http://{ep}"), "wan");
             // 避免与候选①完全重复（内网可达时不绕外网）
@@ -916,8 +947,9 @@ impl ServerConn {
         let mut saved = Vec::new();
         let mut route_used: &'static str = "";
         let mut start_emitted = false;
-        // 候选链可变：首个文件试探成功后剔除失败项，后续文件直接用命中路由
-        // ——避免每个文件重复等 3s connect_timeout，大文件夹首文件后秒级完成。
+        // 候选链可变：命中路由的候选**被提到首位、失败候选被剔除**，因此后续文件
+        // 第一跳即命中，不必重复等 3s connect_timeout；但保留「逐个候选都试」，
+        // 使任一文件在中途路由失效时都能回退（详见下方选路处注释）。
         let mut routes: Vec<(String, &'static str)> = routes;
         for f in &files {
             // 取消检查点 1：每个文件开始前。命中即清标记并整体中止。
@@ -948,22 +980,17 @@ impl ServerConn {
                 key.map(|k| crate::crypto::file_auth::auth_token(&k, &hash))
                     .unwrap_or_default()
             };
-            // 试探：首个文件按候选链试，成功路由记录 route_used 并从 routes 里
-            // 剔除失败项；后续文件直接走 routes[0]（确定下来的路由），不再轮询。
-            let (resp, route) = if !route_used.is_empty() {
-                let (base, tag) = &routes[0];
-                (
-                    client
-                        .get(format!("{base}/file/{hash}"))
-                        .header("X-Clipsync-Auth", auth.clone())
-                        .send()
-                        .await
-                        .map_err(|e| anyhow::anyhow!("{e}"))?,
-                    *tag,
-                )
-            } else {
-                // 依次尝试各路由，第一个返回 2xx 的胜出（误连到别家内网同 IP 的
-                // 陌生设备会 404 / 解密失败，自然落到下一个候选，不会拿到错数据）
+            // 依次尝试各候选，第一个返回 2xx 的胜出并把其提到首位：
+            // - 误连到别家内网同 IP 的陌生设备会 404 / 解密失败，自然落到下一个候选；
+            // - **必须逐个候选都试**（不能「首文件成功后锁死 routes[0] 单次尝试」）：
+            //   锁死版在后续文件上遇到中途失效的路由（内网掉线 / 代理重启）会直接
+            //   终止整个 pull，而首个文件明明有回退能力 —— 同一批文件里行为不一致；
+            //   且锁死版不校验状态码，非 2xx 的响应体会被当作文件内容下载，最终只报
+            //   「解密失败」，掩盖真实原因。
+            // - 性能：命中路由已在 index 0 且失败候选已被剔除，后续文件第一跳即命中，
+            //   不会重复等待 connect_timeout（这正是原先想做「锁死」的动机，已由
+            //   「提前 + 剔除」达成）。
+            let (resp, route) = {
                 let mut chosen: Option<(reqwest::Response, &'static str)> = None;
                 let mut last_err: Option<anyhow::Error> = None;
                 let mut i = 0usize;
@@ -1218,4 +1245,64 @@ pub(crate) fn infer_lan_group(configured: &str) -> String {
         }
     }
     String::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_ext_file_ep;
+
+    /// 省略端口时必须补默认端口：这是「设置页探测通过 → 保存后跨 LAN 拉取可用」
+    /// 不变式的一半（另一半是拉取端用同一个函数）。回归点：拉取端曾直接拼
+    /// `http://{ep}`，无端口 ep 会打到 80 端口，与探测结论矛盾。
+    #[test]
+    fn ep_without_port_gets_default() {
+        assert_eq!(
+            normalize_ext_file_ep("114.66.28.183", 20071),
+            "114.66.28.183:20071"
+        );
+        assert_eq!(
+            normalize_ext_file_ep("  relay.example.com  ", 20071),
+            "relay.example.com:20071"
+        );
+    }
+
+    /// 显式端口（对端走内网穿透时 ≠ 20071）必须原样保留，绝不能被本机端口覆盖。
+    #[test]
+    fn ep_with_port_kept_verbatim() {
+        assert_eq!(
+            normalize_ext_file_ep("114.66.28.183:30080", 20071),
+            "114.66.28.183:30080"
+        );
+        assert_eq!(normalize_ext_file_ep("1.2.3.4:80", 20071), "1.2.3.4:80");
+    }
+
+    /// 严格校验：远端可控的值不允许携带 scheme/路径/userinfo/空白，端口范围也要合法。
+    #[test]
+    fn ep_validation_rejects_injection_forms() {
+        use super::ext_file_ep_is_valid as ok;
+        // 合法：IPv4 / IPv6 / 域名，可省端口
+        assert!(ok("114.66.28.183"));
+        assert!(ok("114.66.28.183:20071"));
+        assert!(ok("relay.example.com:443"));
+        assert!(ok("[2001:db8::1]:20071"));
+        assert!(ok("2001:db8::1"));
+        // 非法：scheme / 路径 / userinfo / 空白 / 空host / 端口越界 / 控制字符
+        assert!(!ok(""));
+        assert!(!ok("http://evil.example"));
+        assert!(!ok("114.66.28.183/file/x"));
+        assert!(!ok("user@evil.example"));
+        assert!(!ok("114.66.28.183:0"));
+        assert!(!ok("114.66.28.183:70000"));
+        assert!(!ok("evil example.com"));
+        assert!(!ok("evil
+.example.com"));
+        assert!(!ok(":20071"));
+    }
+
+    /// 空串 = 未配置（跨 LAN 文件不可拉取），保持空串，不能变成 ":20071"。
+    #[test]
+    fn empty_ep_stays_empty() {
+        assert_eq!(normalize_ext_file_ep("", 20071), "");
+        assert_eq!(normalize_ext_file_ep("   ", 20071), "");
+    }
 }

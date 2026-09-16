@@ -1,6 +1,5 @@
 //! 配置模块
 
-pub mod migration;
 pub mod settings;
 
 pub use settings::AppConfig;
@@ -45,7 +44,11 @@ fn migrate_from_legacy(app: &tauri::AppHandle, new_path: &std::path::Path) {
     {
         if old.exists() {
             if let Some(parent) = new_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                // 建目录失败必须留痕：它会让下面的 copy 必然失败，进而决定
+                // 「旧文件能不能删」（见 scrub_legacy_config 的前置条件）。
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    tracing::warn!("创建配置目录失败 {:?}: {e}", parent);
+                }
             }
             match std::fs::copy(&old, new_path) {
                 Ok(_) => {
@@ -72,7 +75,8 @@ pub fn load_config(app: &tauri::AppHandle) -> AppConfig {
     // 旧位置的配置文件可能含着加固前的**明文** network_token。
     // 新配置已改为只存系统密钥链（落盘置空），但只要旧副本还在磁盘上，
     // 这次加固就等于白做（实测确认过：迁移完成后旧文件仍在且带明文）。这里清掉。
-    scrub_legacy_config(app);
+    // 注意：仅在迁移确实产出新配置时才清理（见该函数内的前置条件）。
+    scrub_legacy_config(app, &path);
     let mut cfg = match std::fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
             tracing::warn!("config parse failed ({}), falling back to defaults", e);
@@ -127,7 +131,13 @@ fn merge_network_token(app: &tauri::AppHandle, mut cfg: AppConfig) -> AppConfig 
 /// 加固前 network_token 是明文写在配置里的；改用系统密钥链后，新配置落盘时该字段为空，
 /// 但**旧路径的副本**依旧带明文——实测发现「迁移只 copy 不删源」会让明文长期躺着。
 /// 因此：优先整体删除（新路径已是权威源）；删不掉则退而抹掉其中的 token 字段。
-fn scrub_legacy_config(app: &tauri::AppHandle) {
+///
+/// **前置条件（必须保留）**：只有在新路径的配置文件**确实存在**时才允许动旧文件。
+/// 早期版本无条件清理，于是「迁移 copy 失败（磁盘满 / 权限 / 建目录失败）」时，
+/// 旧文件是用户配置的唯一副本，却被照删 → 服务端地址、Token、手动地址、配对码
+/// 全部静默丢失、直接回落到默认配置。宁可留一份带明文的旧副本（有 WARN 可查），
+/// 也不能丢掉用户的配置。
+fn scrub_legacy_config(app: &tauri::AppHandle, new_path: &std::path::Path) {
     let Some(old) = app
         .path()
         .app_config_dir()
@@ -136,7 +146,21 @@ fn scrub_legacy_config(app: &tauri::AppHandle) {
     else {
         return;
     };
+    // 没有旧文件就没有可清理的东西（全新安装的正常路径，不告警）
     if !old.exists() {
+        return;
+    }
+    // 新路径与旧路径可能是同一个文件（home_dir 与 app_config_dir 重合的极端环境）：
+    // 那样「清理旧文件」等于删掉权威配置本身。
+    if old == new_path {
+        return;
+    }
+    // 核心前置条件：新文件不存在说明迁移没成功，旧文件是配置的唯一副本，不能删。
+    if !new_path.exists() {
+        tracing::warn!(
+            "新配置 {} 不存在（迁移未成功），保留旧位置配置文件不清理",
+            new_path.display()
+        );
         return;
     }
     if std::fs::remove_file(&old).is_ok() {

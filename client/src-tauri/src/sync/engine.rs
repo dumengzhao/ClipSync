@@ -13,7 +13,7 @@ use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// 引擎对外广播的剪贴板变化事件
 #[derive(Debug, Clone)]
@@ -94,6 +94,11 @@ pub struct SyncEngine {
     ///
     /// 用 `Arc<Mutex<>>` 包裹以便克隆进常驻监听任务。
     file_offer_expected: Arc<Mutex<Option<(String, Instant)>>>,
+    /// 运行期注入的 AppHandle（`start()` 时写入）。
+    ///
+    /// 用于读取配置上限等运行期设置——远端内容的尺寸校验必须能读到当前配置，
+    /// 因此不能只在构造期快照一次。
+    app: Arc<Mutex<Option<AppHandle>>>,
 }
 
 impl SyncEngine {
@@ -109,6 +114,7 @@ impl SyncEngine {
             last_emitted: Arc::new(Mutex::new(None)),
             last_file_hash: Arc::new(Mutex::new(None)),
             file_offer_expected: Arc::new(Mutex::new(None)),
+            app: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -140,6 +146,8 @@ impl SyncEngine {
 
     /// 启动引擎：开始监听剪贴板并将变化广播为 Tauri 事件
     pub async fn start(&self, app: AppHandle) -> Result<()> {
+        // 0) 注入 AppHandle：远端内容尺寸校验等运行期判断需要读配置
+        *self.app.lock().unwrap() = Some(app.clone());
         // 1) 启动剪贴板监听；变化时通过 signal 通道（非阻塞）通知处理任务
         let signal_tx = self.signal_tx.clone();
         let watch = self
@@ -286,6 +294,14 @@ impl SyncEngine {
     /// 再写回本地剪贴板。写入前把内容哈希登记为「最近已发出」，使本机剪贴板监听
     /// 回调触发的回声被判定为重复而丢弃，避免回环。
     pub async fn apply_remote(&self, mark: SyncMark, content: ClipboardContent) {
+        // 大小上限校验（在记录任何状态之前先拦）：远端内容此前**没有任何尺寸校验**
+        // 就写进本机剪贴板——已配对对端可推送接近 WebSocket 单消息上限（64 MiB）的
+        // 图片/文本，既撑内存又塞进本机剪贴板被其它程序读取。图片按设置项
+        // `max_image_size_mb` 限制；文本/HTML 用固定上限（正常文本远小于此）。
+        if let Some(reason) = self.remote_content_size_violation(&content) {
+            tracing::warn!("丢弃来自 {} 的剪贴板内容：{reason}", mark.device_id.0);
+            return;
+        }
         self.anti_loop.record_applied(&mark);
         if matches!(content, ClipboardContent::Text(_)) {
             crate::tray_dot(crate::TrayDotKind::Receive);
@@ -314,6 +330,53 @@ impl SyncEngine {
             mark,
             content: to_emit,
         });
+    }
+
+    /// 远端剪贴板内容的尺寸违规检查：返回 `Some(原因)` 表示应当丢弃。
+    ///
+    /// - 图片：受配置 `max_image_size_mb` 约束（0 = 不限制）；
+    /// - 文本 / HTML：固定 `MAX_REMOTE_TEXT_BYTES`（8 MiB）。正常复制粘贴的文本
+    ///   远小于此，超限只可能是异常或恶意构造——它同样会进入本机剪贴板。
+    fn remote_content_size_violation(&self, content: &ClipboardContent) -> Option<String> {
+        const MAX_REMOTE_TEXT_BYTES: usize = 8 * 1024 * 1024;
+        match content {
+            ClipboardContent::Image { data, .. } => {
+                let cap_mb = {
+                    let app = self.app.lock().unwrap().clone()?;
+                    // 先取出配置值，再把临时 State 借用的生命周期收在块内
+                    let mb = app
+                        .state::<crate::AppState>()
+                        .config
+                        .lock()
+                        .max_image_size_mb;
+                    mb
+                };
+                if cap_mb == 0 {
+                    return None;
+                }
+                let cap = (cap_mb as usize).saturating_mul(1024 * 1024);
+                (data.len() > cap)
+                    .then(|| format!("图片 {} KiB 超过上限 {} MiB", data.len() / 1024, cap_mb))
+            }
+            ClipboardContent::Text(t) => (t.len() > MAX_REMOTE_TEXT_BYTES).then(|| {
+                format!(
+                    "文本 {} KiB 超过上限 {} MiB",
+                    t.len() / 1024,
+                    MAX_REMOTE_TEXT_BYTES / (1024 * 1024)
+                )
+            }),
+            ClipboardContent::Html { html, text } => {
+                (html.len() + text.len() > MAX_REMOTE_TEXT_BYTES).then(|| {
+                    format!(
+                        "HTML 内容 {} KiB 超过上限 {} MiB",
+                        (html.len() + text.len()) / 1024,
+                        MAX_REMOTE_TEXT_BYTES / (1024 * 1024)
+                    )
+                })
+            }
+            // 文件走 Offer/拉取流程，不在本通道；这里不判
+            ClipboardContent::Files(_) => None,
+        }
     }
 }
 

@@ -24,11 +24,45 @@ pub struct Responder {
     pub message: Vec<u8>,
 }
 
-/// 生成 6 位数字配对码（用于 UI 展示）
+/// 配对码字母表：32 字符，去掉易混的 `0/O/1/I/L`。
+/// 32 能整除 256，取随机字节取模无偏。
+const CODE_ALPHABET: &[u8] = b"23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+/// 配对码字符数：12 × 5 bit = **60 bit 熵**。
+///
+/// 为什么不是 6 位数字：配对码是用 SPAKE2 派生的会话密钥做口令确认的，而确认标签
+/// 是密钥的确定性函数——**只要对端能拿到一次可验证的标签，就能对候选口令离线穷举**。
+/// 6 位数字（约 20 bit）在离线场景下几秒钟即可穷举完；常驻配对码一旦被还原，
+/// 攻击者可长期冒充该设备。60 bit 使离线/在线穷举都不可行，且长度仍可手抄。
+const CODE_LEN: usize = 12;
+
+/// 生成配对码（用于 UI 展示与 SPAKE2 口令）。
 pub fn generate_pairing_code() -> String {
     use rand::Rng;
-    let n: u32 = rand::thread_rng().gen_range(100_000..1_000_000);
-    format!("{n}")
+    let mut rng = rand::thread_rng();
+    (0..CODE_LEN)
+        .map(|_| CODE_ALPHABET[rng.gen::<u8>() as usize % CODE_ALPHABET.len()] as char)
+        .collect()
+}
+
+/// 规范化配对码：去掉分隔符/空白、统一大写。
+///
+/// 展示与抄写可带 `-`/空格（如 `A1B2-C3D4-E5F6`），口令一律取规范化值，
+/// 否则用户按带分隔符的形式抄写就会永远匹配不上。
+pub fn normalize_pairing_code(input: &str) -> String {
+    input
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
+}
+
+/// 是否为当前格式（12 位、字母表内）的配对码。
+///
+/// 用于启动时把历史遗留的低熵码（6 位数字等）自动换成新码：旧码熵不足，
+/// 而配对码常驻、一旦泄露即可被长期冒充，故不做兼容保留。
+pub fn pairing_code_is_current(code: &str) -> bool {
+    let c = normalize_pairing_code(code);
+    c.len() == CODE_LEN && c.bytes().all(|b| CODE_ALPHABET.contains(&b))
 }
 
 /// 发起方：用配对码开始配对，返回首条待发送消息（33 字节）
@@ -99,9 +133,44 @@ mod tests {
     }
 
     #[test]
-    fn pairing_code_is_six_digits() {
+    fn pairing_code_is_twelve_base32_chars() {
         let code = generate_pairing_code();
-        assert_eq!(code.len(), 6);
-        assert!(code.chars().all(|c| c.is_ascii_digit()));
+        assert_eq!(code.len(), CODE_LEN);
+        assert!(pairing_code_is_current(&code));
+        // 字母表内、且不含易混字符
+        for c in code.chars() {
+            assert!(CODE_ALPHABET.contains(&(c as u8)));
+            assert!(!"01ILO".contains(c));
+        }
+    }
+
+    /// 熵下限近似检查：同一个码在多次生成中不应重复（60 bit 下碰撞概率可忽略）。
+    #[test]
+    fn pairing_codes_do_not_repeat() {
+        let a = generate_pairing_code();
+        let b = generate_pairing_code();
+        assert_ne!(a, b);
+    }
+
+    /// 旧的低熵码（6 位数字）必须被判为「非当前格式」，启动时会被替换。
+    #[test]
+    fn legacy_six_digit_code_is_rejected() {
+        assert!(!pairing_code_is_current("537390"));
+        assert!(!pairing_code_is_current("000000"));
+        assert!(!pairing_code_is_current(""));
+        assert!(!pairing_code_is_current("ABC")); // 太短
+        assert!(!pairing_code_is_current("ABCDEFGHIJK0")); // 含 0（不在字母表）
+    }
+
+    /// 规范化：分隔符/空白/小写都要能容忍，便于用户抄写带 `-` 的码。
+    #[test]
+    fn normalize_tolerates_separators_and_case() {
+        assert_eq!(normalize_pairing_code("a1b2-c3d4-e5f6"), "A1B2C3D4E5F6");
+        assert_eq!(normalize_pairing_code(" A1B2 C3D4 E5F6 "), "A1B2C3D4E5F6");
+        assert_eq!(normalize_pairing_code("A1B2-C3D4-E5F6"), "A1B2C3D4E5F6");
+        // 规范化后仍按字母表校验（小写输入也能通过）
+        assert!(pairing_code_is_current(&normalize_pairing_code(
+            "a1b2-c3d4-e5f6"
+        )));
     }
 }

@@ -44,6 +44,7 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Listener, Manager};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+use tokio::sync::Notify;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
@@ -69,12 +70,15 @@ const MAX_PAIRING_ATTEMPTS: u32 = 24;
 /// 口令确认标签的域分隔串，避免该 HMAC 与其它用途的 MAC 混淆。
 const VERIFY_CONTEXT: &[u8] = b"clipsync-verify-v1";
 
-/// 应答方配对握手的失败限速阈值与封禁时长。///
-/// 应答方使用**常驻**的 6 位配对码（约 20 bit 熵）。SPAKE2 只防离线爆破，
-/// 防不了在线反复试探——同网段攻击者可以不断连上来试码直到猜中。
-/// 这里给应答方加一道在线防线：同一来源连续失败达阈值即临时封禁。
+/// 应答方配对握手的失败限速阈值与封禁时长（指数退避）。
+///
+/// 应答方使用**常驻**配对码。SPAKE2 只保证「每次协议运行只暴露一次可验证信息」
+/// 这一层——前提是实现本身不给攻击者离线 oracle（见握手处「有序确认」注释）。
+/// 即便如此，攻击者仍可反复建连做**在线**试探，因此这里按来源限速：
+/// 连续失败达阈值即封禁，时长逐次翻倍（30s→…→900s 封顶），成功即清零。
 const PAIRING_MAX_FAILS: u32 = 5;
-const PAIRING_BLOCK: Duration = Duration::from_secs(300);
+const PAIRING_BASE_LOCK: Duration = Duration::from_secs(30);
+const PAIRING_MAX_LOCK: Duration = Duration::from_secs(900);
 
 /// 入站连接并发上限。每个连接会独立 spawn 一个任务并可能阻塞到 5s 嗅探超时，
 /// 无上限时同网段任意主机刷连接就能耗尽任务与内存。
@@ -103,47 +107,182 @@ pub(crate) const OUT_QUEUE_CAPACITY: usize = 64;
 /// **不能 try_send 静默丢弃**：这些是实际载荷，丢了剪贴板内容就同步丢失、
 /// 丢了清单/拉取请求会出现「成功完成但 0 个文件」的假完成。队列满时等待
 /// 对端消费（背压），最多 10s——仍满视为对端卡死，放弃并记日志。
+///
+/// 实现已抽到 `crate::outbox`（与跨 LAN 中继的投递共用一份，避免两处漂移）。
 async fn send_payload(
     tx: &tokio::sync::mpsc::Sender<Outgoing>,
     what: &str,
     peer: &str,
     msg: Outgoing,
 ) {
-    match tokio::time::timeout(std::time::Duration::from_secs(10), tx.send(msg)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(_)) => tracing::debug!("对端 {peer} 已断开，{what} 未发送"),
-        Err(_) => {
-            tracing::warn!("对端 {peer} 出站队列 {what} 等待 10s 仍满，已丢弃（对端疑似卡死）")
-        }
-    }
+    crate::outbox::send_payload(tx, what, peer, msg, crate::outbox::PAYLOAD_SEND_TIMEOUT).await;
 }
 
-/// 配对失败计数表：源地址 → (连续失败次数, 最近失败时刻)。仅内存态，进程重启即清零。
-static PAIRING_FAILS: std::sync::LazyLock<Mutex<HashMap<String, (u32, std::time::Instant)>>> =
+/// 向多个对端**并发**投递同一条广播载荷。
+///
+/// 绝不要写回 `for (id, p) in peers { send_payload(...).await }`：那是串行等待，
+/// 单个假死对端就会让整批广播多花一个超时，N 个卡死对端即 N 倍——期间广播器
+/// 不消费事件流，积压溢出 broadcast（容量 64）后被 `Lagged` 整批丢弃，
+/// 表现为「一个坏对端让所有对端的剪贴板同步间歇性失灵」。
+///
+/// 并发（`join_all`）后总耗时≈单个超时，且**每个对端每批只投递一次**，
+/// 对端内部的消息顺序仍然由各自的出站队列保证，不会乱序。
+///
+/// `timeout`：由调用方给出——**同一循环里不同事件的价值不同**，
+/// 剪贴板变化频繁且要求低延迟（短超时），文件清单稀疏但丢了就是功能性丢失
+/// （长超时），两者不该共用同一个值。
+/// `exclude`：网格中继场景要跳过消息来源对端（不能把内容回发给发送者）。
+async fn broadcast_payload<F>(
+    peers: &HashMap<String, Peer>,
+    exclude: Option<&str>,
+    what: &str,
+    timeout: std::time::Duration,
+    build: F,
+) where
+    F: Fn() -> Outgoing,
+{
+    let futs = peers
+        .iter()
+        .filter(|(id, _)| Some(id.as_str()) != exclude)
+        .map(|(id, p)| crate::outbox::send_payload(&p.tx, what, id, build(), timeout));
+    futures_util::future::join_all(futs).await;
+}
+
+/// 单个来源的配对限速状态。
+struct PairingThrottle {
+    fails: u32,
+    locked_until: Option<std::time::Instant>,
+    /// 本次封禁时长（每次触发翻倍，直到上限）
+    lock_len: Duration,
+}
+
+/// 配对失败计数表：来源 **IP** → 限速状态。仅内存态，进程重启即清零。
+///
+/// 键必须是**纯 IP**，不能是 `IP:port`：每次 TCP 连接的源端口都不同，
+/// 用 `IP:port` 作键等于每次都是新条目、永不累积失败——5 次封禁形同虚设
+/// （历史实现正是如此，同网段攻击者换一条连接即可无限试探）。
+static PAIRING_FAILS: std::sync::LazyLock<Mutex<HashMap<std::net::IpAddr, PairingThrottle>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// 该来源是否处于配对封禁期。
-fn pairing_blocked(addr: &str) -> bool {
+/// 从 `IP:port` / `[v6]:port` / 裸 IP 串里取 IP；解析不出来时归入同一个兜底桶
+/// （宁可让异常来源互相限速，也不能因解析失败而完全不限速）。
+fn throttle_key(addr: &str) -> std::net::IpAddr {
+    if let Ok(sa) = addr.parse::<std::net::SocketAddr>() {
+        return sa.ip();
+    }
+    addr.parse::<std::net::IpAddr>()
+        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
+}
+
+/// 该来源是否处于配对封禁期；在期内返回剩余秒数。
+fn pairing_blocked(ip: std::net::IpAddr) -> Option<u64> {
     let tbl = PAIRING_FAILS.lock();
-    match tbl.get(addr) {
-        Some((n, at)) => *n >= PAIRING_MAX_FAILS && at.elapsed() < PAIRING_BLOCK,
-        None => false,
+    let th = tbl.get(&ip)?;
+    let until = th.locked_until?;
+    let now = std::time::Instant::now();
+    (now < until).then(|| (until - now).as_secs() + 1)
+}
+
+/// 记录一次配对握手结果（成功清零；失败累加，到阈值即按指数退避封禁），
+/// 并顺带清理过期条目防表膨胀。
+fn note_pairing_result(ip: std::net::IpAddr, ok: bool) {
+    let mut tbl = PAIRING_FAILS.lock();
+    tbl.retain(|_, th| {
+        th.locked_until
+            .map(|u| std::time::Instant::now() < u)
+            .unwrap_or(true)
+    });
+    if ok {
+        tbl.remove(&ip);
+        return;
+    }
+    let th = tbl.entry(ip).or_insert_with(|| PairingThrottle {
+        fails: 0,
+        locked_until: None,
+        lock_len: PAIRING_BASE_LOCK,
+    });
+    th.fails = th.fails.saturating_add(1);
+    if th.fails >= PAIRING_MAX_FAILS {
+        let now = std::time::Instant::now();
+        th.locked_until = Some(now + th.lock_len);
+        tracing::warn!(
+            "配对连续失败 {} 次，封禁来源 {ip} {:?}（下次失败将翻倍）",
+            th.fails,
+            th.lock_len
+        );
+        th.lock_len = (th.lock_len * 2).min(PAIRING_MAX_LOCK);
+        th.fails = 0;
     }
 }
 
-/// 记录一次配对握手结果（成功清零、失败累加），并顺带清理过期条目防表膨胀。
-fn note_pairing_result(addr: &str, ok: bool) {
-    let mut tbl = PAIRING_FAILS.lock();
-    tbl.retain(|_, (_, at)| at.elapsed() < PAIRING_BLOCK);
-    if ok {
-        tbl.remove(addr);
-        return;
+/// 重连失败的**日志节流**状态（按目标 `addr:port` 计）。
+///
+/// 对端离线时监控任务每 5s 重试一次。若每次都记一行，一个已失效的「手动/已知地址」
+/// 就能把日志刷满（实测每 5s 一条 `os error 10061` 持续数小时），真正有用的记录被
+/// 淹没。因此只节流**日志**、不动重试节奏（5s 轮询是断线快速恢复的基础）。
+struct ReconnectLog {
+    /// 连续失败次数
+    fails: u32,
+    /// 上次输出日志时的错误文本：错误内容变化说明不是同一个问题，必须立刻可见
+    last_err: String,
+}
+
+/// 重连失败日志节流表（目标数=对端数，量级极小）。
+static RECONNECT_LOGS: std::sync::LazyLock<Mutex<HashMap<String, ReconnectLog>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 本次失败是否应当输出日志（纯函数，便于单测）。
+///
+/// 首次与 2 的幂次（1/2/4/8/16…）输出，其余静默累积；错误内容变化时无条件输出
+/// ——换了错误说明不是同一个问题（如从「连接被拒」变成「握手失败」），必须立刻可见。
+fn should_log_reconnect(fails: u32, err_changed: bool) -> bool {
+    fails.is_power_of_two() || err_changed
+}
+
+/// 记录一次重连失败。输出时机见 `should_log_reconnect`；
+/// 静默次数会在下次输出时以累计次数与持续时长体现。
+fn log_reconnect_failure(key: &str, name: &str, err: &str) {
+    let mut tbl = RECONNECT_LOGS.lock();
+    // 兜底防表膨胀：正常只有个位数条目，异常时整体重置（下一次失败会重建）
+    if tbl.len() > 64 && !tbl.contains_key(key) {
+        tbl.clear();
     }
-    let entry = tbl
-        .entry(addr.to_string())
-        .or_insert((0, std::time::Instant::now()));
-    entry.0 = entry.0.saturating_add(1);
-    entry.1 = std::time::Instant::now();
+    let entry = tbl.entry(key.to_string()).or_insert_with(|| ReconnectLog {
+        fails: 0,
+        last_err: String::new(),
+    });
+    entry.fails = entry.fails.saturating_add(1);
+    let err_changed = entry.last_err != err;
+    if should_log_reconnect(entry.fails, err_changed) {
+        if entry.fails == 1 {
+            tracing::debug!("与 {name} 的连接结束：{err}");
+        } else {
+            // 持续时长按量级选单位：早期次数只有几十秒，写成「0 分钟」读着别扭
+            let secs = entry.fails as u64 * RECONNECT_INTERVAL.as_secs();
+            let dur = if secs < 60 {
+                format!("{secs} 秒")
+            } else if secs < 3600 {
+                format!("{} 分钟", secs / 60)
+            } else {
+                format!("{} 小时", secs / 3600)
+            };
+            tracing::debug!(
+                "与 {name} 的连接仍失败（已连续 {} 次、累计 {dur}）：{err}",
+                entry.fails
+            );
+        }
+        entry.last_err = err.to_string();
+    }
+}
+
+/// 重连成功：清空连续失败计数；此前若一直在失败，补一条恢复日志（便于确认自愈）。
+fn clear_reconnect_failure(key: &str, name: &str) {
+    let removed = RECONNECT_LOGS.lock().remove(key);
+    if let Some(prev) = removed {
+        if prev.fails > 0 {
+            tracing::info!("与 {name} 的连接已恢复（此前连续失败 {} 次）", prev.fails);
+        }
+    }
 }
 
 /// 长期重连口令（link secret）的派生域分隔串。
@@ -203,9 +342,6 @@ pub(crate) enum Outgoing {
     /// 已组装好的 `MessageFrame`（含 `MessageType::Config` 标签），由 `send_to_peer`
     /// 经加密通道直发。不在枚举里直接放 `ConfigFrame`，避免混淆「明文 vs 帧」语义。
     Config(crate::transfer::websocket::MessageFrame),
-    /// 主动断开本连接（取消配对时使用）：写任务收到后优雅关闭连接，
-    /// 否则旧会话在取消配对后仍然存活，对端也不知道对方已解绑。
-    Close,
 }
 
 /// 单个已连接对端（用于把本地剪贴板变化 / 文件帧转发给它）
@@ -215,6 +351,13 @@ struct Peer {
     /// 避免**已过期的旧连接把刚建立的新连接从表里删掉**（那会导致本机只收不发）。
     conn_id: u64,
     tx: mpsc::Sender<Outgoing>,
+    /// 主动断连信号（取消配对 / 被新连接取代）。
+    ///
+    /// 不能用 `tx.try_send(Outgoing::Close)` 代替：出站队列是有界队列，满时
+    /// try_send 直接失败，而调用方（unpair）是同步上下文、无法 await 重试——
+    /// 于是「取消配对」会在队列恰好满时**静默失效**，旧会话继续存活。
+    /// `Notify` 只在有等待者时唤醒、不会因「队列满」丢信号。
+    close: Arc<Notify>,
 }
 
 /// 本端作为「发送方」（拷贝者）时保存的一次传输：仅本端持有本地绝对路径，绝不外传。
@@ -363,6 +506,11 @@ pub struct ConnectionHub {
     /// request_id 并在此注册，收到对端 Reply 后通过 sender 把结果投递给等待方。
     /// 超时未回由调用方兜底（不依赖此处的清理），sender 关闭后下一次插入即覆盖。
     config_queries: Mutex<HashMap<String, tokio::sync::oneshot::Sender<ConfigReply>>>,
+    /// 「局域网配置扫描」的完整结果缓存：`(group_id, 完整配置(含明文 Token), 扫描时刻)`。
+    ///
+    /// 明文 Token **只在这里驻留**（不返回渲染器）：前端只拿 group_id + 掩码，
+    /// 选中时回传 group_id，由 `take_lan_config` 取出并一次性消费。每次扫描整体覆盖。
+    lan_config_cache: Mutex<Vec<(String, LanServerConfigGroup, std::time::Instant)>>,
 }
 
 impl ConnectionHub {
@@ -389,6 +537,7 @@ impl ConnectionHub {
             app: Mutex::new(None),
             seen: Mutex::new(RelaySeen::new()),
             config_queries: Mutex::new(HashMap::new()),
+            lan_config_cache: Mutex::new(Vec::new()),
         })
     }
 
@@ -508,15 +657,17 @@ impl ConnectionHub {
 
     /// 取消与某设备的配对：清掉 link secret 与持久化记录，并断开当前连接。
     ///
-    /// 移除 `peers` 表项会 drop 该连接的发送端，加密循环随即结束——因此这里
-    /// 不需要额外的中断信号。
+    /// 断连走 `Peer.close`（`Notify`）而**不是** `tx.try_send(Outgoing::Close)`：
+    /// 有界队列满时 try_send 会失败，而这里是同步上下文、无法 await 重试，
+    /// 于是「取消配对」静默失效——旧会话继续存活，且对端毫无察觉（本机
+    /// 稳态收帧路径也不再校验配对关系，被解绑的对端仍能推送并被本机应用）。
     pub fn unpair(&self, device_id: &str) {
         self.paired_codes.lock().remove(device_id);
         // 主动断开与该对端的现存连接：仅从表里移除 sender 并不会关闭 socket
         //（连接任务自身持有通道另一端），取消配对后旧会话必须立即终止，
         // 对端下次重连才能走到 Reject 流程。
         if let Some(p) = self.peers.lock().remove(device_id) {
-            let _ = p.tx.try_send(Outgoing::Close);
+            p.close.notify_one();
         }
         self.clear_rejected(device_id);
         self.pairing_fail_emitted.lock().remove(device_id);
@@ -753,13 +904,34 @@ impl ConnectionHub {
             top_names: top_names.clone(),
             has_folder,
         };
-        for (id, p) in &peers {
-            send_payload(&p.tx, "可拉取清单", id, Outgoing::File(frame.clone())).await;
-        }
+        // 并发广播：单个卡死对端不得拖慢其它对端（见 broadcast_payload 注释）
+        broadcast_payload(
+            &peers,
+            None,
+            "可拉取清单",
+            crate::outbox::PAYLOAD_SEND_TIMEOUT,
+            || Outgoing::File(frame.clone()),
+        )
+        .await;
         tracing::info!(
             "已广播文件可拉取清单 {transfer_id} 给 {} 个对端",
             peers.len()
         );
+    }
+
+    /// 入站文件大小上限（字节）：取自配置 `max_file_size_mb`（0 = 不限制）。
+    /// 拿不到 AppState 时返回 None（只在窗口/状态极早期可能，此时不限制）。
+    ///
+    /// 语义：**只约束对端发来的内容**——本机自己复制大文件是用户主动行为，不受限；
+    /// 单文件与单次 Offer 总量都不得超过该值。
+    fn incoming_size_cap_bytes(&self) -> Option<u64> {
+        let app = self.app.lock().clone()?;
+        let state = app.state::<AppState>();
+        let mb = state.config.lock().max_file_size_mb;
+        if mb == 0 {
+            return None;
+        }
+        Some(mb.saturating_mul(1024 * 1024))
     }
 
     /// 处理对端发来的文件帧（按角色路由：发送方流式发片，接收方落盘）。
@@ -781,6 +953,10 @@ impl ConnectionHub {
                 if device_id == self.identity.id.0 {
                     return; // 忽略自己（拷贝端不会收到自己的 Offer，这里双保险）
                 }
+                // 对端自报的名称可能含控制字符（bincode 不做字符集过滤）：净化后再进
+                // 日志与前端事件，避免日志注入与被后续日志复用的污染（device_id 是
+                // 身份键，**不做**净化）。
+                let device_name = crate::obs::logging::log_safe(&device_name);
                 // 防御回环：若本 Offer 的文件集合指纹与本机正在 offer 的某份相同，
                 // 说明这是「本机刚复制出去、被对端（可能运行旧版、未抑制自身回声）又
                 // 广播回来」的回声。直接丢弃——不进待拉取清单、也不 emit 给前端，
@@ -801,6 +977,31 @@ impl ConnectionHub {
                     return;
                 }
                 let total: u64 = files.iter().map(|f| f.file_size).sum();
+                // 大小上限校验：`max_file_size_mb`（设置页「最大文件大小」）此前是
+                // **纯展示字段**——全仓没有任何代码读取它，于是对端声明的尺寸不受任何
+                // 约束：接收方会按其声明的偏移一路 seek+write，把磁盘写到任意大小
+                // （稀疏文件同样占空间）。这里在**接收入口**拦截：单文件超限或本次
+                // 总量超限一律拒绝（不入待拉取清单、不通知前端、不弹小窗）。
+                // 0 表示不限制（与其它「0=关闭」配置项语义一致）。
+                if let Some(cap) = self.incoming_size_cap_bytes() {
+                    if let Some(f) = files.iter().find(|f| !f.is_dir && f.file_size > cap) {
+                        tracing::warn!(
+                            "拒绝来自 {device_name} 的文件 Offer {transfer_id}：单文件 {} MiB 超过上限 {} MiB（name={}）",
+                            f.file_size / (1024 * 1024),
+                            cap / (1024 * 1024),
+                            f.file_name
+                        );
+                        return;
+                    }
+                    if total > cap {
+                        tracing::warn!(
+                            "拒绝来自 {device_name} 的文件 Offer {transfer_id}：本次总量 {} MiB 超过上限 {} MiB",
+                            total / (1024 * 1024),
+                            cap / (1024 * 1024)
+                        );
+                        return;
+                    }
+                }
                 // 自动拉取需同时满足：总开关 auto_pull_enabled 开启 且 总大小严格小于阈值。
                 // 拷贝端自身已被上面的 device_id 守卫排除，所以这里一定是「其它端」。
                 let auto_pull = self.should_auto_pull(total);
@@ -1104,7 +1305,7 @@ impl ConnectionHub {
         };
         // Tauri hwnd() 返回的 HWND 与 windows 0.58 的 HWND 未必是同一 crate 别名，
         // 统一转成 *mut c_void 再包成 windows 0.58 的 HWND，确保 ShowWindow 类型匹配。
-        let hwnd = HWND(h.0 as *mut std::ffi::c_void);
+        let hwnd = HWND(h.0);
         unsafe {
             // 先显示再定位：从未显示过的窗口 GetWindowRect 可能返回无效矩形。
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
@@ -1390,6 +1591,9 @@ impl ConnectionHub {
             .collect();
         // 声明尺寸：用于校验对端提供的 offset/data 长度，防止构造超大稀疏文件
         let declared_sizes: Vec<u64> = offer.files.iter().map(|f| f.file_size).collect();
+        // 入站上限（纵深防御：Offer 入口已拦一次，这里再拦一次，防止「声明值被篡改」
+        // 或绕过 Offer 校验的历史条目）——0 表示不限制
+        let write_cap = self.incoming_size_cap_bytes().unwrap_or(u64::MAX);
         tauri::async_runtime::spawn(async move {
             // 条目清理守卫：写盘任务无论从哪条路径退出（完成/取消/空闲超时/写盘
             // 失败）都摘除 active_pulls 条目，杜绝泄漏与陈旧条目误删文件
@@ -1453,6 +1657,17 @@ impl ConnectionHub {
                     );
                     continue;
                 }
+                // 纵深防御：即便声明值本身超限（例如 Offer 校验被绕过或声明被篡改），
+                // 也不允许写超过配置上限的偏移（0 = 不限制时 write_cap 为 u64::MAX）
+                if end > write_cap {
+                    tracing::warn!(
+                        "分片超出配置的文件大小上限已丢弃 index={} offset={} len={} cap={write_cap}",
+                        payload.file_index,
+                        payload.offset,
+                        payload.data.len()
+                    );
+                    continue;
+                }
                 if let Ok(mut file) = tokio::fs::OpenOptions::new()
                     .create(true)
                     .write(true)
@@ -1495,6 +1710,47 @@ impl ConnectionHub {
             // 用户已取消时跳过：既不写剪贴板（半截文件没意义），也不发完成事件
             // （取消收口已由 cancel_pull 的 file-pull-cancelled 事件完成）。
             if !received.is_empty() && !cancelled_flag.load(Ordering::Relaxed) {
+                // 完整性校验：对端可能中途「发完就断」或干脆声明一个比实际更大的尺寸
+                //（此前接收方只做「分片不越界」校验，从不校验最终落盘大小），
+                // 结果是用户拿到打不开/被截断的文件却看到「已完成」。这里逐一比对
+                // 实际大小与声明大小，不符则记日志并向前端报「部分文件传输失败」
+                //（不删除文件：半截数据总比什么都没有更有价值，且用户可重试）。
+                let mut mismatch: Vec<String> = Vec::new();
+                for (idx, path) in targets.iter().enumerate() {
+                    let Some(path) = path else { continue };
+                    let declared = declared_sizes.get(idx).copied().unwrap_or(0);
+                    let Ok(meta) = tokio::fs::metadata(path).await else {
+                        continue;
+                    };
+                    if meta.len() != declared {
+                        let name = offer.files.get(idx).map(|f| f.file_name.clone());
+                        mismatch.push(format!(
+                            "{}（声明 {} B，实际 {} B）",
+                            name.unwrap_or_else(|| format!("#{idx}")),
+                            declared,
+                            meta.len()
+                        ));
+                    }
+                }
+                if !mismatch.is_empty() {
+                    tracing::warn!("拉取 {tid} 落盘大小与声明不符：{}", mismatch.join("；"));
+                    if let Some(a) = &app {
+                        let _ = a.emit(
+                            "file-pull-error",
+                            serde_json::json!({
+                                "transfer_id": tid,
+                                "message": format!(
+                                    "{} 个文件大小与声明不符（可能被截断）：{}",
+                                    mismatch.len(),
+                                    mismatch.join("；")
+                                ),
+                                "failed_files": mismatch,
+                                // 非致命：随后仍会发 complete 收口，前端据此把条目移出
+                                "fatal": false,
+                            }),
+                        );
+                    }
+                }
                 // 抑制「拉取完成后自动写本机剪贴板」被本地监听误判为新的文件拷贝而回环广播：
                 // 记录本次写出路径的哈希，处理任务在检测到变化、且读到的路径哈希与之一致时，
                 // 即视为本机刚写入的回声而丢弃，不广播 Offer。与文本/图片经 `last_emitted`
@@ -1770,15 +2026,16 @@ impl ConnectionHub {
                                 "向 {} 个对端转发本地剪贴板变化 (relay ttl={RELAY_MAX_TTL})",
                                 peers.len()
                             );
-                            for (id, p) in peers {
-                                send_payload(
-                                    &p.tx,
-                                    "剪贴板同步内容",
-                                    &id,
-                                    Outgoing::Sync(env.clone()),
-                                )
-                                .await;
-                            }
+                            // 并发广播（见 broadcast_payload 注释）：串行 await 会让
+                            // 单个假死对端把整条广播链拖住，进而触发 Lagged 丢事件。
+                            broadcast_payload(
+                                &peers,
+                                None,
+                                "剪贴板同步内容",
+                                crate::outbox::BROADCAST_SEND_TIMEOUT,
+                                || Outgoing::Sync(env.clone()),
+                            )
+                            .await;
                         }
                         SyncEvent::LocalFilesCopied { paths } => {
                             // 本地拷贝了文件/目录：广播「可拉取」清单给所有对端。
@@ -2222,8 +2479,10 @@ impl ConnectionHub {
         if !self.connecting.lock().insert(key.clone()) {
             return;
         }
-        if let Err(e) = self.clone().connect_once(peer.clone(), None).await {
-            tracing::debug!("与 {} 的连接结束：{e}", peer.device_name);
+        match self.clone().connect_once(peer.clone(), None).await {
+            // connect_once 返回 Ok 表示「握手成功、连接跑完才结束」→ 视为一次成功重连
+            Ok(()) => clear_reconnect_failure(&key, &peer.device_name),
+            Err(e) => log_reconnect_failure(&key, &peer.device_name, &e.to_string()),
         }
         self.connecting.lock().remove(&key);
     }
@@ -2258,7 +2517,7 @@ impl ConnectionHub {
         };
         let (peer_hello, resp_paired) = if is_initiator {
             send_frame(&mut ws, MessageType::Hello, &serde_json::to_vec(&my_hello)?).await?;
-            let (ft, hpayload) = recv_frame(&mut ws).await?;
+            let (ft, hpayload) = recv_frame_timed(&mut ws).await?;
             if ft == MessageType::Reject {
                 self.mark_rejected_addr(&peer_addr);
                 // 对端明确告知「已无与本机的配对信息」（unpaired）：对端已取消配对，
@@ -2290,7 +2549,7 @@ impl ConnectionHub {
             let peer_reconnect = peer.reconnect;
             (peer, peer_reconnect)
         } else {
-            let (ht, hpayload) = recv_frame(&mut ws).await?;
+            let (ht, hpayload) = recv_frame_timed(&mut ws).await?;
             if ht != MessageType::Hello {
                 anyhow::bail!("握手首帧不是 Hello（type={ht:?}）");
             }
@@ -2339,19 +2598,22 @@ impl ConnectionHub {
             (peer, Some(resp_paired))
         };
         let peer_id = peer_hello.device_id.clone();
-        let peer_name = peer_hello.device_name.clone();
+        // 对端自报名称：净化后用于日志/事件/注册表展示（device_id 是身份键，不净化）
+        let peer_name = crate::obs::logging::log_safe(&peer_hello.device_name);
 
         // 防御：拒绝与自身建立连接（自连时双方 id 相同，会让口令确认失去意义）
         if peer_id == my_id {
             anyhow::bail!("拒绝与自身建立连接");
         }
 
-        // 应答方在线爆破防护：本机配对码是常驻的 6 位数字，若不限速，
-        // 同网段攻击者可反复连接试探直到命中。直连（link secret）路径不涉及
-        // 口令试探，正常设备也不会累积失败，不会误伤。
-        if !is_initiator && pairing_blocked(&peer_addr) {
-            tracing::warn!("拒绝来自 {peer_addr} 的配对握手：连续失败过多，临时封禁中");
-            anyhow::bail!("配对尝试过于频繁，请稍后再试");
+        // 应答方在线爆破防护：配对码是常驻的，若不限速，同网段攻击者可反复连接试探。
+        // 直连（link secret）路径不涉及口令试探，正常设备也不会累积失败，不会误伤。
+        if !is_initiator {
+            let ip = throttle_key(&peer_addr);
+            if let Some(left) = pairing_blocked(ip) {
+                tracing::warn!("拒绝来自 {peer_addr} 的配对握手：连续失败过多，{left}s 后自动解除");
+                anyhow::bail!("配对尝试过于频繁，请稍后再试");
+            }
         }
 
         // 2) 建立会话密钥。规则：**双向都按客户端 ID 判断**——双方配对表里都有对方
@@ -2384,23 +2646,34 @@ impl ConnectionHub {
                 hex_decode_32(&link).map_err(|e| anyhow::anyhow!("link secret 非法: {e}"))?;
             (derive_session_key(&raw)?, false)
         } else {
-            // 用户配对流程：SPAKE2（发起方先发、应答方先收）
+            // 用户配对流程：SPAKE2（发起方先发、应答方先收）。
+            // 配对码规范化后使用：显示可带分隔符/大小写差异，口令本身取规范化值，
+            // 避免用户按「A1B2-C3D4-E5F6」抄写而对方存的是无分隔形式导致永远不匹配。
             let pw = match role {
-                Role::Initiator => outgoing_code.clone().ok_or_else(|| {
-                    anyhow::anyhow!("未提供配对码（请在配对时输入对方显示的配对码）")
-                })?,
-                Role::Responder => self.pairing_code(),
+                Role::Initiator => {
+                    crate::crypto::pake::normalize_pairing_code(&outgoing_code.clone().ok_or_else(
+                        || anyhow::anyhow!("未提供配对码（请在配对时输入对方显示的配对码）"),
+                    )?)
+                }
+                Role::Responder => {
+                    crate::crypto::pake::normalize_pairing_code(&self.pairing_code())
+                }
             };
+            // 空口令一律拒绝：规范化后为空说明配对码被清空/填成了纯符号，
+            // 继续下去会让两端用「空口令」派生密钥（等于没有口令）。
+            if pw.is_empty() {
+                anyhow::bail!("配对码为空或格式非法，无法进行 SPAKE2 握手");
+            }
             let shared = match role {
                 Role::Initiator => {
                     let init = start_initiator(&pw);
                     send_frame(&mut ws, MessageType::Signal, &init.message).await?;
-                    let (_t, b) = recv_frame(&mut ws).await?;
+                    let (_t, b) = recv_frame_timed(&mut ws).await?;
                     init.finish(&b)
                         .map_err(|e| anyhow::anyhow!("spake2 finish: {e}"))?
                 }
                 Role::Responder => {
-                    let (st, a) = recv_frame(&mut ws).await?;
+                    let (st, a) = recv_frame_timed(&mut ws).await?;
                     if st == MessageType::Reject {
                         anyhow::bail!("对端在配对阶段拒绝握手");
                     }
@@ -2413,36 +2686,58 @@ impl ConnectionHub {
             (derive_session_key(&shared)?, true)
         };
 
-        // 4) HMAC 校验：确认两端使用同一口令（错误口令会派生不同密钥 → 校验失败）。
+        // 4) 口令确认：确认两端使用同一口令，且**必须有序**。
         //
-        // 关键：标签必须**各自绑定发送者身份**，而不是绑定接收者。每端发送
-        // `HMAC(key, ctx || 自己的 id)`，并用 `HMAC(key, ctx || 对端 id)` 去核对收到的值。
-        // 若两端都用「对端 id」做输入再直接比较，即使密钥完全一致，因 id 不同，
-        // 两个标签也永远不等 —— 那样配对会 100% 失败。
+        // 为什么顺序是安全关键：确认标签是会话密钥的确定性函数。若应答方在核对
+        // 对端之前就把自己的标签发出去，攻击者（冒充发起方连上来）拿到该标签后，
+        // 就能对每个候选配对码算出候选密钥、离线比对标签——**配对码可被离线穷举**，
+        // 常驻码一旦泄露即等于该设备可被永久冒充。SPAKE2 保证的「每次协议运行只
+        // 暴露一次可验证信息」在「自愿先发标签」的实现下不成立。
+        // 因此：应答方**先核对、通过后才出证**；不匹配时只回 Reject、绝不出证。
+        //
+        // 标签各自绑定发送者身份：每端发 HMAC(key, ctx‖自己 id)，用
+        // HMAC(key, ctx‖对端 id) 核对收到的值（若两端都用「对端 id」做输入再直接
+        // 比较，因 id 不同两个标签永远不等，配对会 100% 失败）。
         let my_tag = verify_tag(&key, &my_id);
         let expected_peer_tag = verify_tag(&key, &peer_id);
-        send_frame(&mut ws, MessageType::Verify, &my_tag).await?;
-        let (vt, peer_tag) = recv_frame(&mut ws).await?;
-        if vt == MessageType::Reject {
-            // 直接建连边缘：对端拨号目标与实际身份不符、无本机 secret，主动回拒
-            anyhow::bail!("对端在校验阶段拒绝握手（无本机 link secret）");
-        }
-        if !ct_eq(&peer_tag, &expected_peer_tag) {
-            // HMAC 校验失败：两端使用的口令不一致。本机作为应答方**只记日志、不弹窗**：
-            // 若是对方用户输错配对码，错误反馈出现在发起方（输码一侧）的界面；若是
-            // 对端持过期 link secret 静默重连（旧版协议无法提前拦截），属后台事件、
-            // 用户无从操作——无论哪种，本机弹「配对码不一致」都只是打扰。
-            if matches!(role, Role::Responder) {
+        let tag_matches = |t: &[u8]| ct_eq(t, &expected_peer_tag);
+        if is_initiator {
+            // 发起方先出证是安全的：其口令来自「用户输入的对方配对码」，
+            // 而对方（应答方）本来就知道这个码，故不存在额外的秘密泄露。
+            send_frame(&mut ws, MessageType::Verify, &my_tag).await?;
+            let (vt, peer_tag) = recv_frame_timed(&mut ws).await?;
+            if vt == MessageType::Reject {
+                // 直接建连边缘：对端拨号目标与实际身份不符、无本机 secret，主动回拒
+                anyhow::bail!("对端在校验阶段拒绝握手（无本机 link secret）");
+            }
+            if !tag_matches(&peer_tag) {
+                note_pairing_result(throttle_key(&peer_addr), false);
+                return Err(HandshakeError::CodeMismatch.into());
+            }
+        } else {
+            let (vt, peer_tag) = recv_frame_timed(&mut ws).await?;
+            if vt == MessageType::Reject {
+                anyhow::bail!("对端在校验阶段拒绝握手（无本机 link secret）");
+            }
+            if !tag_matches(&peer_tag) {
+                // HMAC 校验失败：两端口令不一致。**只回 Reject，不出证**。
+                let _ = send_frame(&mut ws, MessageType::Reject, b"code_mismatch").await;
+                // 本机作为应答方**只记日志、不弹窗**：若是对方用户输错配对码，
+                // 错误反馈出现在发起方（输码一侧）的界面；若是对端持过期 link
+                // secret 静默重连（旧版协议无法提前拦截），属后台事件、用户无从
+                // 操作——无论哪种，本机弹「配对码不一致」都只是打扰。
                 tracing::warn!(
                     "与 {peer_name} 的握手口令校验失败（fresh_pairing={is_fresh_pairing}），连接已断开；若为重新配对请核对配对码，或双方取消配对后重新配对"
                 );
+                note_pairing_result(throttle_key(&peer_addr), false);
+                return Err(HandshakeError::CodeMismatch.into());
             }
-            note_pairing_result(&peer_addr, false);
-            return Err(HandshakeError::CodeMismatch.into());
+            // 口令确认通过 → 现在才出自己的标签（顺序即安全边界）
+            send_frame(&mut ws, MessageType::Verify, &my_tag).await?;
         }
 
         // 握手通过：清掉该来源的失败计数（配对成功即恢复正常）
-        note_pairing_result(&peer_addr, true);
+        note_pairing_result(throttle_key(&peer_addr), true);
 
         if is_fresh_pairing {
             tracing::info!("paired with {} ({})", peer_name, peer_addr);
@@ -2566,17 +2861,28 @@ impl ConnectionHub {
 
         // 6) 注册对端，进入加密同步循环
         let conn_id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
-        // 发送端**只**存放在 peers 表里（不在本地留 clone）：这样取消配对时
-        // 把表项一移除，tx 即被 drop，下面的 rx 立刻收到 None 并结束本连接。
         let (tx, mut rx) = mpsc::channel::<Outgoing>(OUT_QUEUE_CAPACITY);
         // handle_file_frame 需要在解密循环里用发送端回传分片，而 tx 已被移入 Peer
         // 表项（用于转发任务）。此处克隆一份专供文件帧回传，避免「move 后借用」。
+        //
+        // 副作用：本连接**始终**持有一个发送端 clone，所以「移除 peers 表项 → 通道关闭
+        // → rx.recv() 返回 None」这条链**不成立**（历史注释曾如此假设，是错的）。
+        // 主动断连因此不能依赖通道关闭，必须走下面的 close 信号。
         let tx_for_file = tx.clone();
-        if let Some(old) = self
-            .peers
-            .lock()
-            .insert(peer_id.clone(), Peer { conn_id, tx })
-        {
+        // 主动断连信号（unpair / 被新连接取代）：`Notify` 不会像有界队列那样「满则丢」，
+        // 是唯一可靠的关连接手段。
+        let close = Arc::new(Notify::new());
+        if let Some(old) = self.peers.lock().insert(
+            peer_id.clone(),
+            Peer {
+                conn_id,
+                tx,
+                close: close.clone(),
+            },
+        ) {
+            // 旧连接被本条取代：必须显式通知它退出，否则两路会话并存
+            //（各自都持有发送端 clone，旧 socket 会一直挂着）。
+            old.close.notify_one();
             tracing::debug!(
                 "与 {peer_name} 的连接 #{} 已被新连接 #{conn_id} 取代",
                 old.conn_id
@@ -2588,19 +2894,21 @@ impl ConnectionHub {
         // 加密消息循环
         loop {
             tokio::select! {
+                // 主动断连（取消配对 / 被新连接取代）：优雅关闭后结束本连接。
+                // 放在 select 首位且无「满队丢弃」风险——队列满时旧实现会静默丢掉
+                // Close 帧，导致取消配对后旧会话永远存活（对端仍可推送并被本机应用）。
+                _ = close.notified() => {
+                    let _ = write.send(Message::Close(None)).await;
+                    tracing::info!("与 {peer_name} 的连接 #{conn_id} 收到主动断连信号，已关闭");
+                    break;
+                }
                 outgoing = rx.recv() => {
                     match outgoing {
-                        Some(Outgoing::Close) => {
-                            // 取消配对等场景的主动断开：优雅关闭后结束本连接
-                            let _ = write.send(Message::Close(None)).await;
-                            break;
-                        }
                         Some(out) => {
                             // Sync / File / Config 三类帧统一在此用会话密钥加密后发出
                             // （Config 的明文 = bincode(ConfigFrame)；上层已封装为
                             // MessageFrame，此处只需按帧头决定 msg_type 并原样加密载荷）
                             let (msg_type, pt) = match out {
-                                Outgoing::Close => continue, // 已在外层处理，防御分支
                                 Outgoing::Sync(env) => (
                                     MessageType::Sync,
                                     bincode::serialize(&env)
@@ -2668,18 +2976,15 @@ impl ConnectionHub {
                                                         let peers =
                                                             self.peers.lock().clone();
                                                         let other_count = peers.len().saturating_sub(1);
-                                                        for (id, p) in peers {
-                                                            if id == peer_id {
-                                                                continue;
-                                                            }
-                                                            send_payload(
-                                                                &p.tx,
-                                                                "中继转发内容",
-                                                                &id,
-                                                                Outgoing::Sync(relay.clone()),
-                                                            )
-                                                            .await;
-                                                        }
+                                                        // 并发转发，跳过来源对端（见 broadcast_payload 注释）
+                                                        broadcast_payload(
+                                                            &peers,
+                                                            Some(&peer_id),
+                                                            "中继转发内容",
+                                                            crate::outbox::BROADCAST_SEND_TIMEOUT,
+                                                            || Outgoing::Sync(relay.clone()),
+                                                        )
+                                                        .await;
                                                         tracing::debug!(
                                                             "中继剪贴板消息 {msg_id} 至其他 {other_count} 个对端 (ttl={})",
                                                             ttl - 1
@@ -2795,6 +3100,27 @@ where
 }
 
 /// 读取下一个二进制帧，跳过控制/非二进制帧；连接关闭或出错时返回 Err。
+/// 握手阶段单帧读取限时。
+///
+/// 嗅探（5s）与 WS accept（5s）之后，握手仍可能被「连上但不发帧」的对端无限拖住，
+/// 而每个握手都占着一个入站并发许可（64 个即可拒掉所有入站）。正常握手是毫秒级，
+/// 10s 只用于兜住恶意/失联对端。
+const HANDSHAKE_RECV_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 带限时的握手读帧：超时按错误上报（调用方记日志并断开）。
+async fn recv_frame_timed<S>(ws: &mut WebSocketStream<S>) -> anyhow::Result<(MessageType, Vec<u8>)>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    match tokio::time::timeout(HANDSHAKE_RECV_TIMEOUT, recv_frame(ws)).await {
+        Ok(r) => r,
+        Err(_) => Err(anyhow::anyhow!(
+            "握手读帧超时（{}s 内未收到对端帧）",
+            HANDSHAKE_RECV_TIMEOUT.as_secs()
+        )),
+    }
+}
+
 async fn recv_frame<S>(ws: &mut WebSocketStream<S>) -> anyhow::Result<(MessageType, Vec<u8>)>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -2926,8 +3252,41 @@ pub struct LanServerConfigSource {
     pub lan_group: String,
 }
 
-/// 一组「相同 (server_url, network_token)」的局域网设备聚合。
-/// 调用方按 groups.len() 决定 UI：0/1 个直接用、≥2 个让用户挑。
+/// 返回给渲染器的**脱敏**扫描结果。
+///
+/// 明文 `network_token`（既是中继鉴权凭证、又是跨 LAN 端到端加密密钥，等同口令）
+/// **不离开 Rust 边界**：前端只拿到 `group_id` 与掩码，选中时把 `group_id` 回传，
+/// 由后端取出完整配置写入本机。否则渲染器一被注入（或前端出 bug）就能直接把
+/// 对端设备的 Token 读走。
+#[derive(Debug, Clone, Serialize)]
+pub struct LanServerConfigSummary {
+    /// 选中时回传给 `apply_lan_server_config` 的标识（一次性）
+    pub group_id: String,
+    /// 服务端地址：非机密（弹窗要展示 host、用户要核对），照常返回
+    pub server_url: String,
+    /// Token 掩码（形如 `abcd••••wxyz`），无 Token 时为空串
+    pub token_masked: String,
+    pub has_token: bool,
+    pub sources: Vec<LanServerConfigSource>,
+}
+
+/// Token 掩码：仅保留首尾各 4 字符，供 UI 展示（**永不返回明文**）。
+fn mask_secret(s: &str) -> String {
+    let n = s.chars().count();
+    if n == 0 {
+        return String::new();
+    }
+    if n <= 8 {
+        // 太短则整体隐去：留 4+4 等于把短 Token 全暴露
+        return "••••".to_string();
+    }
+    let head: String = s.chars().take(4).collect();
+    let tail: String = s.chars().skip(n - 4).collect();
+    format!("{head}••••{tail}")
+}
+
+/// 一组「相同 (server_url, network_token)」的局域网设备聚合（**仅 Rust 侧使用**，
+/// 返回给渲染器的是上面的 `LanServerConfigSummary`）。
 #[derive(Debug, Clone, Serialize)]
 pub struct LanServerConfigGroup {
     pub server_url: String,
@@ -2938,7 +3297,22 @@ pub struct LanServerConfigGroup {
 /// 单次扫描总超时（含收集 + 各端逐个超时）；超过则放弃等待，按已收到的聚合。
 const LAN_SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2500);
 
+/// 扫描结果缓存的有效期：明文 Token 只在内存驻留这段时间，且条目被取用即消费。
+/// 过期后 `apply_lan_server_config` 会要求用户重新扫描（避免用过期配置覆盖本机）。
+const LAN_CONFIG_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
 impl ConnectionHub {
+    /// 取出（一次性消费）某次扫描缓存的完整配置（含明文 Token）。
+    /// 过期 / 不存在 / 已被取用 → None（调用方提示重新扫描）。
+    pub fn take_lan_config(&self, group_id: &str) -> Option<LanServerConfigGroup> {
+        let mut cache = self.lan_config_cache.lock();
+        let now = std::time::Instant::now();
+        cache.retain(|(_, _, at)| now.duration_since(*at) < LAN_CONFIG_CACHE_TTL);
+        let idx = cache.iter().position(|(id, _, _)| id == group_id)?;
+        let (_, group, _) = cache.remove(idx);
+        Some(group)
+    }
+
     /// 扫描本机已配对 + 局域网内可达的对端，询问其服务端配置。
     ///
     /// 行为契约：
@@ -2949,7 +3323,7 @@ impl ConnectionHub {
     ///   或 NotConfigured；
     /// - 候选设备全无回复 / 全未配置 → 返回空 Vec；
     /// - 单个聚合结果 → 调用方直写不弹窗；多个 → 弹选择。
-    pub async fn scan_lan_server_configs(self: &Arc<Self>) -> Vec<LanServerConfigGroup> {
+    pub async fn scan_lan_server_configs(self: &Arc<Self>) -> Vec<LanServerConfigSummary> {
         use std::time::Duration;
         // 1) 计算本机 lan_group：cfg.lan_group 非空直接用，否则用 infer（与 server_conn 同源逻辑）
         let (my_lg, candidate_devices) = {
@@ -3005,11 +3379,12 @@ impl ConnectionHub {
         let mut pending: std::collections::HashMap<String, (String, String)> =
             std::collections::HashMap::new(); // device_id -> (request_id, device_name)
         for (device_id, device_name, _lg) in &candidate_devices {
-            let request_id = format!(
-                "scan-{:016x}-{}",
-                rand::random::<u64>(),
-                &device_id[..device_id.len().min(8)]
-            );
+            // 按**字符**截取前 8 个（不是字节切片）：device_id 可能不是纯 ASCII——
+            // 它既可以来自用户可编辑的 config.json（resolve_device_id 不做字符集校验），
+            // 也可以来自配对时对端自报的身份，一旦前 8 字节切在多字节字符中间，
+            // `&device_id[..8]` 会直接 panic（字节索引必须落在字符边界上）。
+            let id_brief: String = device_id.chars().take(8).collect();
+            let request_id = format!("scan-{:016x}-{id_brief}", rand::random::<u64>());
             let (tx, rx) = tokio::sync::oneshot::channel::<ConfigReply>();
             self.config_queries.lock().insert(request_id.clone(), tx);
             rx_map.insert(
@@ -3103,7 +3478,26 @@ impl ConnectionHub {
         });
         // 总耗时未到也没关系——已经收完；故意超时也只是提前返回已收到的
         let _ = Duration::from_millis(0);
-        out
+        // 7) 完整结果（含明文 Token）留在 Rust 侧缓存，只把**脱敏摘要**返回渲染器。
+        //    每次扫描整体覆盖缓存：既保证「选中项一定来自最近一次扫描」，也让明文
+        //    不会长期驻留（TTL 5 分钟 + 被取用即消费，见 take_lan_config）。
+        let scanned_at = std::time::Instant::now();
+        let mut cache = self.lan_config_cache.lock();
+        cache.clear();
+        let mut summaries: Vec<LanServerConfigSummary> = Vec::with_capacity(out.len());
+        for g in out {
+            let group_id = Uuid::new_v4().to_string();
+            summaries.push(LanServerConfigSummary {
+                group_id: group_id.clone(),
+                server_url: g.server_url.clone(),
+                token_masked: mask_secret(&g.network_token),
+                has_token: !g.network_token.is_empty(),
+                sources: g.sources.clone(),
+            });
+            cache.push((group_id, g, scanned_at));
+        }
+        drop(cache);
+        summaries
     }
 
     /// 收到 Config::Query 时调用：读本机服务端配置，把 Reply/NotConfigured 帧
@@ -3251,10 +3645,92 @@ mod tests {
 
     /// 回归测试：本机复制文件后，对端把同一份文件作为 Offer 广播回来（回环），
     /// 接收方必须丢弃该 Offer，不进入本机待拉取列表、也不 emit 给前端。
+    /// 重连失败日志节流：只在首次与 2 的幂次输出，错误变化时立刻输出。
+    /// 目的：对端离线时每 5s 一次的重试不再把日志刷满（实测曾连续数小时刷屏）。
+    #[test]
+    fn reconnect_log_throttle_decides_correctly() {
+        // 首次与 2 的幂次：输出
+        for n in [1u32, 2, 4, 8, 16, 1024] {
+            assert!(super::should_log_reconnect(n, false), "{n} 应输出");
+        }
+        // 中间的次数：静默
+        for n in [3u32, 5, 6, 7, 100, 1000] {
+            assert!(!super::should_log_reconnect(n, false), "{n} 应静默");
+        }
+        // 错误内容变化：无论第几次都要输出
+        for n in [3u32, 7, 100] {
+            assert!(super::should_log_reconnect(n, true), "{n} 错误变化应输出");
+        }
+    }
+
+    /// 扫描缓存的取用语义：**一次性消费 + 过期失效**。
+    ///
+    /// 这是「明文 Token 只在 Rust 侧短暂驻留」这条安全边界的支点：前端只拿到
+    /// group_id，取用一次即销毁（防重放），过期即失效（防用陈旧配置覆盖本机）。
+    #[test]
+    fn lan_config_cache_is_one_shot_and_expires() {
+        let identity = TestDeviceIdentity::new(
+            crate::clipboard::types::DeviceId("lan-cfg-test".into()),
+            "lan-cfg-test",
+        )
+        .unwrap();
+        let engine = TestSyncEngine::new(identity.clone());
+        let hub = ConnectionHub::new(TestArc::new(identity), TestArc::new(engine));
+
+        let group = super::LanServerConfigGroup {
+            server_url: "ws://relay.example/ws".to_string(),
+            network_token: "SECRET-TOKEN".to_string(),
+            sources: Vec::new(),
+        };
+        // 新鲜条目：可取，且只能取一次
+        hub.lan_config_cache.lock().push((
+            "g1".to_string(),
+            group.clone(),
+            std::time::Instant::now(),
+        ));
+        let got = hub.take_lan_config("g1").expect("新鲜条目应可取到");
+        assert_eq!(got.network_token, "SECRET-TOKEN");
+        assert!(
+            hub.take_lan_config("g1").is_none(),
+            "group_id 必须一次性消费（防用同一个 id 反复应用/重放）"
+        );
+
+        // 过期条目：直接失效
+        let old = std::time::Instant::now()
+            - super::LAN_CONFIG_CACHE_TTL
+            - std::time::Duration::from_secs(1);
+        hub.lan_config_cache
+            .lock()
+            .push(("g2".to_string(), group, old));
+        assert!(
+            hub.take_lan_config("g2").is_none(),
+            "超过 TTL 的扫描结果必须失效"
+        );
+
+        // 未知 id：不 panic、返回 None
+        assert!(hub.take_lan_config("does-not-exist").is_none());
+    }
+
+    /// Token 掩码：明文永不出 Rust，返回前必须只剩首尾 4 字符；短 Token 整体隐去。
+    #[test]
+    fn mask_secret_hides_token_body() {
+        assert_eq!(super::mask_secret("abcdefghijklmnop"), "abcd••••mnop");
+        assert_eq!(super::mask_secret("12345678"), "••••");
+        assert_eq!(super::mask_secret(""), "");
+        assert_eq!(super::mask_secret("abc"), "••••");
+        // 关键性质：掩码里不含原文的中段（无法从中还原 Token）
+        let m = super::mask_secret("SECRETTOKENVALUE123");
+        assert!(!m.contains("ETTOKENVALUE"));
+    }
+
     /// 否则表现为「本机复制的文件又出现在本机待拉取列表（本机也拉取了）」。
     #[tokio::test]
     async fn local_file_echo_from_peer_is_dropped() {
-        let identity = TestDeviceIdentity::load_or_create("echo-test-node").unwrap();
+        let identity = TestDeviceIdentity::new(
+            crate::clipboard::types::DeviceId("echo-test-node".into()),
+            "echo-test-node",
+        )
+        .unwrap();
         let engine = TestSyncEngine::new(identity.clone());
         let hub = ConnectionHub::new(TestArc::new(identity), TestArc::new(engine));
 
@@ -3306,7 +3782,11 @@ mod tests {
     /// 反向保证：真实的、文件指纹不在本机 active_offers 的对端 Offer 必须正常进入待拉取列表。
     #[tokio::test]
     async fn genuine_remote_offer_is_accepted() {
-        let identity = TestDeviceIdentity::load_or_create("echo-test-node-2").unwrap();
+        let identity = TestDeviceIdentity::new(
+            crate::clipboard::types::DeviceId("echo-test-node-2".into()),
+            "echo-test-node-2",
+        )
+        .unwrap();
         let engine = TestSyncEngine::new(identity.clone());
         let hub = ConnectionHub::new(TestArc::new(identity), TestArc::new(engine));
 

@@ -12,13 +12,14 @@ import {
   getVersion,
   probeExtFileEp,
   scanLanServerConfigs,
+  applyLanServerConfig,
   firewallRuleExists,
   firewallFix,
   openLogWindow,
   type AppConfig,
   type UpdateInfo,
   type ProbeResult,
-  type LanServerConfigGroup,
+  type LanServerConfigSummary,
 } from './api/tauri';
 import { open } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
@@ -127,7 +128,7 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
   const [lanScanBusy, setLanScanBusy] = useState(false);
   const [lanPickModal, setLanPickModal] = useState<{
     open: boolean;
-    groups: import('./api/tauri').LanServerConfigGroup[];
+    groups: LanServerConfigSummary[];
   }>({ open: false, groups: [] });
   // Network Token 显隐：默认隐藏（星号）
   const [showToken, setShowToken] = useState(false);
@@ -139,6 +140,10 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
   const [manualPairCode, setManualPairCode] = useState('');
   // 记录已落盘的快照，用于判断「值是否真的变化」，避免受控组件重渲染导致的误判。
   const persistedRef = useRef<AppConfig | null>(null);
+  /** Token 占位符：Rust 侧 get_config 用它替代真实 Token（真实值不进渲染器）。
+   *  显示上要当作「已设置」而非真实内容；保存时原样回传即表示「保持现值」。 */
+  const TOKEN_SENTINEL = '__clipsync_token_unchanged__';
+  const tokenIsSet = cfg?.network_token === TOKEN_SENTINEL;
   // 客户端自更新（基址取自 server_url 配置，无签名自托管）
   const [upd, setUpd] = useState<UpdateInfo | null>(null);
   const [updBusy, setUpdBusy] = useState<'check' | 'download' | null>(null);
@@ -402,21 +407,25 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
     }
   };
   const cancelLanPick = () => setLanPickModal({ open: false, groups: [] });
-  const applyLanGroup = async (g: LanServerConfigGroup) => {
+  /// 应用选中的服务端配置。
+  ///
+  /// 只把 `group_id` 回传后端：明文 Token 由 Rust 侧缓存持有并直接写入配置，
+  /// **全程不经过渲染器**（早先前端拿完整 Token 再提交，渲染器一旦被注入即可读走
+  /// 对端设备的中继密钥）。应用后重新读回配置，同步界面上的 scheme/host 状态。
+  const applyLanGroup = async (g: LanServerConfigSummary) => {
     setLanPickModal({ open: false, groups: [] });
-    const curUrl = persistedRef.current?.server_url ?? '';
-    const curToken = persistedRef.current?.network_token ?? '';
-    if (curUrl === g.server_url && curToken === g.network_token) {
-      setMsg('服务端配置未变化');
-      return;
+    try {
+      const result = await applyLanServerConfig(g.group_id);
+      const c = await getConfig();
+      setCfg(c);
+      persistedRef.current = c;
+      const parsed = parseServerUrl(c.server_url ?? '');
+      setSrvScheme(parsed.scheme);
+      setSrvHost(parsed.host);
+      setMsg(result || '已从局域网其他设备获取服务端配置');
+    } catch (e) {
+      setMsg('应用失败: ' + String(e), 'err');
     }
-    await persist(
-      { server_url: g.server_url, network_token: g.network_token },
-      '已从局域网其他设备获取服务端配置',
-    );
-    const parsed = parseServerUrl(g.server_url);
-    setSrvScheme(parsed.scheme);
-    setSrvHost(parsed.host);
   };
   // 把 server_url 的 host 部分（去掉 /ws）抽出来用于弹窗里展示
   const serverUrlHost = (url: string): string => {
@@ -521,6 +530,24 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
           {...textSave('device_name')}
         />
       </div>
+      <div className="row">
+        <label>设备 ID（机器唯一标识，自动生成，勿改）</label>
+        <span
+          style={{
+            fontFamily: 'monospace',
+            fontSize: '0.8rem',
+            color: '#94a3b8',
+            userSelect: 'text',
+            cursor: 'text',
+            wordBreak: 'break-all',
+            maxWidth: '260px',
+            textAlign: 'right',
+          }}
+          title="取自本机机器码；取不到机器码的设备为 000000 开头的生成值"
+        >
+          {cfg.device_id || '—'}
+        </span>
+      </div>
 
       <div className="section">网络</div>
       <div className="row">
@@ -584,11 +611,15 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
       <div className="row">
         <label>配对码</label>
         <div style={{ display: 'flex', gap: '0.5rem', flex: '0 0 auto' }}>
+          {/* 只读展示：配对码是 12 位 base32（60 bit）机器生成值，手改既无正当用途、
+              又会被后端按「格式非法即换新码」处理，导致界面显示与落盘值不一致。
+              要换码点「刷新」（已配对设备走 link secret，不受影响）。 */}
           <input
             type="text"
-            style={{ width: '160px' }}
+            readOnly
+            title="本机配对码：新设备首次配对时需要输入它。点击「刷新」可重新生成。"
+            style={{ width: '160px', background: 'var(--readonly-bg, transparent)' }}
             value={cfg.pairing_code}
-            onChange={(e) => update('pairing_code', e.target.value)}
           />
           <button className="btn btn-sm btn-ghost" onClick={refreshPairingCode}>
             刷新
@@ -841,8 +872,13 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
           <input
             type={showToken ? 'text' : 'password'}
             style={{ width: '100%', paddingRight: '2.6rem' }}
-            placeholder="服务端创建网络时返回的一次性 Token"
-            value={cfg.network_token ?? ''}
+            placeholder={
+              tokenIsSet
+                ? '已设置（留空表示不改动，输入新值可覆盖）'
+                : '服务端创建网络时返回的一次性 Token'
+            }
+            // 占位符不当内容显示：留空即「不改动」（真实 Token 由 Rust 侧保留）
+            value={tokenIsSet ? '' : (cfg.network_token ?? '')}
             onChange={(e) => update('network_token', e.target.value)}
             {...textSave('network_token')}
           />
@@ -869,6 +905,19 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
             {showToken ? '🙈' : '👁'}
           </button>
         </div>
+        {/* Token 真值不回传渲染器（见 Rust get_config 的占位符说明），
+            因此「留空」只能表示「不改动」；要清空必须显式点这个按钮。 */}
+        {tokenIsSet && (
+          <button
+            type="button"
+            className="btn btn-sm btn-ghost"
+            style={{ marginLeft: '0.5rem' }}
+            onClick={() => persist({ network_token: '' }, '已清空网络 Token')}
+            title="清除已保存的 Token（清空后跨 LAN 同步将断开，需重新填入）"
+          >
+            清空
+          </button>
+        )}
       </div>
       <div className="row">
         <label>对外文件地址</label>
@@ -1130,9 +1179,8 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
               }}
             >
               {lanPickModal.groups.map((g, i) => {
-                const tokenMasked = g.network_token
-                  ? g.network_token.slice(0, 4) + '••••' + g.network_token.slice(-4)
-                  : '（无 Token）';
+                // 掩码由后端给出（渲染器根本没有明文可算）
+                const tokenMasked = g.has_token ? g.token_masked : '（无 Token）';
                 return (
                   <li key={i} style={{ marginBottom: '0.4rem' }}>
                     <button

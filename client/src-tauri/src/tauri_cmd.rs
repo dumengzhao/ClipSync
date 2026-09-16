@@ -25,7 +25,7 @@ use crate::AppState;
 
 #[cfg(debug_assertions)]
 use crate::clipboard::types::FileMeta;
-use crate::transfer::manager::LanServerConfigGroup;
+use crate::transfer::manager::LanServerConfigSummary;
 #[cfg(debug_assertions)]
 use crate::transfer::manager::Outgoing;
 #[cfg(debug_assertions)]
@@ -52,8 +52,19 @@ pub fn get_device_name(state: State<AppState>) -> String {
 
 #[tauri::command]
 pub fn get_config(state: State<AppState>) -> crate::config::AppConfig {
-    state.config.lock().clone()
+    let mut cfg = state.config.lock().clone();
+    // 网络 Token（= 跨 LAN 的鉴权凭证兼端到端加密密钥，等同口令）**不回传渲染器**：
+    // 它只用于 Rust 侧向服务端认证与派生 network_key，前端唯一需要知道的是
+    // 「有没有配置」。这里用占位符替代真值，`set_config` 见到占位符即保持现值，
+    // 于是整份配置回写（前端 persist 全量提交）的语义不受影响、也不暴露密钥。
+    if !cfg.network_token.is_empty() {
+        cfg.network_token = NETWORK_TOKEN_SENTINEL.to_string();
+    }
+    cfg
 }
+
+/// 网络 Token 的占位符，见 `get_config` / `set_config` 的说明。
+pub const NETWORK_TOKEN_SENTINEL: &str = "__clipsync_token_unchanged__";
 
 /// 主窗口当前尺寸（逻辑像素），供设置页「获取实时宽高」按钮获取并回填默认窗口宽高。
 #[derive(serde::Serialize)]
@@ -109,6 +120,19 @@ pub fn set_config(
     app: AppHandle,
     cfg: crate::config::AppConfig,
 ) -> Result<(), String> {
+    apply_config(&state, &app, cfg)
+}
+
+/// 应用并持久化一份配置（**命令层与内部调用共用的唯一入口**）。
+///
+/// 把「校验 → 落盘 → 同步各子系统」集中在这里：`set_config`（渲染器提交）与
+/// `apply_lan_server_config`（从局域网设备复制的配置）都必须走同一套规则，
+/// 否则两条路径迟早出现「一边校验、一边不校验」的分叉。
+pub fn apply_config(
+    state: &AppState,
+    app: &AppHandle,
+    cfg: crate::config::AppConfig,
+) -> Result<(), String> {
     if cfg.listen_port == 0 {
         return Err("listen_port 不能为 0（有效范围 1..=65535）".to_string());
     }
@@ -119,7 +143,96 @@ pub fn set_config(
     let mut cfg = cfg;
     cfg.ext_file_ep = cfg.ext_file_ep.trim().to_string();
 
-    crate::config::save_config(&app, &cfg).map_err(|e| e.to_string())?;
+    // device_id 是身份权威值（启动时解析并落盘），不允许经配置保存被清空或改成空值；
+    // 前端提交的空值一律以内存中的现值为准，防止身份意外丢失导致重生成。
+    if cfg.device_id.trim().is_empty() {
+        cfg.device_id = state.config.lock().device_id.clone();
+    }
+
+    // device_name 同理：空名会让标题栏/状态栏设备名消失，以内存现值兜底。
+    if cfg.device_name.trim().is_empty() {
+        cfg.device_name = state.config.lock().device_name.clone();
+    }
+
+    // ---- 字段校验：命令参数来自渲染器，宽松落盘等于把配置交给注入脚本 ----
+    // server_url：只允许 ws/wss（否则会被当成明文 ws 静默连错地址——历史上
+    // 用户填 https:// 就是这样被静默转成 ws 的）；空串表示未配置。
+    {
+        let url = cfg.server_url.trim();
+        if !url.is_empty() && !(url.starts_with("ws://") || url.starts_with("wss://")) {
+            return Err("服务端地址必须以 ws:// 或 wss:// 开头（https 请写成 wss://）".to_string());
+        }
+        if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err("服务端地址不能包含空白或控制字符".to_string());
+        }
+        cfg.server_url = url.to_string();
+    }
+    // ext_file_ep：严格 host[:port]，拒绝 scheme/路径/userinfo 等形态
+    // （该值还会被远端提供并直接拼成请求地址，宽松解析即 SSRF 面）
+    {
+        let ep = cfg.ext_file_ep.trim();
+        if !ep.is_empty() && !crate::server_conn::ext_file_ep_is_valid(ep) {
+            return Err(
+                "对外文件地址格式非法：应为 IP 或域名，可选带端口（如 1.2.3.4:20071）".to_string(),
+            );
+        }
+        cfg.ext_file_ep = ep.to_string();
+    }
+    // sync_dir：允许留空（用系统下载目录）；给了就必须是**用户目录下的绝对路径**，
+    // 拒绝盘符根/系统目录——落盘位置由对端文件名参与构造，指到系统目录等于把
+    // 写入点放到危险位置。
+    if let Some(dir) = cfg
+        .sync_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+    {
+        if dir.contains('\u{0}') {
+            return Err("文件同步目录非法".to_string());
+        }
+        let path = std::path::Path::new(dir);
+        if !path.is_absolute() {
+            return Err("文件同步目录必须是绝对路径".to_string());
+        }
+        let bad = {
+            let lower = dir.to_ascii_lowercase();
+            let windows_block = [r"c:\windows", r"c:\program files", r"c:\programdata"]
+                .iter()
+                .any(|p| lower.starts_with(p));
+            windows_block
+                || path.parent().is_none() // 盘符根 / "/"
+                || lower == "/etc"
+                || lower.starts_with("/etc/")
+                || lower.starts_with("/usr/")
+                || lower.starts_with("/system/")
+        };
+        if bad {
+            return Err("文件同步目录不能是系统目录或磁盘根目录".to_string());
+        }
+        cfg.sync_dir = Some(dir.to_string());
+    }
+
+    // Token 占位符 = 「保持现值」：前端拿不到真值（见 get_config），
+    // 整份回写时只会带回占位符；真值以内存中的现值为准。
+    if cfg.network_token == NETWORK_TOKEN_SENTINEL {
+        cfg.network_token = state.config.lock().network_token.clone();
+    }
+
+    // 配对码：必须满足当前高熵格式（12 位 base32）。用户可能手工改成弱口令
+    //（如 "1234"），而它是 SPAKE2 的口令，弱到可被离线穷举即等于配对可被冒充；
+    // 非法/空值一律换成新生成的强码，保证「存下来的码永远可用且够强」。
+    cfg.pairing_code = {
+        let normalized = crate::crypto::pake::normalize_pairing_code(&cfg.pairing_code);
+        if crate::crypto::pake::pairing_code_is_current(&normalized) {
+            normalized
+        } else {
+            let fresh = crate::crypto::pake::generate_pairing_code();
+            tracing::warn!("提交的配对码格式非法（非 12 位 base32），已自动换成新码");
+            fresh
+        }
+    };
+
+    crate::config::save_config(app, &cfg).map_err(|e| e.to_string())?;
     *state.config.lock() = cfg.clone();
 
     // 开机自启：配置切换立即注册/移除系统自启条目（与启动时对齐逻辑一致）
@@ -151,10 +264,7 @@ pub fn set_config(
 
     if cfg.enable_mdns {
         let identity = state.identity.clone();
-        if let Err(e) = state
-            .discovery
-            .reconfigure(&app, &identity, cfg.listen_port)
-        {
+        if let Err(e) = state.discovery.reconfigure(app, &identity, cfg.listen_port) {
             tracing::warn!("mDNS reconfigure on port change failed: {e}");
         }
     }
@@ -351,7 +461,7 @@ pub fn hide_pull_toast(app: AppHandle) {
         if let Ok(h) = w.hwnd() {
             use windows::Win32::Foundation::HWND;
             use windows::Win32::UI::WindowsAndMessaging::{IsWindowVisible, ShowWindow, SW_HIDE};
-            let hwnd = HWND(h.0 as *mut std::ffi::c_void);
+            let hwnd = HWND(h.0);
             unsafe {
                 let _ = ShowWindow(hwnd, SW_HIDE);
                 if IsWindowVisible(hwnd).as_bool() {
@@ -702,12 +812,10 @@ pub async fn probe_ext_file_ep(
             error: Some("地址为空".to_string()),
         });
     }
-    let default_port = state.config.lock().listen_port;
-    let url = if ep.contains(':') {
-        format!("http://{ep}/clipsync/ping")
-    } else {
-        format!("http://{ep}:{default_port}/clipsync/ping")
-    };
+    // 省略端口时补默认端口：与跨 LAN 拉取的选路共用同一函数，
+    // 保证「探测通过 = 保存后拉取可用」（两处曾各写一份逻辑而分叉）。
+    let ep = crate::server_conn::normalize_ext_file_ep(&ep, state.config.lock().listen_port);
+    let url = format!("http://{ep}/clipsync/ping");
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .connect_timeout(std::time::Duration::from_secs(3))
@@ -797,8 +905,35 @@ pub async fn probe_ext_file_ep(
 #[tauri::command]
 pub async fn scan_lan_server_configs(
     state: State<'_, AppState>,
-) -> Result<Vec<LanServerConfigGroup>, String> {
+) -> Result<Vec<LanServerConfigSummary>, String> {
     Ok(state.hub.scan_lan_server_configs().await)
+}
+
+/// 应用「从局域网其他设备复制的服务端配置」。
+///
+/// 明文 Token **全程不经过渲染器**：前端只回传扫描时拿到的 `group_id`，这里从
+/// Rust 侧缓存取出完整配置（server_url + token）后走 `apply_config` 同一套校验与
+/// 副作用。返回面向用户的结果文案（已应用 / 未变化）。
+#[tauri::command]
+pub fn apply_lan_server_config(
+    state: State<AppState>,
+    app: AppHandle,
+    group_id: String,
+) -> Result<String, String> {
+    let group = state
+        .hub
+        .take_lan_config(&group_id)
+        .ok_or_else(|| "配置已过期或已被使用，请重新扫描".to_string())?;
+    let mut cfg = state.config.lock().clone();
+    let unchanged = cfg.server_url == group.server_url && cfg.network_token == group.network_token;
+    cfg.server_url = group.server_url.clone();
+    cfg.network_token = group.network_token.clone();
+    apply_config(&state, &app, cfg)?;
+    Ok(if unchanged {
+        "服务端配置未变化".to_string()
+    } else {
+        "已从局域网其他设备获取服务端配置".to_string()
+    })
 }
 
 /// 查询 mDNS 防火墙放行规则是否已存在（无需管理员权限，netsh show 空跑很快）。

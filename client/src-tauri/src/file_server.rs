@@ -13,6 +13,28 @@ use std::sync::Mutex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+/// HTTP 头读取的**总时限**（不是每次 read 的超时）。
+///
+/// 早期写成「每次 read 限时 10s」，可被慢滴绕过：连上后每 9 秒发 1 个字节，
+/// 每次 read 都在限时内返回，连接于是无限期存活并一直占着入站并发许可
+/// （`MAX_CONCURRENT_CONNS` = 64，占满后 ping 探测、P2P 握手、文件拉取全部被拒）。
+const HEADER_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// 响应写超时：对端「只连不读」时，内核发送缓冲写满后 `write_all` 会一直挂住，
+/// 同样会占着并发许可。30s 足够覆盖慢速链路（持续消费的慢读者不会触发）。
+const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// 带超时的 write_all：超时按 io 错误上报，交由调用方记日志。
+async fn write_all_timed(sock: &mut TcpStream, data: &[u8]) -> std::io::Result<()> {
+    match tokio::time::timeout(WRITE_TIMEOUT, sock.write_all(data)).await {
+        Ok(r) => r,
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "write timeout",
+        )),
+    }
+}
+
 /// 处理一条已被 accept 循环识别为文件拉取的 TCP 连接（HTTP/1.1 GET /file/<hash>）。
 ///
 /// `network_key` 为跨 LAN 网络密钥（与服务端共享，未连服务端时为 None）：
@@ -23,14 +45,13 @@ pub async fn handle_file_stream(
     network_key: Arc<Mutex<Option<[u8; 32]>>>,
 ) {
     // 读取 HTTP 头直到 \r\n\r\n。
-    // 整个头读取限时 10s：否则慢客户端（连上不发数据/逐字节滴数据）会一直
-    // 占着并发许可，64 个此类连接即可耗尽 MAX_CONCURRENT_CONNS 拒绝所有入站。
+    // 整个头读取限时 10s（**总时限**）：否则慢客户端（连上不发数据/逐字节滴数据）
+    // 会一直占着并发许可，64 个此类连接即可耗尽 MAX_CONCURRENT_CONNS 拒绝所有入站。
     let mut buf = Vec::with_capacity(1024);
     let mut tmp = [0u8; 1024];
+    let header_deadline = tokio::time::Instant::now() + HEADER_READ_TIMEOUT;
     let header_len = loop {
-        let n = match tokio::time::timeout(std::time::Duration::from_secs(10), sock.read(&mut tmp))
-            .await
-        {
+        let n = match tokio::time::timeout_at(header_deadline, sock.read(&mut tmp)).await {
             Ok(Ok(0)) => return,
             Ok(Ok(n)) => n,
             Ok(Err(_)) => return,
@@ -70,7 +91,11 @@ pub async fn handle_file_stream(
         //    此前只校验 hash 是否登记过，同网段任意主机拿到 hash 就能拉走文件。
         let presented = header_value(&header, "x-clipsync-auth").unwrap_or_default();
         if !crate::crypto::file_auth::verify(&k, hash, &presented) {
-            tracing::warn!("拒绝文件拉取：X-Clipsync-Auth 缺失或不匹配（hash={hash}）");
+            // hash 来自请求行（对端可控）：净化后再记日志，防日志注入
+            tracing::warn!(
+                "拒绝文件拉取：X-Clipsync-Auth 缺失或不匹配（hash={}）",
+                crate::obs::logging::log_safe(hash)
+            );
             let _ = write_status(&mut sock, 401, "unauthorized").await;
             return;
         }
@@ -122,8 +147,8 @@ async fn write_status(sock: &mut TcpStream, code: u16, msg: &str) -> std::io::Re
         status_text(code),
         body.len()
     );
-    sock.write_all(head.as_bytes()).await?;
-    sock.write_all(body).await?;
+    write_all_timed(sock, head.as_bytes()).await?;
+    write_all_timed(sock, body).await?;
     sock.flush().await
 }
 
@@ -132,8 +157,8 @@ async fn write_body(sock: &mut TcpStream, body: &[u8]) -> std::io::Result<()> {
         "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
-    sock.write_all(head.as_bytes()).await?;
-    sock.write_all(body).await?;
+    write_all_timed(sock, head.as_bytes()).await?;
+    write_all_timed(sock, body).await?;
     sock.flush().await
 }
 
