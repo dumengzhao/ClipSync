@@ -142,7 +142,7 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppState
                     }
                     ClientToServer::RelayText { to, ct } => {
                         if let Some((net, dev)) = &authed {
-                            state.relay_text(net, dev, &to, &ct, &tx);
+                            state.relay_text(net, dev, &to, &ct, &tx).await;
                         }
                     }
                     ClientToServer::FileNotify {
@@ -150,7 +150,9 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppState
                         ext_file_ep,
                     } => {
                         if let Some((net, dev)) = &authed {
-                            state.file_notify(net, dev, manifest, &ext_file_ep, &tx);
+                            state
+                                .file_notify(net, dev, manifest, &ext_file_ep, &tx)
+                                .await;
                         }
                     }
                 }

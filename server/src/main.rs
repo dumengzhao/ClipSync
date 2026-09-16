@@ -116,6 +116,10 @@ fn build_router(state: Arc<AppState>) -> axum::Router {
             post(admin::restore_device_handler),
         )
         .route(
+            "/api/admin/networks/:id/removed/:dev/purge",
+            post(admin::purge_device_handler),
+        )
+        .route(
             "/api/admin/update",
             get(update::admin_info).post(update::admin_upload),
         )

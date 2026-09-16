@@ -11,6 +11,7 @@ use axum::Json;
 use rust_embed::RustEmbed;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -39,6 +40,53 @@ static LOGIN_THROTTLES: LazyLock<Mutex<HashMap<std::net::IpAddr, LoginThrottle>>
 
 /// 单 IP 失败表上限：超过即做一轮过期清理（攻击者伪造海量源时防内存膨胀）
 const LOGIN_THROTTLE_MAX_IPS: usize = 1024;
+
+/// 解析 IP，容忍带端口的写法（`1.2.3.4:5678`）与两侧引号。
+fn parse_ip_lax(raw: &str) -> Option<IpAddr> {
+    let s = raw.trim().trim_matches('"');
+    if let Ok(ip) = s.parse::<IpAddr>() {
+        return Some(ip);
+    }
+    // 仅有单个冒号时才按 host:port 拆（裸 IPv6 已在上面直接解析成功）
+    let (host, _) = s.rsplit_once(':')?;
+    host.trim().parse::<IpAddr>().ok()
+}
+
+/// 取「登录退避计数用的客户端 IP」。
+///
+/// 直连地址是**环回**说明请求来自本机反向代理（部署形态：nginx 与后端同机，
+/// `proxy_pass http://127.0.0.1:20070`），此时所有请求的直连地址都是 127.0.0.1——
+/// 按它计数会让退避退化成全局单桶，任意人 5 次错码即可锁死管理员（比修复前更糟）。
+/// 因此环回直连时改看代理写入的转发头：
+/// - 优先 `X-Real-IP`：nginx `proxy_set_header X-Real-IP $remote_addr` 会**覆盖**
+///   客户端传入值，不可伪造；
+/// - 退而取 `X-Forwarded-For` 的**最后一段**：本仓 nginx 示例用
+///   `$proxy_add_x_forwarded_for`（真实来源追加在末尾），取第一段会被客户端
+///   预置的假值欺骗。
+///
+/// 非环回直连（客户端直连 20070）时**一律忽略转发头**：那些头在公网可任意伪造，
+/// 采信等于把退避键交给攻击者选择。
+fn client_throttle_key(peer: Option<SocketAddr>, headers: &axum::http::HeaderMap) -> IpAddr {
+    let direct = peer.map(|p| p.ip());
+    if direct.is_some_and(|ip| ip.is_loopback()) {
+        if let Some(ip) = headers
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_ip_lax)
+        {
+            return ip;
+        }
+        if let Some(ip) = headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.rsplit(',').next())
+            .and_then(parse_ip_lax)
+        {
+            return ip;
+        }
+    }
+    direct.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+}
 
 /// 内嵌管理页面资源（编译时打包进二进制，免部署静态文件）。
 #[derive(RustEmbed)]
@@ -88,11 +136,12 @@ pub async fn admin_login(
     State(state): State<Arc<AppState>>,
     // ConnectInfo 可选：单测的 oneshot 请求没有对端地址，此时退避退化为全局键
     peer_addr: Option<ConnectInfo<std::net::SocketAddr>>,
+    // 反代场景下真实来源在转发头里（经 nginx 时直连地址恒为 127.0.0.1），
+    // 取键规则见 throttle_key：仅环回直连才采信这两个头。
+    headers: axum::http::HeaderMap,
     Json(body): Json<LoginBody>,
 ) -> Json<Value> {
-    let throttle_key = peer_addr
-        .map(|c| c.0.ip())
-        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+    let throttle_key = client_throttle_key(peer_addr.map(|c| c.0), &headers);
     // 1) 退避检查（按源 IP）：锁定期内直接拒绝，且**不做口令校验**（也就不会消耗 Argon2）
     {
         let t = LOGIN_THROTTLES.lock().unwrap_or_else(|e| e.into_inner());
@@ -328,5 +377,99 @@ pub async fn restore_device_handler(
         Json(json!({"ok": true}))
     } else {
         Json(json!({"error": "not found"}))
+    }
+}
+
+/// POST /api/admin/networks/:id/removed/:dev/purge —— 彻底删除该设备记录
+/// （从黑名单永久移除，并清掉节点表里该 id 的任何残留）。用于清理废弃设备/旧身份。
+pub async fn purge_device_handler(
+    State(state): State<Arc<AppState>>,
+    Path((net_id, dev_id)): Path<(String, String)>,
+) -> Json<Value> {
+    if state.purge_device(&net_id, &dev_id) {
+        Json(json!({"ok": true}))
+    } else {
+        Json(json!({"error": "not found"}))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderMap;
+
+    fn sock(addr: &str) -> Option<SocketAddr> {
+        Some(addr.parse().unwrap())
+    }
+
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                v.parse().unwrap(),
+            );
+        }
+        h
+    }
+
+    /// 直连（非环回）时**必须**忽略转发头，否则公网可直接伪造来源把退避键
+    /// 指向管理员 IP（或随意分散以绕过计数）。
+    #[test]
+    fn direct_peer_ignores_forward_headers() {
+        let key = client_throttle_key(
+            sock("203.0.113.9:5001"),
+            &headers(&[("x-real-ip", "198.51.100.7")]),
+        );
+        assert_eq!(key.to_string(), "203.0.113.9");
+    }
+
+    /// 经 nginx（直连为环回）时取 X-Real-IP：否则所有登录共用 127.0.0.1 一个桶，
+    /// 任意人 5 次错码即可锁死管理员。
+    #[test]
+    fn proxied_peer_uses_x_real_ip() {
+        let key = client_throttle_key(
+            sock("127.0.0.1:5002"),
+            &headers(&[("x-real-ip", "203.0.113.9")]),
+        );
+        assert_eq!(key.to_string(), "203.0.113.9");
+    }
+
+    /// 没有 X-Real-IP 时取 XFF 的**最后一段**：首段可被客户端预置伪造。
+    #[test]
+    fn proxied_peer_uses_last_forwarded_hop() {
+        let key = client_throttle_key(
+            sock("[::1]:5003"),
+            &headers(&[("x-forwarded-for", "1.2.3.4, 203.0.113.9")]),
+        );
+        assert_eq!(key.to_string(), "203.0.113.9");
+    }
+
+    /// 环回但不带任何转发头（本机 curl / 端口转发）→ 退化为环回地址本身。
+    #[test]
+    fn loopback_without_headers_falls_back_to_loopback() {
+        let key = client_throttle_key(sock("127.0.0.1:5004"), &HeaderMap::new());
+        assert!(key.is_loopback());
+    }
+
+    /// 单测的 oneshot 请求没有对端地址（ConnectInfo 缺失）→ 全局键，行为与修复前一致。
+    #[test]
+    fn missing_peer_addr_is_unspecified() {
+        let key = client_throttle_key(None, &HeaderMap::new());
+        assert_eq!(key.to_string(), "0.0.0.0");
+    }
+
+    /// 带端口的转发头写法（部分反代如此）也要能解析。
+    #[test]
+    fn parse_ip_lax_accepts_port_and_quotes() {
+        assert_eq!(
+            parse_ip_lax("\"203.0.113.9:8080\"").unwrap().to_string(),
+            "203.0.113.9"
+        );
+        assert_eq!(
+            parse_ip_lax(" 2001:db8::1 ").unwrap().to_string(),
+            "2001:db8::1"
+        );
+        assert!(parse_ip_lax("not-an-ip").is_none());
     }
 }

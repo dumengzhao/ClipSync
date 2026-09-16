@@ -291,7 +291,7 @@
             <button class="ghost sm" id="updAddFile" type="button" data-page-node-id="qfO0bZmZIS2D4ft9KUCEXJ">+ 添加平台安装包</button>
             <button id="updSubmit" type="button" data-page-node-id="bfnXa4NyOGuAghY9a13vaG">发布更新</button>
           </div>
-          <div class="hint" data-page-node-id="eQ97gcqmSmZYR43VP4BRmZ">选好各平台安装包即可，更新清单（含 sha256）由本页面自动生成。服务端按<b data-page-node-id="p01iWwZwb0r0xjmSu2BQP1">平台键合并</b>进线上 latest.json：本次上传的平台覆盖更新，未涉及的平台原样保留，无需一次传齐。</div>
+          <div class="hint" data-page-node-id="eQ97gcqmSmZYR43VP4BRmZ">选好各平台安装包、填好版本号即可；安装包 <b data-page-node-id="p01iWwZwb0r0xjmSu2BQP1">sha256 由服务端在落盘时计算</b>并写入清单（不再依赖浏览器加密能力）。服务端按<b>平台键合并</b>进线上 latest.json：本次上传的平台覆盖更新，未涉及的平台原样保留，无需一次传齐。</div>
         </div>
       </section>
 
@@ -327,7 +327,7 @@
 
         <div class="panel" data-page-node-id="wYFNJUVZdFzaePR3YdoX8H">
           <div class="panel-title" data-page-node-id="uifHR010xo7gn0A06J2LD5">BLOCKED <span class="n" id="removedCount" data-page-node-id="PjHUuEJY86Ujzuo0nEJJZb"></span></div>
-          <div class="hint" style="margin:0 0 10px" data-page-node-id="ElFp7BG2KubqkDFt7kjx41">已移除设备被永久拒绝入网；「恢复」后可重新配对。</div>
+          <div class="hint" style="margin:0 0 10px" data-page-node-id="ElFp7BG2KubqkDFt7kjx41">已移除设备被永久拒绝入网。「恢复」= 解除拉黑、允许重新配对；「彻底删除」= 清掉这条记录（同时清理节点表残留），适合已废弃设备或换机后的旧身份。</div>
           <div id="removedList" class="empty" data-page-node-id="AVC4AlGV4cmPTHAoiauB9d">加载中…</div>
         </div>
       </section>
@@ -363,6 +363,7 @@ document.addEventListener('click',(ev)=>{
   else if(act==='disable') setEnabled(net,dev,false);
   else if(act==='remove') removeDevice(net,dev);
   else if(act==='restore') restoreDevice(net,dev);
+  else if(act==='purge') purgeDevice(net,dev);
   else if(act==='copy') copyText(el.dataset.val||'');
 });
 
@@ -527,7 +528,8 @@ async function loadRemoved(netId){
     for(const r of removed){
       html+=`<tr><td data-label="设备名">${esc(r.name||'(未知)')}</td>`+
         `<td data-label="设备 ID"><code class="uid">${esc(r.device_id)}</code></td>`+
-        `<td data-label="操作"><div class="ops"><button class="ghost sm" data-act="restore" data-net="${esc(netId)}" data-dev="${esc(r.device_id)}">恢复</button></div></td></tr>`;
+        `<td data-label="操作"><div class="ops"><button class="ghost sm" data-act="restore" data-net="${esc(netId)}" data-dev="${esc(r.device_id)}">恢复</button>`+
+        `<button class="danger sm" data-act="purge" data-net="${esc(netId)}" data-dev="${esc(r.device_id)}">彻底删除</button></div></td></tr>`;
     }
     html+='</tbody></table>';
     box.innerHTML=html;
@@ -545,8 +547,22 @@ async function restoreDevice(netId, devId){
   }catch(e){ toast('恢复失败: '+e.message); }
 }
 
-async function removeDevice(netId, devId){
-  if(!confirm('确定从网络移除该设备？\n移除后该设备将不再显示，且需重新配对才能再次加入。')) return;
+// 彻底删除记录：从黑名单永久移除，并清掉节点表里该 id 的残留。
+// 与「恢复」的区别：恢复是"解除拉黑、让设备能回来"；彻底删除是"这条记录不要了"，
+// 适合清理已废弃设备、换机后留下的旧身份（否则它会永远挂在设备列表里显示离线）。
+async function purgeDevice(netId, devId){
+  if(!confirm('彻底删除该设备记录？\n\n· 从黑名单永久移除（不再受"永久拒绝入网"约束）\n· 同时清除该设备在节点表里的残留记录\n· 设备若仍需使用，请让对方重新配对入网'))
+    return;
+  try{
+    const r = await api(`/api/admin/networks/${encodeURIComponent(netId)}/removed/${encodeURIComponent(devId)}/purge`, {method:'POST'});
+    if(r && r.error){ toast('彻底删除失败: '+r.error); return; }
+    toast('已彻底删除该设备记录');
+    loadRemoved(netId);
+    loadDevicesHttp(netId).catch(()=>{});
+  }catch(e){ toast('彻底删除失败: '+e.message); }
+}
+
+async function removeDevice(netId, devId){  if(!confirm('确定从网络移除该设备？\n移除后该设备将不再显示，且需重新配对才能再次加入。')) return;
   try{
     const r = await api(`/api/admin/networks/${netId}/devices/${devId}/remove`, {method:'POST'});
     if(r && r.error){ toast('移除失败: '+r.error); return; }
@@ -631,11 +647,8 @@ function fmtSize(n){
   return (n/1048576).toFixed(1)+'MB';
 }
 
-async function sha256Hex(file){
-  if(!(globalThis.crypto&&crypto.subtle)) throw new Error('当前环境不支持 Web Crypto（需 https 或 localhost）');
-  const dig=await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
-  return [...new Uint8Array(dig)].map(b=>b.toString(16).padStart(2,'0')).join('');
-}
+// sha256 不再由前端计算：服务端在上传落盘时用 sha2 自行计算并写入清单。
+// （浏览器 Web Crypto 只在安全上下文可用，http://<IP>/admin 下 crypto.subtle 为空。）
 
 async function loadUpdateInfo(){
   const box=$('#updInfo');
@@ -793,8 +806,8 @@ $('#updSubmit').onclick=async()=>{
   if(!rows.length){ toast('请至少添加一个平台安装包'); return; }
   $('#updSubmit').disabled=true;
   try{
-    // 清单不再让用户手选：按所选安装包现场生成（含 sha256），
-    // 服务端只负责按平台键合并，故此处只带本次涉及的平台。
+    // 清单不再让用户手选：按所选安装包现场生成（sha256 留空，由服务端在落盘时计算并写入），
+    // 服务端负责按平台键合并，故此处只带本次涉及的平台。
     const platforms={};
     const picked=[];
     for(const r of rows){
@@ -802,10 +815,10 @@ $('#updSubmit').onclick=async()=>{
       const f=r.querySelector('.upd-file').files[0];
       if(!p){ toast('请为「'+f.name+'」选择平台（未能自动识别）'); return; }
       if(platforms[p]){ toast('平台 '+p+' 被多个安装包重复选中，请检查'); return; }
-      let hash;
-      try{ hash=await sha256Hex(f); }
-      catch(e){ toast(p+' 的 sha256 计算失败：'+e.message); return; }
-      platforms[p]={url:f.name, sha256:hash};
+      // sha256 留空交给服务端算：浏览器 Web Crypto（crypto.subtle）只在安全上下文
+      // （https / localhost）存在，用 http://<公网IP>/admin 打开时根本不可用，
+      // 会导致「当前环境不支持 Web Crypto」而无法发布。
+      platforms[p]={url:f.name, sha256:''};
       picked.push([p,f]);
     }
     const manifest={
