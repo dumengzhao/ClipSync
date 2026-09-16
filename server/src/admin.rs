@@ -84,8 +84,27 @@ fn client_throttle_key(peer: Option<SocketAddr>, headers: &axum::http::HeaderMap
         {
             return ip;
         }
+        // 环回但**没有任何转发头**：说明反向代理没配 proxy_set_header X-Real-IP /
+        // X-Forwarded-For。此时所有外部登录都会塌缩到同一个键（127.0.0.1），退避退化成
+        // 全局锁——任意人 5 次错码即可锁死管理员（这正是本函数要解决的问题）。
+        // 2026-09-16 实测就撞上了这个：域名路径与直连端口路径的限速键不同，说明经 nginx
+        // 的请求没带上真实 IP。这种配置疏漏在行为上很难发现（锁仍然"工作"，只是分桶错了），
+        // 所以必须主动告警一次。
+        warn_missing_forward_headers_once();
     }
     direct.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+}
+
+/// 只在首次遇到「环回且无转发头」时告警一次，避免刷日志。
+static MISSING_FORWARD_HEADER_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn warn_missing_forward_headers_once() {
+    if !MISSING_FORWARD_HEADER_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!(
+            "[clipsync-server] 警告：请求来自环回但未携带 X-Real-IP / X-Forwarded-For ——              反向代理没有转发真实客户端 IP，管理登录退避会退化成全局单桶              （任意来源 5 次错码即可锁死管理员）。请在 nginx 的 /api/admin 段补上：             proxy_set_header X-Real-IP $remote_addr;              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;"
+        );
+    }
 }
 
 /// 内嵌管理页面资源（编译时打包进二进制，免部署静态文件）。
