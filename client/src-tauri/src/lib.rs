@@ -486,6 +486,7 @@ pub fn run() {
             tauri_cmd::probe_ext_file_ep,
             tauri_cmd::scan_lan_server_configs,
             tauri_cmd::apply_lan_server_config,
+            tauri_cmd::clear_network_token,
             tauri_cmd::firewall_rule_exists,
             tauri_cmd::firewall_fix,
             tauri_cmd::show_pull_toast,

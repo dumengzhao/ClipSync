@@ -13,6 +13,7 @@ import {
   probeExtFileEp,
   scanLanServerConfigs,
   applyLanServerConfig,
+  clearNetworkToken,
   firewallRuleExists,
   firewallFix,
   openLogWindow,
@@ -431,6 +432,31 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
   const serverUrlHost = (url: string): string => {
     const m = /^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)?([^/]+)/.exec(url.trim());
     return m ? m[2] : url;
+  };
+
+  /// Token 输入框提交：**留空 = 不改动**。
+  ///
+  /// 真实 Token 在 Rust 侧（前端只有哨兵），所以输入框平时显示为空——若把空串当
+  /// 「清空」提交，一次失焦就会删掉密钥链条目、跨 LAN 直接断连（2026-09-16 实际
+  /// 发生过，且服务端只存 hash 无法找回）。清空必须点「清空」按钮走显式命令。
+  const commitNetworkToken = (raw: string) => {
+    const v = raw.trim();
+    if (!v) return; // 留空 = 不改动
+    if (v === cfg?.network_token) return;
+    persist({ network_token: v });
+  };
+
+  /// 清空 Token：走显式命令（后端标记为「用户主动清空」并删除密钥链条目）
+  const handleClearNetworkToken = async () => {
+    try {
+      await clearNetworkToken();
+      const c = await getConfig();
+      setCfg(c);
+      persistedRef.current = c;
+      setMsg('已清空网络 Token（跨 LAN 同步已断开，需重新填入）', 'err');
+    } catch (e) {
+      setMsg('清空失败: ' + String(e), 'err');
+    }
   };
 
   // 服务端地址：失焦即把「协议 + 主机:端口」拼回完整 ws(s)://host:port/ws 落盘
@@ -880,7 +906,12 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
             // 占位符不当内容显示：留空即「不改动」（真实 Token 由 Rust 侧保留）
             value={tokenIsSet ? '' : (cfg.network_token ?? '')}
             onChange={(e) => update('network_token', e.target.value)}
-            {...textSave('network_token')}
+            // 不用 textSave：它把「空串 ≠ 持久值」当变化提交，而这里空串恰恰是
+            // 「不改动」的表示（真实 Token 在后端）。回车/失焦只提交非空的新值。
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+            }}
+            onBlur={(e) => commitNetworkToken((e.target as HTMLInputElement).value)}
           />
           <button
             type="button"
@@ -912,7 +943,7 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
             type="button"
             className="btn btn-sm btn-ghost"
             style={{ marginLeft: '0.5rem' }}
-            onClick={() => persist({ network_token: '' }, '已清空网络 Token')}
+            onClick={handleClearNetworkToken}
             title="清除已保存的 Token（清空后跨 LAN 同步将断开，需重新填入）"
           >
             清空
