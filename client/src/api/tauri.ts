@@ -318,6 +318,13 @@ export async function scanLanServerConfigs(): Promise<LanServerConfigSummary[]> 
   return invoke<LanServerConfigSummary[]>('scan_lan_server_configs');
 }
 
+/** 显式清空本机网络 Token（仅由设置页「清空」按钮调用）。
+ *  单独成命令：让「清空中继密钥」成为显式、不可误触的动作——set_config 一律把空
+ *  Token 视为「不改动」。 */
+export async function clearNetworkToken(): Promise<void> {
+  return invoke<void>('clear_network_token');
+}
+
 /** 应用选中的那组服务端配置：只回传 group_id，明文 Token 全程不出 Rust。
  *  返回后端给出的结果文案（已应用 / 未变化）。 */
 export async function applyLanServerConfig(groupId: string): Promise<string> {

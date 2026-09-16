@@ -120,6 +120,24 @@ pub fn set_config(
     app: AppHandle,
     cfg: crate::config::AppConfig,
 ) -> Result<(), String> {
+    let mut cfg = cfg;
+    // Token：**渲染器提交一律不能写空**。两种输入都按「不改动」处理：
+    //   ① 哨兵 —— 前端拿不到真值时整份回写的正常形态；
+    //   ② 空串 —— 前端把「已设置（占位显示为空）」的输入框当空串提交。2026-09-16 实际
+    //      发生过：一次失焦即触发 save_config 删除密钥链条目、跨 LAN 直接断连，而服务端
+    //      只存 token 的 hash，**抹掉即不可恢复**。
+    // 守卫只放在这里（不放 apply_config）：否则 `clear_network_token` 的显式清空
+    // 会被自己挡住（空串被当成「不改动」）。真正的清空只有那一条命令。
+    if cfg.network_token.is_empty() || cfg.network_token == NETWORK_TOKEN_SENTINEL {
+        let cur = state.config.lock().network_token.clone();
+        if cfg.network_token.is_empty() && !cur.is_empty() {
+            // 留痕：空串来源值得警惕（说明前端把「已设置」的输入框当空串提交了）
+            tracing::warn!(
+                "set_config 收到空 network_token，按「不改动」处理（保持已保存的 Token）"
+            );
+        }
+        cfg.network_token = cur;
+    }
     apply_config(&state, &app, cfg)
 }
 
@@ -210,12 +228,6 @@ pub fn apply_config(
             return Err("文件同步目录不能是系统目录或磁盘根目录".to_string());
         }
         cfg.sync_dir = Some(dir.to_string());
-    }
-
-    // Token 占位符 = 「保持现值」：前端拿不到真值（见 get_config），
-    // 整份回写时只会带回占位符；真值以内存中的现值为准。
-    if cfg.network_token == NETWORK_TOKEN_SENTINEL {
-        cfg.network_token = state.config.lock().network_token.clone();
     }
 
     // 配对码：必须满足当前高熵格式（12 位 base32）。用户可能手工改成弱口令
@@ -381,6 +393,20 @@ pub fn pair_manual(
         hub.pair_with_manual_address(addr, port, code).await;
     });
     Ok(())
+}
+
+/// 显式清空本机网络 Token（仅由设置页「清空」按钮调用）。
+///
+/// 单独成命令的原因：让「清空中继密钥」成为一个**显式、不可误触**的动作。
+/// `set_config` 一律把空 token 视为「不改动」，否则前端把「已设置」的输入框
+/// 当空串提交时就会悄悄抹掉密钥（服务端只存 token 的 hash，抹掉即不可恢复）。
+#[tauri::command]
+pub fn clear_network_token(state: State<AppState>, app: AppHandle) -> Result<(), String> {
+    let mut cfg = state.config.lock().clone();
+    // 显式清空不可逆（服务端只存 token 的 hash，抹掉即无法找回）：留 WARN 便于回溯
+    tracing::warn!("用户显式清空网络 Token（密钥链条目将删除，跨 LAN 同步会断开）");
+    cfg.network_token = String::new();
+    apply_config(&state, &app, cfg)
 }
 
 /// 重新生成本机「配对码」并立即持久化、同步到连接中枢。
