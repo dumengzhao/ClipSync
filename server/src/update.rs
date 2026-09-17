@@ -804,6 +804,7 @@ mod tests {
             update_dir: dir.join("update"),
             update_public_base: public_base.map(|s| s.to_string()),
             update_max_upload: 10 * 1024 * 1024,
+            trusted_proxies: vec![],
         }
     }
 
