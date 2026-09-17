@@ -79,7 +79,135 @@ pub struct AppState {
     pub pending_update: Mutex<Option<(std::path::PathBuf, String)>>,
 }
 
+/// 全局上限的**纯选择逻辑**（与副作用解耦，便于单测）：在「局域网待拉取 + 跨 LAN 待复制」
+/// 两份清单里，按到达时间保留最新的 `max` 条，返回**应当丢弃**的
+/// （待拉取 transfer_id 列表, 跨 LAN 下标列表）。
+///
+/// 两份清单共用一个额度：不区分来源，谁更旧谁先被丢。
+fn select_over_cap(
+    pending: &[(String, u64)],
+    cross: &[(usize, u64)],
+    max: usize,
+) -> (Vec<String>, Vec<usize>) {
+    enum Src {
+        Pending(String),
+        Cross(usize),
+    }
+    let mut all: Vec<(u64, Src)> = pending
+        .iter()
+        .map(|(id, at)| (*at, Src::Pending(id.clone())))
+        .chain(cross.iter().map(|(i, at)| (*at, Src::Cross(*i))))
+        .collect();
+    if all.len() <= max {
+        return (Vec::new(), Vec::new());
+    }
+    all.sort_by_key(|(at, _)| std::cmp::Reverse(*at)); // 新 → 旧
+    let mut drop_pending = Vec::new();
+    let mut drop_cross = Vec::new();
+    for (_, src) in &all[max..] {
+        match src {
+            Src::Pending(id) => drop_pending.push(id.clone()),
+            Src::Cross(i) => drop_cross.push(*i),
+        }
+    }
+    drop_cross.sort_unstable_by(|a, b| b.cmp(a));
+    (drop_pending, drop_cross)
+}
+
+/// 「接收到的清单」的**全局上限**：局域网待拉取 + 跨 LAN 待复制，**合计**最多这么多条。
+///
+/// 用户明确要求：任何地方都不超过 3 条，超出的全部丢弃（不是隐藏、不是延后显示）。
+/// 裁剪只在这一个地方做（见 `AppState::enforce_received_cap`）——两份清单分属
+/// `hub.pending_offers` 与 `cross_lan_offers`，只有这里能同时看到它们；前端各自裁剪
+/// 会出现「前端丢了、后端还在」，重启后又冒出来。
+pub const MAX_RECEIVED_OFFERS: usize = 3;
+
+/// 跨 LAN「待复制」清单的留存上限（**只保留最新 N 条**）。
+///
+/// 每有一个对端复制文件就多一条通知，历史上这里是无上限的 `Vec::push`，长期运行会
+/// 无界增长（每条含完整文件清单，不是纯计数）。取值与局域网侧 `MAX_PENDING_OFFERS`
+/// 对齐：主界面本来也只显示 3 条（合计），更早的条目用户既看不到也用不上。
+const MAX_CROSS_LAN_OFFERS: usize = 3;
+
 impl AppState {
+    /// 把两份「接收到的清单」裁剪到全局上限 `MAX_RECEIVED_OFFERS`，并推一份完整快照。
+    ///
+    /// 语义：**合计最多 N 条**，超出的按到达时间丢弃最旧的（局域网与跨 LAN 一起排队，
+    /// 不看来源）。任何一次新增/删除后都应调用一次（同时也是唯一推快照的地方）。
+    pub fn enforce_received_cap(&self) {
+        let pending = self.hub.pending_offer_ages();
+        let cross: Vec<(usize, u64)> = {
+            let g = self.cross_lan_offers.lock();
+            g.iter()
+                .enumerate()
+                .map(|(i, o)| (i, o.received_at))
+                .collect()
+        };
+        let (drop_pending, drop_cross) = select_over_cap(&pending, &cross, MAX_RECEIVED_OFFERS);
+
+        if !drop_pending.is_empty() || !drop_cross.is_empty() {
+            let n_pending = self.hub.drop_pending_offers(&drop_pending);
+            let n_cross = {
+                let mut g = self.cross_lan_offers.lock();
+                let mut n = 0;
+                // 下标从大到小删，避免前面删除导致后面的下标位移
+                for i in drop_cross {
+                    if i < g.len() {
+                        g.remove(i);
+                        n += 1;
+                    }
+                }
+                n
+            };
+            tracing::info!(
+                "接收到的清单超过全局上限 {MAX_RECEIVED_OFFERS} 条，已丢弃最旧的：待拉取 {n_pending} 条、跨 LAN {n_cross} 条"
+            );
+        }
+        // 每次调用都推快照：前端以快照为准，不自行累积（也顺带修正去重/顺序）
+        self.emit_received_snapshot();
+    }
+
+    /// 向两个窗口推送「接收到的清单」完整快照（前端据此整体替换本地列表）。
+    pub fn emit_received_snapshot(&self) {
+        let Some(app) = self.hub.app_handle() else {
+            return; // 运行期才有 AppHandle（启动早期无窗口，无需推）
+        };
+        let pending = self.hub.pending_offers_snapshot();
+        let cross = self.cross_lan_offers.lock().clone();
+        let _ = app.emit(
+            "received-offers-snapshot",
+            serde_json::json!({ "pending": pending, "cross": cross }),
+        );
+    }
+
+    /// 记录一条跨 LAN「待复制」通知（供前端初始化快照）。**去重 + 上限**：
+    ///
+    /// - 去重：同一条通知可能被重复投递（服务端重发 / 同一对端重复通知），
+    ///   命中既有条目时先移除再追加，视作**最新**（同一份文件在列表里只占一条）。
+    /// - 上限：只保留最新 `MAX_CROSS_LAN_OFFERS` 条，超出的从最旧开始淘汰并记 WARN
+    ///   （与局域网侧 `track_and_trim` 同语义：静默丢弃会让「列表越来越长」难以察觉）。
+    pub fn push_cross_lan_offer(&self, offer: CrossLanOffer) {
+        {
+            // 单来源上限（防御性；权威上限是 enforce_received_cap 的全局 3 条）
+            let mut g = self.cross_lan_offers.lock();
+            g.retain(|o| {
+                !(o.from == offer.from
+                    && o.ext_file_ep == offer.ext_file_ep
+                    && o.manifest == offer.manifest)
+            });
+            g.push(offer);
+            while g.len() > MAX_CROSS_LAN_OFFERS {
+                let dropped = g.remove(0);
+                tracing::warn!(
+                    "跨 LAN 待复制清单超过 {MAX_CROSS_LAN_OFFERS} 条上限，已淘汰最早的一条（来自 {}）",
+                    crate::obs::logging::log_safe(&dropped.from_name)
+                );
+            }
+        }
+        // 锁已释放，再做全局裁剪（enforce 会再锁两份清单，避免同锁重入/交叉加锁）
+        self.enforce_received_cap();
+    }
+
     /// 由真实配置构建应用状态。
     ///
     /// identity / engine / hub 由此一次性创建：设备 ID 来自配置中的权威值
@@ -424,11 +552,7 @@ pub fn run() {
                 let app_handle = app.handle().clone();
                 let _ = app_handle.clone().listen("cross-lan-file", move |event| {
                     if let Ok(o) = serde_json::from_str::<CrossLanOffer>(event.payload()) {
-                        app_handle
-                            .state::<AppState>()
-                            .cross_lan_offers
-                            .lock()
-                            .push(o);
+                        app_handle.state::<AppState>().push_cross_lan_offer(o);
                     }
                 });
             }
@@ -467,6 +591,7 @@ pub fn run() {
             tauri_cmd::pull_files,
             tauri_cmd::cancel_pull,
             tauri_cmd::list_pending_offers,
+            tauri_cmd::clear_received_offers,
             tauri_cmd::open_settings,
             tauri_cmd::quit_app,
             log_viewer::open_log_window,
@@ -827,5 +952,40 @@ fn win_toggle_maximize(app: tauri::AppHandle) {
         } else {
             let _ = w.maximize();
         }
+    }
+}
+
+#[cfg(test)]
+mod received_cap_tests {
+    use super::{select_over_cap, MAX_RECEIVED_OFFERS};
+
+    /// 全局上限：**合计**最多 3 条，两份清单共用一个额度，按到达时间丢弃最旧的。
+    /// 用户要求：「仅保留三条就是三条，任何地方都不需要超过三条，超过的全部丢弃」。
+    #[test]
+    fn global_cap_keeps_newest_three_across_both_lists() {
+        // 局域网 2 条（较旧）+ 跨 LAN 2 条（较新）→ 合计 4，应丢弃最旧的那条局域网
+        let pending = vec![("p-old".to_string(), 100), ("p-new".to_string(), 400)];
+        let cross = vec![(0usize, 200), (1usize, 300)];
+        let (drop_p, drop_c) = select_over_cap(&pending, &cross, MAX_RECEIVED_OFFERS);
+        assert_eq!(drop_p, vec!["p-old".to_string()]);
+        assert!(drop_c.is_empty());
+
+        // 跨 LAN 更旧则丢跨 LAN（下标从大到小返回，便于安全删除）
+        let pending = vec![("p1".to_string(), 900), ("p2".to_string(), 800)];
+        let cross = vec![(0usize, 100), (1usize, 200)];
+        let (drop_p, drop_c) = select_over_cap(&pending, &cross, MAX_RECEIVED_OFFERS);
+        assert!(drop_p.is_empty());
+        assert_eq!(drop_c, vec![1usize, 0usize]);
+
+        // 未超限：什么都不丢
+        let (drop_p, drop_c) =
+            select_over_cap(&[("a".to_string(), 1)], &[(0usize, 2)], MAX_RECEIVED_OFFERS);
+        assert!(drop_p.is_empty() && drop_c.is_empty());
+
+        // 极端：全部来自同一来源也会裁到 3 条
+        let many: Vec<(String, u64)> = (0..5u64).map(|i| (format!("p{i}"), i)).collect();
+        let (drop_p, _) = select_over_cap(&many, &[], MAX_RECEIVED_OFFERS);
+        assert_eq!(drop_p.len(), 2, "5 条只留 3 条，丢 2 条");
+        assert_eq!(drop_p, vec!["p0".to_string(), "p1".to_string()]);
     }
 }

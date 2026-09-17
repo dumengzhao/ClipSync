@@ -668,7 +668,7 @@ dependencies = [
 
 [[package]]
 name = "clipsync"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -684,6 +684,7 @@ dependencies = [
  "gethostname 0.5.0",
  "hkdf",
  "hmac",
+ "if-addrs",
  "lru",
  "mdns-sd",
  "objc2 0.2.7",

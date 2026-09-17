@@ -38,6 +38,14 @@ const MAX_PENDING_OFFERS: usize = 3;
 
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
+
+/// 当前 unix 毫秒时间戳（前端按它做「最新在上」排序）。
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -382,6 +390,9 @@ struct PendingOffer {
     has_folder: bool,
     /// 是否走自动拉取（总大小低于阈值，无需手动点击）
     auto_pull: bool,
+    /// 到达时间（unix 毫秒）。前端「最新在上」排序用：`pending_offers` 是 HashMap，
+    /// 迭代顺序不确定，只能靠这个字段排序（2026-09-17 用户反馈列表倒序错乱）。
+    received_at: u64,
 }
 
 /// 本端正在拉取的传输：写入任务通过 `chunk_tx` 接收分片，最终自动写本机剪贴板。
@@ -738,6 +749,68 @@ impl ConnectionHub {
         self.peers.lock().keys().cloned().collect()
     }
 
+    /// 清空全部待拉取清单（用户显式操作）。返回被清掉的条目数。
+    ///
+    /// 只动 `pending_offers`（清单本身），**不碰 active_pulls**：已在拉取中的传输
+    /// 继续正常完成（用户点过「拉取」的数据不该被误杀）；清单里对应的条目虽然
+    /// 移除了，pull 完成事件按 transfer_id 过滤、不会把死条目加回来。
+    pub fn clear_pending_offers(&self) -> usize {
+        let mut g = self.pending_offers.lock();
+        let n = g.len();
+        g.clear();
+        // FIFO 顺序队列同步清空，避免残留的 transfer_id 让后续上限淘汰逻辑误判
+        // （offer_order 里多出的死 id 只会让「最老淘汰」找错对象）。
+        self.pending_offer_order.lock().clear();
+        n
+    }
+
+    /// 运行期 AppHandle（未 start 时为 None）。供上层做「全局上限」裁剪时推快照用。
+    pub fn app_handle(&self) -> Option<tauri::AppHandle> {
+        self.app.lock().clone()
+    }
+
+    /// 待拉取条目的 (transfer_id, 到达时间)：供 `AppState::enforce_received_cap`
+    /// 把两份清单合并排序后统一裁剪（全局上限只看时间，不看来源）。
+    pub fn pending_offer_ages(&self) -> Vec<(String, u64)> {
+        self.pending_offers
+            .lock()
+            .values()
+            .map(|o| (o.transfer_id.clone(), o.received_at))
+            .collect()
+    }
+
+    /// 按 id 丢弃若干待拉取条目（全局上限淘汰用），返回实际丢弃数。
+    /// 同步清理 `pending_offer_order`，避免 FIFO 队列里留下死 id。
+    pub fn drop_pending_offers(&self, ids: &[String]) -> usize {
+        let mut g = self.pending_offers.lock();
+        let mut n = 0;
+        for id in ids {
+            if g.remove(id).is_some() {
+                n += 1;
+            }
+        }
+        drop(g);
+        self.pending_offer_order
+            .lock()
+            .retain(|k| !ids.iter().any(|id| id == k));
+        n
+    }
+
+    /// 插入完成后触发一次全局上限裁剪（判定逻辑在 `AppState::enforce_received_cap`）。
+    ///
+    /// ⚠️ **绝不能用 `if let Some(app) = self.app.lock().clone()` 的写法**：`if let` 会把
+    /// 临时 `MutexGuard` 的生命周期延长到整个分支体结束，而下面 `enforce_received_cap`
+    /// 会经 `emit_received_snapshot → app_handle()` **再锁一次同一把锁**——`parking_lot`
+    /// 的 Mutex **不可重入** → 当场死锁：hub 线程永久卡住，表现为「对端一复制文件，
+    /// 本机 P2P/文件链路就整体停摆」（无日志、无 panic，最难排查的一类）。
+    /// 因此这里用 `app_handle()`（守卫在函数内部即刻释放）再走裁剪。
+    pub fn enforce_global_cap(&self) {
+        let Some(app) = self.app_handle() else {
+            return; // 运行期之前（未 start）没有 AppHandle，无需推快照
+        };
+        app.state::<AppState>().enforce_received_cap();
+    }
+
     /// 当前接收到的「待拉取」文件清单快照（前端挂载时查询一次，兜底事件丢失）。
     pub fn pending_offers_snapshot(&self) -> Vec<serde_json::Value> {
         self.pending_offers
@@ -750,6 +823,7 @@ impl ConnectionHub {
                     "device_name": o.device_name,
                     "top_names": o.top_names,
                     "has_folder": o.has_folder,
+                    "received_at": o.received_at,
                     "files": o.files.iter().map(|f| serde_json::json!({
                         "file_name": f.file_name,
                         "file_size": f.file_size,
@@ -1005,6 +1079,7 @@ impl ConnectionHub {
                 // 自动拉取需同时满足：总开关 auto_pull_enabled 开启 且 总大小严格小于阈值。
                 // 拷贝端自身已被上面的 device_id 守卫排除，所以这里一定是「其它端」。
                 let auto_pull = self.should_auto_pull(total);
+                let offer_received_at = now_ms();
                 self.pending_offers.lock().insert(
                     transfer_id.clone(),
                     PendingOffer {
@@ -1015,6 +1090,7 @@ impl ConnectionHub {
                         top_names: top_names.clone(),
                         has_folder,
                         auto_pull,
+                        received_at: offer_received_at,
                     },
                 );
                 Self::track_and_trim(
@@ -1024,6 +1100,9 @@ impl ConnectionHub {
                     MAX_PENDING_OFFERS,
                     "待拉取清单（pending_offers）",
                 );
+                // 全局上限（两份清单合计 ≤ MAX_RECEIVED_OFFERS）：插入后统一裁剪，
+                // 超出的按到达时间丢弃最旧的一条。
+                self.enforce_global_cap();
                 if let Some(app) = self.app.lock().clone() {
                     let _ = app.emit(
                         "file-offer",
@@ -1033,6 +1112,7 @@ impl ConnectionHub {
                             "device_name": device_name,
                             "top_names": top_names,
                             "has_folder": has_folder,
+                            "received_at": offer_received_at,
                             "files": files.iter().map(|f| serde_json::json!({
                                 "file_name": f.file_name,
                                 "file_size": f.file_size,
@@ -1849,7 +1929,11 @@ impl ConnectionHub {
                 serde_json::json!({ "transfer_id": transfer_id }),
             );
         }
-        tracing::info!("拉取 {transfer_id} 已被用户取消");
+        // 取消即**彻底删除**：该条目在拉取开始时已从 pending_offers 摘除，这里不再退回，
+        // 也不在任何窗口重新出现（用户明确要求「取消就直接把它从所有位置删除不需要出现」）。
+        // 代价：想再要这个文件只能让对端重新复制（Linux 发送方复制同一文件不会再触发通知，
+        // 那种情况下需要先复制别的文件打破哈希抑制）。
+        tracing::info!("拉取 {transfer_id} 已被用户取消（条目已删除，不再出现）");
     }
 
     /// 计算多条路径的最长公共父目录（用于还原相对结构）
@@ -3661,6 +3745,69 @@ mod tests {
         for n in [3u32, 7, 100] {
             assert!(super::should_log_reconnect(n, true), "{n} 错误变化应输出");
         }
+    }
+
+    /// 取消拉取 = **彻底删除**：条目不得再出现在任何列表里。
+    ///
+    /// 用户明确要求「取消就直接把它从所有位置删除不需要出现」——所以拉取开始时摘除的
+    /// 条目在取消后**不能**退回（这是曾经的实现，已被要求撤销）。
+    #[test]
+    fn cancelled_pull_removes_pending_offer() {
+        use std::sync::atomic::AtomicBool;
+        use tokio::sync::mpsc as test_mpsc2;
+
+        let identity = TestDeviceIdentity::new(
+            crate::clipboard::types::DeviceId("cancel-del-test".into()),
+            "cancel-del-test",
+        )
+        .unwrap();
+        let engine = TestSyncEngine::new(identity.clone());
+        let hub = ConnectionHub::new(TestArc::new(identity), TestArc::new(engine));
+
+        let tid = "cancel-del-tid".to_string();
+        let offer = super::PendingOffer {
+            transfer_id: tid.clone(),
+            device_id: "peer-1".to_string(),
+            device_name: "对端".to_string(),
+            files: vec![TestFileMeta {
+                file_name: "a.bin".to_string(),
+                file_size: 1024,
+                is_dir: false,
+                relative_path: "a.bin".to_string(),
+                modified_at: 0,
+                mime_type: String::new(),
+                hash: None,
+            }],
+            top_names: vec!["a.bin".to_string()],
+            has_folder: false,
+            auto_pull: false,
+            received_at: 1,
+        };
+
+        // 模拟「拉取已开始」：条目已从 pending_offers 摘除，active_pulls 里挂着传输
+        let (tx, _rx) = test_mpsc2::channel(4);
+        hub.active_pulls.lock().insert(
+            tid.clone(),
+            super::PullState {
+                chunk_tx: tx,
+                target_dir: std::env::temp_dir().join("clipsync-cancel-del-test"),
+                files: offer.files.clone(),
+                device_id: offer.device_id.clone(),
+                total_bytes: 1024,
+                cancelled: TestArc::new(AtomicBool::new(false)),
+            },
+        );
+
+        hub.cancel_pull(&tid);
+
+        assert!(
+            hub.pending_offers_snapshot().is_empty(),
+            "取消后条目必须彻底消失，不得退回待拉取清单"
+        );
+        assert!(
+            hub.active_pulls.lock().is_empty(),
+            "取消后不应残留进行中的传输"
+        );
     }
 
     /// 扫描缓存的取用语义：**一次性消费 + 过期失效**。
