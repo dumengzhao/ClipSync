@@ -54,21 +54,27 @@ fn parse_ip_lax(raw: &str) -> Option<IpAddr> {
 
 /// 取「登录退避计数用的客户端 IP」。
 ///
-/// 直连地址是**环回**说明请求来自本机反向代理（部署形态：nginx 与后端同机，
-/// `proxy_pass http://127.0.0.1:20070`），此时所有请求的直连地址都是 127.0.0.1——
-/// 按它计数会让退避退化成全局单桶，任意人 5 次错码即可锁死管理员（比修复前更糟）。
-/// 因此环回直连时改看代理写入的转发头：
-/// - 优先 `X-Real-IP`：nginx `proxy_set_header X-Real-IP $remote_addr` 会**覆盖**
+/// 直连地址是**环回**或**受信代理**（`TRUSTED_PROXIES` 环境变量，逗号分隔 IP）时，
+/// 说明请求来自已知反向代理，此时所有请求的直连地址都相同——按它计数会让退避
+/// 退化成单桶（同机 nginx 时是 127.0.0.1；异机代理时是所有用户共享代理 IP，
+/// 任意人 5 次错码即可锁死管理员，比修复前更糟）。此时改看代理写入的转发头：
+/// - 优先 `X-Real-IP`：代理 `proxy_set_header X-Real-IP $remote_addr` 会**覆盖**
 ///   客户端传入值，不可伪造；
-/// - 退而取 `X-Forwarded-For` 的**最后一段**：本仓 nginx 示例用
-///   `$proxy_add_x_forwarded_for`（真实来源追加在末尾），取第一段会被客户端
-///   预置的假值欺骗。
+/// - 退而取 `X-Forwarded-For` 的**最后一段**：`$proxy_add_x_forwarded_for`
+///   把真实来源追加在末尾，取第一段会被客户端预置的假值欺骗。
 ///
-/// 非环回直连（客户端直连 20070）时**一律忽略转发头**：那些头在公网可任意伪造，
-/// 采信等于把退避键交给攻击者选择。
-fn client_throttle_key(peer: Option<SocketAddr>, headers: &axum::http::HeaderMap) -> IpAddr {
+/// 直连地址既非环回也不在受信列表（客户端直连 20070，或**未经声明**的代理）时
+/// **一律忽略转发头**：那些头在公网可任意伪造，采信等于把退避键交给攻击者选择。
+/// 注意「异机反代」必须在 `TRUSTED_PROXIES` 里显式声明代理出口 IP 才会被采信——
+/// 2026-09-17 实测的生产形态就是异机 1Panel/OpenResty（118.25.196.123）→ 源站，
+/// 只认环回会让该路径退回单桶。
+fn client_throttle_key(
+    peer: Option<SocketAddr>,
+    headers: &axum::http::HeaderMap,
+    trusted: &[IpAddr],
+) -> IpAddr {
     let direct = peer.map(|p| p.ip());
-    if direct.is_some_and(|ip| ip.is_loopback()) {
+    if direct.is_some_and(|ip| ip.is_loopback() || trusted.contains(&ip)) {
         if let Some(ip) = headers
             .get("x-real-ip")
             .and_then(|v| v.to_str().ok())
@@ -84,25 +90,27 @@ fn client_throttle_key(peer: Option<SocketAddr>, headers: &axum::http::HeaderMap
         {
             return ip;
         }
-        // 环回但**没有任何转发头**：说明反向代理没配 proxy_set_header X-Real-IP /
-        // X-Forwarded-For。此时所有外部登录都会塌缩到同一个键（127.0.0.1），退避退化成
-        // 全局锁——任意人 5 次错码即可锁死管理员（这正是本函数要解决的问题）。
-        // 2026-09-16 实测就撞上了这个：域名路径与直连端口路径的限速键不同，说明经 nginx
-        // 的请求没带上真实 IP。这种配置疏漏在行为上很难发现（锁仍然"工作"，只是分桶错了），
-        // 所以必须主动告警一次。
+        // 来自环回/受信代理但**没有任何转发头**：反代没配 proxy_set_header X-Real-IP /
+        // X-Forwarded-For。此时所有经代理的登录都塌缩到同一个键，退避退化成单桶——
+        // 任意人 5 次错码即可锁死管理员（这正是本函数要解决的问题）。这种配置疏漏
+        // 在行为上很难发现（锁仍然"工作"，只是分桶错了），所以必须主动告警一次。
         warn_missing_forward_headers_once();
     }
     direct.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
 }
 
-/// 只在首次遇到「环回且无转发头」时告警一次，避免刷日志。
+/// 只在首次遇到「受信来源但无转发头」时告警一次，避免刷日志。
 static MISSING_FORWARD_HEADER_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 fn warn_missing_forward_headers_once() {
     if !MISSING_FORWARD_HEADER_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         eprintln!(
-            "[clipsync-server] 警告：请求来自环回但未携带 X-Real-IP / X-Forwarded-For ——              反向代理没有转发真实客户端 IP，管理登录退避会退化成全局单桶              （任意来源 5 次错码即可锁死管理员）。请在 nginx 的 /api/admin 段补上：             proxy_set_header X-Real-IP $remote_addr;              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;"
+            "[clipsync-server] 警告：请求来自环回/受信代理但未携带 X-Real-IP / X-Forwarded-For —— \
+             反向代理没有转发真实客户端 IP，管理登录退避会退化成单桶 \
+             （任意来源 5 次错码即可锁死管理员）。请在反代补上：\
+             proxy_set_header X-Real-IP $remote_addr; \
+             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;"
         );
     }
 }
@@ -155,12 +163,13 @@ pub async fn admin_login(
     State(state): State<Arc<AppState>>,
     // ConnectInfo 可选：单测的 oneshot 请求没有对端地址，此时退避退化为全局键
     peer_addr: Option<ConnectInfo<std::net::SocketAddr>>,
-    // 反代场景下真实来源在转发头里（经 nginx 时直连地址恒为 127.0.0.1），
-    // 取键规则见 throttle_key：仅环回直连才采信这两个头。
+    // 反代场景下真实来源在转发头里，取键规则见 client_throttle_key：
+    // 仅环回或 TRUSTED_PROXIES 声明的受信代理才采信转发头。
     headers: axum::http::HeaderMap,
     Json(body): Json<LoginBody>,
 ) -> Json<Value> {
-    let throttle_key = client_throttle_key(peer_addr.map(|c| c.0), &headers);
+    let throttle_key =
+        client_throttle_key(peer_addr.map(|c| c.0), &headers, &state.trusted_proxies);
     // 1) 退避检查（按源 IP）：锁定期内直接拒绝，且**不做口令校验**（也就不会消耗 Argon2）
     {
         let t = LOGIN_THROTTLES.lock().unwrap_or_else(|e| e.into_inner());
@@ -439,6 +448,7 @@ mod tests {
         let key = client_throttle_key(
             sock("203.0.113.9:5001"),
             &headers(&[("x-real-ip", "198.51.100.7")]),
+            &[],
         );
         assert_eq!(key.to_string(), "203.0.113.9");
     }
@@ -450,6 +460,7 @@ mod tests {
         let key = client_throttle_key(
             sock("127.0.0.1:5002"),
             &headers(&[("x-real-ip", "203.0.113.9")]),
+            &[],
         );
         assert_eq!(key.to_string(), "203.0.113.9");
     }
@@ -460,6 +471,7 @@ mod tests {
         let key = client_throttle_key(
             sock("[::1]:5003"),
             &headers(&[("x-forwarded-for", "1.2.3.4, 203.0.113.9")]),
+            &[],
         );
         assert_eq!(key.to_string(), "203.0.113.9");
     }
@@ -467,15 +479,49 @@ mod tests {
     /// 环回但不带任何转发头（本机 curl / 端口转发）→ 退化为环回地址本身。
     #[test]
     fn loopback_without_headers_falls_back_to_loopback() {
-        let key = client_throttle_key(sock("127.0.0.1:5004"), &HeaderMap::new());
+        let key = client_throttle_key(sock("127.0.0.1:5004"), &HeaderMap::new(), &[]);
         assert!(key.is_loopback());
     }
 
     /// 单测的 oneshot 请求没有对端地址（ConnectInfo 缺失）→ 全局键，行为与修复前一致。
     #[test]
     fn missing_peer_addr_is_unspecified() {
-        let key = client_throttle_key(None, &HeaderMap::new());
+        let key = client_throttle_key(None, &HeaderMap::new(), &[]);
         assert_eq!(key.to_string(), "0.0.0.0");
+    }
+
+    /// 异机受信代理（TRUSTED_PROXIES 声明，如 1Panel/OpenResty 独立主机）：
+    /// 采信转发头取真实客户端 IP——否则所有经代理的登录共享代理 IP 一个桶，
+    /// 任意人 5 次错码即可锁死全部管理员会话（2026-09-17 生产实测形态）。
+    #[test]
+    fn trusted_proxy_peer_uses_forward_headers() {
+        let trusted: Vec<IpAddr> = vec!["198.51.100.1".parse().unwrap()];
+        let key = client_throttle_key(
+            sock("198.51.100.1:5005"),
+            &headers(&[("x-real-ip", "203.0.113.9")]),
+            &trusted,
+        );
+        assert_eq!(key.to_string(), "203.0.113.9");
+        // X-Real-IP 缺失时退化 XFF 末段
+        let key = client_throttle_key(
+            sock("198.51.100.1:5006"),
+            &headers(&[("x-forwarded-for", "1.2.3.4, 203.0.113.9")]),
+            &trusted,
+        );
+        assert_eq!(key.to_string(), "203.0.113.9");
+    }
+
+    /// 未在 TRUSTED_PROXIES 声明的非环回来源：哪怕带着转发头也一律忽略
+    /// （公网可伪造来源头，采信等于把退避键交给攻击者）。
+    #[test]
+    fn untrusted_peer_ignores_forward_headers() {
+        let trusted: Vec<IpAddr> = vec!["198.51.100.1".parse().unwrap()];
+        let key = client_throttle_key(
+            sock("203.0.113.9:5007"),
+            &headers(&[("x-real-ip", "198.51.100.7")]),
+            &trusted,
+        );
+        assert_eq!(key.to_string(), "203.0.113.9");
     }
 
     /// 带端口的转发头写法（部分反代如此）也要能解析。

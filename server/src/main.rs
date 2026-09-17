@@ -75,6 +75,31 @@ fn load_state() -> Arc<AppState> {
         * 1024;
     let _ = std::fs::create_dir_all(update_dir.join("files"));
 
+    // 受信反向代理（逗号分隔 IP）：仅这些来源的转发头会被采信（见 admin::client_throttle_key）。
+    // 生产形态：异机 1Panel/OpenResty（如 118.25.196.123）→ 本机 20070。
+    let trusted_proxies: Vec<std::net::IpAddr> = std::env::var("TRUSTED_PROXIES")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|s| {
+            let s = s.trim();
+            if s.is_empty() {
+                return None;
+            }
+            match s.parse() {
+                Ok(ip) => Some(ip),
+                Err(_) => {
+                    eprintln!(
+                        "[clipsync-server] 警告：TRUSTED_PROXIES 里的 {s:?} 不是合法 IP，已忽略"
+                    );
+                    None
+                }
+            }
+        })
+        .collect();
+    if !trusted_proxies.is_empty() {
+        println!("[clipsync-server] 受信反向代理: {trusted_proxies:?}（这些来源的 X-Real-IP/XFF 将被采信）");
+    }
+
     Arc::new(AppState {
         store,
         networks: std::sync::Mutex::new(networks),
@@ -86,6 +111,7 @@ fn load_state() -> Arc<AppState> {
         update_dir,
         update_public_base,
         update_max_upload,
+        trusted_proxies,
     })
 }
 

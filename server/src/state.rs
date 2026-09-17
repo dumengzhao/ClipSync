@@ -36,6 +36,10 @@ pub struct AppState {
     pub update_public_base: Option<String>,
     /// 单次上传总大小上限（字节）
     pub update_max_upload: u64,
+    /// 受信反向代理的出口 IP（环境变量 TRUSTED_PROXIES，逗号分隔）。
+    /// 只有来自这些地址（或环回）的请求才采信 X-Real-IP / X-Forwarded-For——
+    /// 用于「异机反代」形态（如 1Panel/OpenResty 独立主机）下取真实客户端 IP。
+    pub trusted_proxies: Vec<std::net::IpAddr>,
 }
 
 impl AppState {
