@@ -455,6 +455,31 @@ pub fn list_pending_offers(state: State<AppState>) -> Vec<serde_json::Value> {
     state.hub.pending_offers_snapshot()
 }
 
+/// 清空客户端「接收到的」全部待处理清单：局域网待拉取（P2P）+ 跨 LAN 待复制。
+/// 返回 (待拉取, 跨 LAN) 两条清单各自被清掉的条目数。
+///
+/// **只动客户端内存**：两份清单都在本进程（`hub.pending_offers` /
+/// `AppState.cross_lan_offers`），不触碰服务端记录、也不影响对端。
+/// 进行中的传输（`active_pulls`）不受影响，继续正常完成。
+///
+/// 清空后广播 `pending-offers-cleared`：主窗口列表与小窗各持一份 state，
+/// 不广播的话另一个窗口会残留「点不动的死条目」（点击只会拿到「传输已失效」）。
+#[tauri::command]
+pub fn clear_received_offers(state: State<AppState>, app: AppHandle) -> serde_json::Value {
+    let pending = state.hub.clear_pending_offers();
+    let cross_lan = {
+        let mut g = state.cross_lan_offers.lock();
+        let n = g.len();
+        g.clear();
+        n
+    };
+    let _ = app.emit("pending-offers-cleared", pending + cross_lan);
+    if pending + cross_lan > 0 {
+        tracing::info!("用户清空接收到的清单：待拉取 {pending} 条、跨 LAN 待复制 {cross_lan} 条");
+    }
+    serde_json::json!({ "pending": pending, "cross_lan": cross_lan })
+}
+
 /// 弹出「待拉取文件」小窗，定位统一由 Rust 负责：
 /// macOS 落在屏幕右上角（跟随菜单栏托盘），Windows 落在右下角（跟随任务栏）。
 /// 前端只在待拉取清空时主动 hide()，避免各端坐标错位。
@@ -555,6 +580,7 @@ pub fn simulate_cross_lan_offer(app: AppHandle) {
         from_name: "跨LAN模拟设备".to_string(),
         manifest,
         ext_file_ep: format!("127.0.0.1:{}", 50000 + (now % 1000) as u16),
+        received_at: now as u64,
     };
     let _ = app.emit("cross-lan-file", offer);
     // 与真实跨 LAN 路径保持一致：通知后弹出待拉取小窗
@@ -758,8 +784,28 @@ pub async fn pull_cross_lan(
             "file-pull-cancelled",
             serde_json::json!({ "transfer_id": pull_id, "kind": "cross" }),
         );
+        // 取消 = **彻底删除**（用户明确要求「从所有位置删除不需要出现」）：
+        // 前端在拉取开始时已移除该行；这里还必须把它从**后端缓冲**（`cross_lan_offers`）
+        // 里删掉——否则重启后前端用挂载快照回填时，这条又会出现。
+        if let Some(origin) = sc.take_cross_pull_origin(&pull_id) {
+            let removed = {
+                let mut g = state.cross_lan_offers.lock();
+                let before = g.len();
+                g.retain(|o| {
+                    !(o.from == origin.from
+                        && o.ext_file_ep == origin.ext_file_ep
+                        && o.manifest == origin.manifest)
+                });
+                before - g.len()
+            };
+            tracing::info!("跨 LAN 拉取 {pull_id} 已取消：条目已从待复制清单删除（{removed} 条）");
+        }
+        // 推一份快照，让两个窗口以后端为准（该条目已不在其中）
+        state.enforce_received_cap();
         return Ok(());
     }
+    // 成功/失败等结局不再需要恢复用的原始通知，清掉避免堆积
+    sc.drop_cross_pull_origin(&pull_id);
     // 拉取过程由 server_conn 实时上报 file-pull-progress / file-pull-complete(ok:true)。
     // 仅当整条拉取失败（如网络不可达）时在此补发一次失败完成事件，便于前端提示。
     if let Err(e) = &r {

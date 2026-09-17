@@ -29,6 +29,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::ConnectionExt;
+use x11rb::rust_connection::RustConnection;
 
 use super::types::{ClipboardContent, FileMeta, SyncId, WatchHandle};
 use super::ClipboardProvider;
@@ -141,7 +142,26 @@ impl ClipboardProvider for LinuxClipboard {
             // 文件态基线：arboard 只轮询文本，复制文件走 X11 CLIPBOARD selection
             //（text/uri-list / gnome-copied-files），文本轮询检测不到，必须单独探测。
             let mut last_files: Vec<PathBuf> = read_clipboard_files_x11().unwrap_or_default();
+            // XFixes：监听 CLIPBOARD 的「取得所有权」事件。
+            //
+            // 为什么不能只比对内容：**同一个文件再复制一次，剪贴板内容完全相同**，内容比对
+            // 判定为「没变化」，监听回调根本不触发 → 本机永远收不到第二次（2026-09-17 实测：
+            // 对端 dmz-ubuntu 重复复制同一文件，本机日志里没有任何新 Offer）。
+            // XFixes 的 SetSelectionOwner 事件在**每次有人重新取得 CLIPBOARD 所有权**时都会到达
+            // （含同一文件），据此判定「又发生了一次复制动作」。扩展不可用（无 DISPLAY /
+            // Wayland 无 XWayland / 老 X server）时返回 None，退回原内容比对逻辑。
+            let xfixes = setup_xfixes_watch();
+            if xfixes.is_some() {
+                tracing::debug!("Linux watch：XFixes 监听已启用（可识别同一文件的重复复制）");
+            }
             while !stop_clone.load(Ordering::SeqCst) {
+                // 0) XFixes：每次 CLIPBOARD 所有权变更 = 一次复制动作（即便内容与上次相同）
+                if let Some((conn, clipboard)) = &xfixes {
+                    if xfixes_took_ownership(conn, *clipboard) {
+                        tracing::debug!("XFixes 探测到 CLIPBOARD 所有权变更，触发广播");
+                        cb();
+                    }
+                }
                 // 1) 文本/图片变化（原有逻辑）
                 if let Ok(t) = watcher.get_text() {
                     if t != last_text {
@@ -190,6 +210,46 @@ fn intern<C: Connection>(conn: &C, name: &[u8]) -> Result<u32> {
 }
 
 /// 读取本机 CLIPBOARD 中的文件 URI 列表（优先 gnome-copied-files，回退 text/uri-list）。
+/// 建立 CLIPBOARD 的 XFixes 监听（`SetSelectionOwner` 事件）。
+///
+/// 返回 `None` 表示不可用（无 DISPLAY / 扩展缺失 / 老 X server）——调用方退回
+/// 「比对剪贴板内容」的检测方式，功能不退化（只是识别不了同一文件的重复复制）。
+fn setup_xfixes_watch() -> Option<(RustConnection, u32)> {
+    use x11rb::protocol::xfixes::{ConnectionExt as XfixesExt, SelectionEventMask};
+
+    let (conn, screen) = x11rb::connect(None).ok()?;
+    let root = conn.setup().roots[screen].root;
+    let clipboard = intern(&conn, b"CLIPBOARD").ok()?;
+    // 版本探测：拿不到就说明扩展不可用
+    let ver = conn.xfixes_query_version(5, 0).ok()?.reply().ok()?;
+    if ver.major_version < 1 {
+        return None;
+    }
+    conn.xfixes_select_selection_input(root, clipboard, SelectionEventMask::SET_SELECTION_OWNER)
+        .ok()?
+        .check()
+        .ok()?;
+    conn.flush().ok()?;
+    Some((conn, clipboard))
+}
+
+/// 轮询一次 XFixes 事件：本次是否出现「有人重新取得 CLIPBOARD 所有权」。
+///
+/// 非阻塞（`poll_for_event` 无事件即返回 None），由调用方每 250ms 调一次。
+fn xfixes_took_ownership(conn: &RustConnection, clipboard: u32) -> bool {
+    use x11rb::protocol::Event;
+
+    let mut hit = false;
+    while let Ok(Some(ev)) = conn.poll_for_event() {
+        if let Event::XfixesSelectionNotify(n) = ev {
+            if n.selection == clipboard {
+                hit = true;
+            }
+        }
+    }
+    hit
+}
+
 fn read_clipboard_files_x11() -> Result<Vec<PathBuf>> {
     use x11rb::protocol::xproto::WindowClass;
     use x11rb::protocol::Event;

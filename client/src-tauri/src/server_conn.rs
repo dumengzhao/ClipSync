@@ -19,7 +19,7 @@ use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -71,6 +71,9 @@ pub struct CrossLanOffer {
     pub from_name: String,
     pub manifest: serde_json::Value,
     pub ext_file_ep: String,
+    /// 到达时间（unix 毫秒）：前端「最新在上」排序用（与局域网待拉取的
+    /// `PendingOffer.received_at` 同一语义，两者要合并成一张列表展示）。
+    pub received_at: u64,
 }
 
 // ---- 与服务端一致的消息类型（字段名必须对齐 server/src/models.rs） ----
@@ -191,6 +194,9 @@ enum ServerToClient {
         #[allow(dead_code)]
         msg: String,
     },
+    /// 心跳回执：值本身无需处理——它的作用在 connect_once 的读侧活性检测里兑现
+    /// （收到任何入帧都会刷新 last_rx）。
+    HeartbeatAck,
 }
 
 #[derive(Deserialize)]
@@ -251,6 +257,10 @@ pub struct ServerConn {
     /// 跨 LAN 拉取取消标记（key = pull_id）：`cancel_pull_cross_lan` 置位，
     /// 下载循环在每个分片边界检查，命中即中止本次拉取。
     cross_pull_cancel: Mutex<HashSet<String>>,
+    /// 跨 LAN 拉取对应的原始文件通知（key = pull_id）：**用户取消时据此定位并删除**
+    /// 「待复制」清单里的那一条（取消 = 彻底删除，不留任何痕迹；见 tauri_cmd::pull_cross_lan
+    /// 的取消分支）。存的是身份（from + ext_file_ep + manifest），用于精确匹配。
+    cross_pull_origin: Mutex<HashMap<String, CrossLanOffer>>,
     /// 硬件 ID / OS 版本缓存：reg 查询是控制台子进程（虽然已加 CREATE_NO_WINDOW
     /// 不闪窗），也不该在每次重连时重复执行——启动后缓存一次即可。
     cached_hw_id: Mutex<String>,
@@ -270,6 +280,9 @@ const MAX_CROSS_LAN_FILE_BYTES: u64 = 512 * 1024 * 1024;
 /// 与 P2P 出站同理取小值：队列满即说明服务端消费不过来，此时丢弃新的中继消息
 /// 好过无界堆积（剪贴板中继与文件通知都会持续产生）。
 const RELAY_QUEUE_CAPACITY: usize = 64;
+/// 读侧活性判定窗口：超过此时长未收到服务端任何帧即视为链路假死。
+/// 心跳周期 25s + 服务端回执，90s ≈ 3 个周期余量，正常链路不会误伤。
+const READ_DEADLINE: Duration = Duration::from_secs(90);
 
 /// 规范化「对外文件地址」（`ext_file_ep`）：省略端口时补默认端口。
 ///
@@ -356,6 +369,7 @@ impl ServerConn {
             removed: AtomicBool::new(false),
             auth_fail_notified: AtomicBool::new(false),
             cross_pull_cancel: Mutex::new(HashSet::new()),
+            cross_pull_origin: Mutex::new(HashMap::new()),
             cached_hw_id: Mutex::new(String::new()),
             cached_os_ver: Mutex::new(String::new()),
         })
@@ -551,7 +565,13 @@ impl ServerConn {
 
         let mut outcome = ConnectOutcome::Disconnected;
         let mut hb = tokio::time::interval(Duration::from_secs(25));
+        // 读侧活性检测：服务端对每条心跳回 HeartbeatAck（见 ws.rs），健康链路最坏
+        // ~25s 必有入帧。连续 90s 无任何入帧 = 链路单向假死（写侧 TCP/代理链静默
+        // 丢弃，本地发送永远"成功"），必须主动断开重连——否则客户端会永久显示
+        // 已连接而服务端早已按空闲超时关连接（2026-09-17 实际发生，经 Clash 代理链）。
+        let mut last_rx = tokio::time::Instant::now();
         loop {
+            let rx_deadline = last_rx + READ_DEADLINE;
             tokio::select! {
                 maybe = rx.recv() => {
                     match maybe {
@@ -564,10 +584,15 @@ impl ServerConn {
                         Some(Ok(m)) => m,
                         Some(Err(_)) | None => break,
                     };
+                    last_rx = tokio::time::Instant::now();
                     if !self.handle_server_message(msg, &mut w_tx, &mut outcome).await { break; }
                 }
                 _ = hb.tick() => {
                     if w_tx.send(Message::Text(serde_json::to_string(&ClientToServer::Heartbeat).unwrap())).await.is_err() { break; }
+                }
+                _ = tokio::time::sleep_until(rx_deadline) => {
+                    tracing::warn!("服务端 {READ_DEADLINE:?} 内无任何入帧（链路疑似单向假死），主动断开重连");
+                    break;
                 }
             }
         }
@@ -661,6 +686,10 @@ impl ServerConn {
                 self.handle_file_notify(&from, &manifest, &ext_file_ep);
                 true
             }
+            ServerToClient::HeartbeatAck => {
+                // 无需处理：作用在 connect_once 的读侧活性检测（last_rx）里兑现
+                true
+            }
             ServerToClient::Error { code, msg } => {
                 tracing::warn!("服务端错误 code={code} msg={msg}");
                 if code == "bad_token" {
@@ -747,6 +776,10 @@ impl ServerConn {
             from_name: name,
             manifest: manifest.clone(),
             ext_file_ep: ext_file_ep.to_string(),
+            received_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
         };
         let _ = self.app.emit("cross-lan-file", offer);
         // 跨 LAN 文件到达同样要弹出「待拉取小窗」。
@@ -851,6 +884,16 @@ impl ServerConn {
     /// 请求取消指定 pull_id 的跨 LAN 拉取：返回 true 表示已登记（有拉取在等它生效）。
     /// 取消标记是「尽力而为」的集合：登记后即使该拉取已结束也无副作用，由
     /// 下载循环收尾时清除；条目极小，无需淘汰策略。
+    /// 取出（并移除）跨 LAN 拉取对应的原始文件通知：供「取消后从清单里删除该条目」定位使用。
+    pub fn take_cross_pull_origin(&self, pull_id: &str) -> Option<CrossLanOffer> {
+        self.cross_pull_origin.lock().remove(pull_id)
+    }
+
+    /// 丢弃跨 LAN 拉取对应的原始通知（拉取成功/失败等无需再定位删除的结局）。
+    pub fn drop_cross_pull_origin(&self, pull_id: &str) {
+        self.cross_pull_origin.lock().remove(pull_id);
+    }
+
     pub fn cancel_cross_pull(&self, pull_id: &str) -> bool {
         self.cross_pull_cancel.lock().insert(pull_id.to_string())
     }
@@ -871,7 +914,31 @@ impl ServerConn {
         ext_file_ep: &str,
         manifest: serde_json::Value,
     ) -> anyhow::Result<()> {
+        // 先留一份：manifest 下面会被 from_value 移走，而「取消时删除该条目」（取消路径）还要用
+        let manifest_for_restore = manifest.clone();
         let files: Vec<FileMeta> = serde_json::from_value(manifest)?;
+        // 存一份原始通知，供「取消后从清单里删除该条目」定位使用（见 take_cross_pull_origin）
+        self.cross_pull_origin.lock().insert(
+            pull_id.to_string(),
+            CrossLanOffer {
+                from: from.to_string(),
+                from_name: {
+                    let n = self
+                        .nodes
+                        .lock()
+                        .iter()
+                        .find(|n| n.device_id == from)
+                        .map(|n| n.name.clone());
+                    n.unwrap_or_else(|| from.to_string())
+                },
+                manifest: manifest_for_restore,
+                ext_file_ep: ext_file_ep.to_string(),
+                received_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+            },
+        );
         let state = self.app.state::<AppState>();
         // 落盘根目录：与 P2P 路径**共用同一套解析规则**（sync_dir 配置优先 → 系统下载目录）。
         // 早先这里单独回退到 temp_dir()/clipsync，且 sync_dir 只对 P2P 生效 ——
@@ -1229,21 +1296,93 @@ async fn send_json(w_tx: &mut WsSink, msg: &ClientToServer) -> anyhow::Result<()
     Ok(())
 }
 
-/// 对比两组 lan_group：空值不参与「跨 LAN」判定（双方都空视为同 LAN）。
+/// 对比两组 lan_group：**是否需要走跨 LAN 中继**（true = 需要）。
+///
+/// 任一侧「不可信」（空串 / 格式异常 / 虚拟网段）时返回 true —— 语义是「不知道是否同网，
+/// 保守按需要中继处理」。注意这与旧实现相反：旧实现把空串当作「同组」返回 false，
+/// 结果是本机分组推断失败时 route_files 的中继通知与 relay_text 对所有对端都静默不发。
 fn lan_differ(a: &str, b: &str) -> bool {
-    if a.is_empty() || b.is_empty() {
-        false
+    // 任一侧不可信 → 按「可能需要中继」处理（true）：原实现把空串判为「同组」，
+    // 于是在本机分组推断失败时，route_files 的中继通知与 relay_text 会**整体静默不发**
+    // （对所有对端都是 false）。保守发多一份由内容去重/服务端同组过滤兜底。
+    if group_is_unreliable(a) || group_is_unreliable(b) {
+        true
     } else {
         a != b
     }
 }
 
-/// 推断本机 lan_group：取首个非回环 IPv4 的前 24 位，失败回退空串。
+/// lan_group 是否**不可信**（空串 / 格式异常 / 虚拟网段）。
+///
+/// 虚拟段见 `is_virtual_or_reserved`：装 Clash/TUN 的机器会把 TUN 网卡地址当分组，
+/// 使两个真实网络里的设备被判成同组（通知漏投）、或同 LAN 设备被判成不同组（重复）。
+/// 与服务端 `state::group_is_unreliable` 保持同一语义。
+fn group_is_unreliable(g: &str) -> bool {
+    let mut it = g.split('.');
+    match (it.next(), it.next(), it.next()) {
+        (Some(a), Some(b), Some(c)) => match (a.parse::<u8>(), b.parse::<u8>(), c.parse::<u8>()) {
+            (Ok(a), Ok(b), Ok(c)) => is_virtual_or_reserved(std::net::Ipv4Addr::new(a, b, c, 0)),
+            _ => true,
+        },
+        _ => true,
+    }
+}
+
+/// 已知的「虚拟网卡 / 保留段」IPv4 —— 不能用来判断局域网分组。
+///
+/// - `198.18.0.0/15`：IETF 基准测试保留段，Clash 等代理的 TUN fake-ip 常用；
+/// - `100.64.0.0/10`：运营商级 NAT（Tailscale 等 VPN 也用）。
+fn is_virtual_or_reserved(ip: std::net::Ipv4Addr) -> bool {
+    let o = ip.octets();
+    let in_198_18 = o[0] == 198 && (o[1] == 18 || o[1] == 19);
+    let in_100_64 = o[0] == 100 && (64..=127).contains(&o[1]);
+    in_198_18 || in_100_64
+}
+
+/// 从候选 IPv4 里选出代表「本机真实局域网」的那个（纯函数，便于单测）。
+///
+/// 规则：剔除回环/链路本地/虚拟段后，优先私有地址（10/8、172.16/12、192.168/16），
+/// 其次任意剩余地址；排序保证同一台机器每次结果一致（接口枚举顺序不保证稳定）。
+fn pick_lan_ipv4(candidates: &[std::net::Ipv4Addr]) -> Option<std::net::Ipv4Addr> {
+    let mut ok: Vec<std::net::Ipv4Addr> = candidates
+        .iter()
+        .copied()
+        .filter(|ip| !ip.is_loopback() && !ip.is_link_local() && !is_virtual_or_reserved(*ip))
+        .collect();
+    ok.sort();
+    ok.iter()
+        .find(|ip| ip.is_private())
+        .copied()
+        .or_else(|| ok.first().copied())
+}
+
+/// 推断本机 lan_group（取所选 IPv4 的前 24 位；无法判定时回退空串）。
+///
+/// 顺序：① 配置里显式指定则直接用；② 枚举网卡、剔除回环/链路本地/虚拟网段，
+/// 优先私有地址（见 `pick_lan_ipv4`）；③ 兜底用「默认路由出口地址」。
 /// pub(crate)：transfer/manager 也需要同源算法做「只看局域网」过滤，避免两处拷贝。
 pub(crate) fn infer_lan_group(configured: &str) -> String {
     if !configured.is_empty() {
         return configured.to_string();
     }
+    // 先枚举真实网卡并排除虚拟/保留段。**不能只用「连 8.8.8.8 看默认路由出口地址」**：
+    // 装了 Clash/TUN 的机器该地址是 TUN 网卡的 198.18.x（基准测试保留段），于是
+    // 同一真实局域网的两台机器可能被判成不同组、而分处两个真实网络的机器被判成同组
+    // ——跨 LAN 文件通知因此投错或漏投（2026-09-17 实测：Mac mini 与一台公网机器都报 198.18.0）。
+    let candidates: Vec<std::net::Ipv4Addr> = if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|i| match i.addr {
+            if_addrs::IfAddr::V4(v4) => Some(v4.ip),
+            if_addrs::IfAddr::V6(_) => None,
+        })
+        .collect();
+    if let Some(ip) = pick_lan_ipv4(&candidates) {
+        let o = ip.octets();
+        return format!("{}.{}.{}", o[0], o[1], o[2]);
+    }
+    // 兜底：保留原「默认路由出口」逻辑（可能拿到虚拟地址，但比空串保守——
+    // 空串会让服务端按「不确定」处理，宁可重复显示也不漏投）
     if let Ok(s) = std::net::UdpSocket::bind("0.0.0.0:0") {
         if s.connect("8.8.8.8:80").is_ok() {
             if let Ok(local) = s.local_addr() {
@@ -1259,7 +1398,58 @@ pub(crate) fn infer_lan_group(configured: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_ext_file_ep;
+    use super::{normalize_ext_file_ep, pick_lan_ipv4};
+    /// 分组不可信判定：空/格式异常/虚拟网段都算不可信（保守投递），真实私有组才可信。
+    #[test]
+    fn unreliable_lan_group_detection() {
+        use super::group_is_unreliable;
+        assert!(group_is_unreliable(""));
+        assert!(group_is_unreliable("10.0")); // 格式异常
+        assert!(group_is_unreliable("abc.def.ghi"));
+        assert!(group_is_unreliable("198.18.0")); // Clash TUN fake-ip
+        assert!(group_is_unreliable("100.64.0")); // CGNAT / VPN
+        assert!(!group_is_unreliable("10.0.0"));
+        assert!(!group_is_unreliable("192.168.1"));
+    }
+
+    /// 不可信分组 → 视为「可能跨 LAN」（保守发中继）；两边都可信才按异同判断。
+    #[test]
+    fn lan_differ_is_conservative_for_unreliable_groups() {
+        use super::lan_differ;
+        assert!(!lan_differ("10.0.0", "10.0.0"));
+        assert!(lan_differ("10.0.0", "10.0.1"));
+        assert!(lan_differ("", "10.0.0"));
+        assert!(lan_differ("198.18.0", "198.18.0"));
+    }
+
+    /// 虚拟/保留网段不能当局域网分组依据：Clash TUN（198.18.x）与 CGNAT/VPN（100.64+）
+    /// 会污染分组，导致同 LAN 判成不同组、不同网络判成同组（2026-09-17 实测）。
+    #[test]
+    fn virtual_ranges_are_ignored_when_picking_lan_ip() {
+        use std::net::Ipv4Addr;
+        // 只有 TUN 地址 → 不选它（返回 None，交由兜底逻辑）
+        assert_eq!(pick_lan_ipv4(&[Ipv4Addr::new(198, 18, 114, 130)]), None);
+        assert_eq!(pick_lan_ipv4(&[Ipv4Addr::new(100, 64, 0, 5)]), None);
+        // 有真实私有地址时优先私有，忽略 TUN 与公网
+        assert_eq!(
+            pick_lan_ipv4(&[
+                Ipv4Addr::new(198, 18, 0, 1),
+                Ipv4Addr::new(103, 40, 14, 14),
+                Ipv4Addr::new(10, 0, 0, 146),
+            ]),
+            Some(Ipv4Addr::new(10, 0, 0, 146))
+        );
+        // 只有公网（无虚拟段）时按排序取稳定结果
+        assert_eq!(
+            pick_lan_ipv4(&[Ipv4Addr::new(103, 40, 14, 14), Ipv4Addr::new(101, 1, 1, 1)]),
+            Some(Ipv4Addr::new(101, 1, 1, 1))
+        );
+        // 回环/链路本地剔除
+        assert_eq!(
+            pick_lan_ipv4(&[Ipv4Addr::new(127, 0, 0, 1), Ipv4Addr::new(169, 254, 1, 1)]),
+            None
+        );
+    }
 
     /// 省略端口时必须补默认端口：这是「设置页探测通过 → 保存后跨 LAN 拉取可用」
     /// 不变式的一半（另一半是拉取端用同一个函数）。回归点：拉取端曾直接拼

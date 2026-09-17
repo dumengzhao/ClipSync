@@ -15,6 +15,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
+/// 同一份文件（路径清单指纹相同）在这么短时间内的重复剪贴板事件视为「重复/回声」而跳过。
+///
+/// 只需覆盖两种真实重复：① 系统对同一次复制触发多次事件（毫秒级）；
+/// ② 拉取完成后自动写剪贴板的回声（1.5s 抑制窗内）。取 3s 留余量，
+/// 同时保证用户**真实的「再复制一次同一文件」**不会被吞掉。
+const FILE_REPEAT_WINDOW: Duration = Duration::from_secs(3);
+
 /// 引擎对外广播的剪贴板变化事件
 #[derive(Debug, Clone)]
 pub enum SyncEvent {
@@ -83,7 +90,15 @@ pub struct SyncEngine {
     event_tx: tokio::sync::broadcast::Sender<SyncEvent>,
     last_emitted: Arc<Mutex<Option<String>>>,
     /// 最近一次本地文件拷贝的路径哈希，避免轮询式监听（Linux）重复广播同一份 Offer。
-    last_file_hash: Arc<Mutex<Option<String>>>,
+    /// 上一次「本地复制文件」事件的 (路径清单哈希, 时刻)，用于压掉**短窗口内的重复事件**。
+    ///
+    /// **必须带时间**：早期只存哈希，导致「同一个文件再复制一次」被永久压掉——
+    /// 路径完全相同 → 哈希相同 → 不广播 Offer，对端再也收不到；只有复制别的文件
+    /// （哈希变了）或先复制点文本清空哈希才恢复。用户实测：
+    /// 「同一文件拉取取消后对端再复制就收不到了，别的文件可以」（2026-09-17）。
+    /// 现在只压 `FILE_REPEAT_WINDOW` 内的同指纹事件（防回声 + 系统对同一次
+    /// 复制重复触发事件），超过窗口的真实重发照常广播。
+    last_file_hash: Arc<Mutex<Option<(String, Instant)>>>,
     /// 程序化写剪贴板（拉取完成后自动粘贴）时记录所写路径的「规范化哈希」与写入时刻，
     /// 使本地监听在检测到该变化时能将其识别为「自己的回声」而丢弃，避免触发新一轮
     /// Offer 回环广播。元组 `(规范化路径哈希, 写入时刻)`：
@@ -205,16 +220,29 @@ impl SyncEngine {
                             }
                         };
                         if is_echo {
-                            *last_file_hash.lock().unwrap() = Some(h);
+                            *last_file_hash.lock().unwrap() = Some((h, now));
                             continue;
                         }
                         let should_emit = {
                             let mut g = last_file_hash.lock().unwrap();
-                            if g.as_ref() == Some(&h) {
-                                false
-                            } else {
-                                *g = Some(h);
-                                true
+                            match g.as_ref() {
+                                // 同指纹 + 窗口内 → 重复事件/回声：跳过（不更新时刻，
+                                // 让窗口从「第一次看到这份文件」起算，避免无限续窗）
+                                Some((prev, at))
+                                    if prev == &h
+                                        && now.duration_since(*at) < FILE_REPEAT_WINDOW =>
+                                {
+                                    tracing::debug!(
+                                        "本地复制的文件与上一次相同且间隔 {}ms（< {}ms），跳过本次 Offer 广播",
+                                        now.duration_since(*at).as_millis(),
+                                        FILE_REPEAT_WINDOW.as_millis()
+                                    );
+                                    false
+                                }
+                                _ => {
+                                    *g = Some((h, now));
+                                    true
+                                }
                             }
                         };
                         if should_emit {
