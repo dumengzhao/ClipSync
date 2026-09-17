@@ -226,7 +226,8 @@ impl AppState {
         ext_file_ep: &str,
         tx: &Tx,
     ) {
-        {
+        // 发送者的 lan_group：下面扇出要按「同 LAN 不投递」过滤
+        let from_lan_group = {
             let nets = self.networks.lock().unwrap();
             let net = match nets.iter().find(|n| n.id == net_id) {
                 Some(n) => n,
@@ -243,7 +244,8 @@ impl AppState {
                 }));
                 return;
             }
-        }
+            from_node.lan_group.clone()
+        };
         let (targets, msg) = {
             let nets = self.networks.lock().unwrap();
             let net = match nets.iter().find(|n| n.id == net_id) {
@@ -254,6 +256,11 @@ impl AppState {
                 .nodes
                 .iter()
                 .filter(|n| n.enabled && n.device_id != from_dev)
+                // 同局域网的对端有更优的 P2P 直连路径（客户端 route_files 也按同一
+                // 规则只在「存在跨 LAN 目标」时才发通知），中继再投一份会让同一份
+                // 文件同时出现在「待拉取文件」与「待复制（跨 LAN）」两个列表里
+                // （2026-09-17 用户实测）。
+                .filter(|n| needs_relay_notify(&from_lan_group, &n.lan_group))
                 .map(|n| n.device_id.clone())
                 .collect();
             let msg = ServerToClient::FileNotify {
@@ -508,5 +515,68 @@ impl AppState {
         self.save().ok();
         self.broadcast_nodes_update(net_id);
         true
+    }
+}
+
+/// 是否需要向该对端投递「跨 LAN」文件通知：**同局域网内不投**。
+///
+/// `lan_group` 的语义就是「相同走直连、不同才经中继」（见 models::Node）。客户端
+/// `route_files` 已按同一规则判断「有没有跨 LAN 目标」，但一次通知是广播出去的，
+/// 服务端若不在此处按组过滤，同 LAN 的对端就会同时收到 P2P Offer 与中继通知，
+/// 表现为同一份文件在两个列表里各出现一次（2026-09-17 用户实测）。
+///
+/// 任一侧 `lan_group` 为空（未探测到 / 老版本未上报）时**保守投递**：宁可重复
+/// 显示，也不能让真正的跨 LAN 对端彻底收不到（重复可见，收不到不可见）。
+pub(crate) fn needs_relay_notify(from_lan_group: &str, target_lan_group: &str) -> bool {
+    group_is_unreliable(from_lan_group)
+        || group_is_unreliable(target_lan_group)
+        || from_lan_group != target_lan_group
+}
+
+/// 该 lan_group 是否**不可信**（空 / 虚拟网段）——不可信一律照常投递。
+///
+/// 为什么不能只看「两组是否相同」：装了 Clash/TUN 的机器会把 TUN 网卡的
+/// `198.18.x`（IETF 基准测试保留段）当成局域网组，于是**两个真实网络里的设备
+/// 会被判成同组**，跨 LAN 文件通知被误抑制（2026-09-17 实测：Mac mini 与另一台
+/// 公网机器都报 198.18.0）。这类值只能视为「不知道」，宁可重复显示也不漏投。
+/// 客户端新版已改为列举真实网卡推断（见 client `pick_lan_ipv4`），但**旧客户端
+/// 仍会继续上报这类值**，所以服务端必须保留这层保护。
+fn group_is_unreliable(g: &str) -> bool {
+    // 必须是完整的三段式 `a.b.c`（客户端 `infer_lan_group` 的输出形态）：
+    // 段数不足（如 "10.0"）一律视为不可信 → 保守投递。
+    let mut parts = g.split('.');
+    let (Some(a), Some(b), Some(c)) = (parts.next(), parts.next(), parts.next()) else {
+        return true;
+    };
+    let (Ok(a), Ok(b), Ok(_c)) = (a.parse::<u8>(), b.parse::<u8>(), c.parse::<u8>()) else {
+        return true;
+    };
+    let in_198_18 = a == 198 && (b == 18 || b == 19);
+    let in_100_64 = a == 100 && (64..=127).contains(&b);
+    in_198_18 || in_100_64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::needs_relay_notify;
+
+    /// 同 LAN 不投递中继文件通知：否则同一份文件会在接收端同时进「待拉取文件」
+    /// 与「待复制（跨 LAN）」两个列表（2026-09-17 用户实测的重复显示）。
+    #[test]
+    fn relay_notify_skips_same_lan_group() {
+        assert!(!needs_relay_notify("10.0.0", "10.0.0"));
+        // 跨 LAN 投递
+        assert!(needs_relay_notify("10.0.0", "192.168.1"));
+        // 任一为空 → 保守投递（老版本未上报 lan_group 时不能让对端彻底收不到）
+        assert!(needs_relay_notify("", "10.0.0"));
+        assert!(needs_relay_notify("10.0.0", ""));
+        assert!(needs_relay_notify("", ""));
+        // 虚拟网段（Clash TUN / CGNAT）视为不可信 → 照常投递，避免误抑制真实跨 LAN 通知
+        assert!(needs_relay_notify("198.18.0", "198.18.0"));
+        assert!(needs_relay_notify("100.64.0", "100.64.0"));
+        // 段数不足/格式异常同样视为不可信
+        assert!(needs_relay_notify("10.0", "10.0"));
+        // 真实私有组相同才抑制（本次修复的目标场景）
+        assert!(!needs_relay_notify("192.168.1", "192.168.1"));
     }
 }
