@@ -2648,7 +2648,7 @@ impl ConnectionHub {
         } else {
             // 用户配对流程：SPAKE2（发起方先发、应答方先收）。
             // 配对码规范化后使用：显示可带分隔符/大小写差异，口令本身取规范化值，
-            // 避免用户按「A1B2-C3D4-E5F6」抄写而对方存的是无分隔形式导致永远不匹配。
+            // 避免用户按「A2B3-C4D5-E6F7」抄写而对方存的是无分隔形式导致永远不匹配。
             let pw = match role {
                 Role::Initiator => {
                     crate::crypto::pake::normalize_pairing_code(&outgoing_code.clone().ok_or_else(
