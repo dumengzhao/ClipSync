@@ -115,6 +115,9 @@ pub enum ServerToClient {
         code: String,
         msg: String,
     },
+    /// 心跳回执：让客户端的「读侧活性检测」有入帧可依（90s 无任何入帧即判死链重连）。
+    /// 只能追加在枚举末尾。旧客户端收到未知变体只打一条解析 warn，连接不受影响。
+    HeartbeatAck,
 }
 
 #[derive(Serialize, Clone, Debug)]

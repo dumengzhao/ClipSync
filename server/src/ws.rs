@@ -139,6 +139,12 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppState
                         if let Some((_, dev)) = &authed {
                             state.touch(dev);
                         }
+                        // 回执（含未鉴权连接）：客户端读侧靠「90s 无入帧判死链」，没有回执
+                        // 它无法区分「健康但空闲」与「中间链路静默假死」（2026-09-17 实际
+                        // 发生：经代理链的 WS 被静默丢弃，客户端永久显示已连接）。
+                        // try_send：控制消息可丢（队列满说明对端 socket 已堵，客户端正好
+                        // 会经活性超时自行重连）。
+                        let _ = tx.try_send(OutMsg::App(ServerToClient::HeartbeatAck));
                     }
                     ClientToServer::RelayText { to, ct } => {
                         if let Some((net, dev)) = &authed {
