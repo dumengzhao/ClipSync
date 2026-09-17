@@ -9,11 +9,7 @@ import { invoke } from '@tauri-apps/api/core';
  * 足以覆盖 setup 完成前的窗口期。仅限挂载期的幂等读操作使用；
  * 用户交互触发的调用不应重试（其它错误重试只会拖慢报错路径）。
  */
-export async function mountCall<T>(
-  fn: () => Promise<T>,
-  tries = 10,
-  delayMs = 300,
-): Promise<T> {
+export async function mountCall<T>(fn: () => Promise<T>, tries = 10, delayMs = 300): Promise<T> {
   let lastErr: unknown;
   for (let i = 0; i < tries; i++) {
     try {
@@ -116,6 +112,8 @@ export interface PendingOffer {
   top_names?: string[];
   /** 顶层是否含文件夹（文件夹传输） */
   has_folder?: boolean;
+  /** 到达时间（unix 毫秒），用于「最新在上」排序 */
+  received_at?: number;
 }
 
 /** 拉取某次文件传输：下载到本机 sync_dir，完成后自动写剪贴板 */
@@ -136,6 +134,15 @@ export async function cancelPullCrossLan(pullId: string): Promise<void> {
 /** 查询当前待拉取清单（挂载时回填，兜底事件丢失） */
 export async function listPendingOffers(): Promise<PendingOffer[]> {
   return invoke<PendingOffer[]>('list_pending_offers');
+}
+
+/** 清空客户端「接收到的」全部清单：局域网待拉取 + 跨 LAN 待复制。
+ *  只动客户端内存，不触碰服务端；进行中的拉取不受影响。 */
+export async function clearReceivedOffers(): Promise<{
+  pending: number;
+  cross_lan: number;
+}> {
+  return invoke<{ pending: number; cross_lan: number }>('clear_received_offers');
 }
 
 /** 读取本机剪贴板当前文字内容；剪贴板无文字或读取失败时返回 null。
@@ -236,6 +243,8 @@ export interface CrossLanOffer {
   from_name: string;
   manifest: { file_name: string; file_size: number; is_dir: boolean }[];
   ext_file_ep: string;
+  /** 到达时间（unix 毫秒），用于「最新在上」排序（与局域网 PendingOffer 同语义） */
+  received_at?: number;
 }
 export async function listCrossLanOffers(): Promise<CrossLanOffer[]> {
   return invoke<CrossLanOffer[]>('list_cross_lan_offers');
@@ -263,9 +272,7 @@ export async function pullCrossLan(
  * 不能只用 from+ext_file_ep（同一设备连续发多文件会误判重复，见 PullToast 注释）。
  */
 export function crossItemBase(o: CrossLanOffer): string {
-  const names = (o.manifest || [])
-    .map((f: { file_name: string }) => f.file_name)
-    .join('、');
+  const names = (o.manifest || []).map((f: { file_name: string }) => f.file_name).join('、');
   const total = (o.manifest || []).reduce(
     (s: number, f: { file_size: number }) => s + (f.file_size || 0),
     0,
@@ -357,7 +364,6 @@ export async function openLogWindow(): Promise<void> {
 export async function logWindowReady(): Promise<string[]> {
   return invoke<string[]>('log_window_ready');
 }
-
 
 /* ================= 客户端自更新（无签名自托管，见 server/UPDATE_MODULE_PLAN.md） ================= */
 

@@ -22,10 +22,19 @@ import {
   type PendingOffer,
   type RemoteNode,
   type CrossLanOffer,
+  clearReceivedOffers,
 } from './api/tauri';
 import SettingsPage from './SettingsPage';
 import TitleBar from './TitleBar';
 import { applyTheme } from './theme';
+
+/** 主界面「待拉取文件」最多显示的条数（更多条目仍在列表中，前面的拉取/清空后自动补位） */
+const MAX_VISIBLE_OFFERS = 3;
+
+/** 「待拉取文件」列表的统一条目：局域网 P2P Offer（P2P 直连）或跨 LAN 文件通知（中继） */
+type ReceivedItem =
+  | { kind: 'lan'; key: string; offer: PendingOffer }
+  | { kind: 'cross'; key: string; offer: CrossLanOffer };
 
 /** 通用确认弹窗：title 为标题，body 为说明文字，confirm 为确认按钮文案 */
 function ConfirmModal({
@@ -82,13 +91,16 @@ export default function App() {
   const [pulling, setPulling] = useState<Set<string>>(new Set());
   // 已完成的拉取结果：transfer_id -> 落盘目录与文件详情，供用户在主页查看下载位置
   const [pullResults, setPullResults] = useState<
-    Record<string, {
-      device_name: string;
-      target_dir: string;
-      file_count: number;
-      files: { name: string; size: number; is_dir: boolean }[];
-      pulled_at: number;
-    }>
+    Record<
+      string,
+      {
+        device_name: string;
+        target_dir: string;
+        file_count: number;
+        files: { name: string; size: number; is_dir: boolean }[];
+        pulled_at: number;
+      }
+    >
   >({});
   // 本机剪贴板当前文字内容（右侧展示，定时轮询刷新）
   const [clipboardText, setClipboardText] = useState<string | null>(null);
@@ -139,22 +151,40 @@ export default function App() {
     const unlistenSettings = listen<null>('open-settings', () => setView('settings'));
 
     // 初始数据：已发现设备 / 已配对设备 / 在线状态
-    listDiscoveredPeers().then(setDiscovered).catch(() => {});
-    getPairedDevices().then(setPaired).catch(() => {});
+    listDiscoveredPeers()
+      .then(setDiscovered)
+      .catch(() => {});
+    getPairedDevices()
+      .then(setPaired)
+      .catch(() => {});
     listConnectedPeers()
       .then((ids) => setConnected(new Set(ids)))
       .catch(() => {});
     // 待拉取清单：挂载时主动查一次（兜底事件丢失），并实时订阅对端广播
-    listPendingOffers().then(setPendingOffers).catch(() => {});
+    listPendingOffers()
+      .then(setPendingOffers)
+      .catch(() => {});
     // 跨局域网：挂载时回填服务端节点 / 待复制清单（连接状态由标题栏订阅 server-status 事件）
-    getServerNodes().then(setServerNodes).catch(() => {});
-    getServerStatus().then(setServerStatus).catch(() => {});
-    getDeviceId().then(setMyId).catch(() => {});
-    listCrossLanOffers().then(setCrossLanOffers).catch(() => {});
+    getServerNodes()
+      .then(setServerNodes)
+      .catch(() => {});
+    getServerStatus()
+      .then(setServerStatus)
+      .catch(() => {});
+    getDeviceId()
+      .then(setMyId)
+      .catch(() => {});
+    listCrossLanOffers()
+      .then(setCrossLanOffers)
+      .catch(() => {});
     // 本机计算机名：供底部状态栏右侧展示（设置中可改，这里取一次）
-    getConfig().then((c) => setDeviceName(c.device_name)).catch(() => {});
+    getConfig()
+      .then((c) => setDeviceName(c.device_name))
+      .catch(() => {});
     // 当前客户端版本号（Rust 端 `get_version` 返回 env!("CARGO_PKG_VERSION")），给 TitleBar 左上角用
-    getVersion().then(setAppVersion).catch(() => setAppVersion(''));
+    getVersion()
+      .then(setAppVersion)
+      .catch(() => setAppVersion(''));
 
     // 对端拷贝文件后广播「待拉取」；本端点击拉取后收到开始/完成事件
     const unlistenFileOffer = listen<PendingOffer>('file-offer', (e) => {
@@ -163,10 +193,36 @@ export default function App() {
         return [...prev, e.payload];
       });
     });
-    const unlistenPullStart = listen<{ transfer_id: string }>(
-      'file-pull-start',
+    // 任一侧（主窗口 / 小窗）清空待拉取后同步列表，避免另一侧残留死条目
+    const unlistenCleared = listen<number>('pending-offers-cleared', () => {
+      setPendingOffers([]);
+    });
+    const unlistenPullStart = listen<{ transfer_id: string }>('file-pull-start', (e) => {
+      const tid = e.payload.transfer_id;
+      setPulling((prev) => new Set(prev).add(tid));
+      // 开始拉取即从「待拉取」列表移除：原本只在 complete 时移除，于是**从小窗发起**
+      // 拉取时主窗口会残留一条「拉取中…」不动（从小窗看进度、主窗口看死条目）。
+      // 两段都按同一 transfer_id 匹配（跨 LAN 的 transfer_id = crossItemBase(o)）。
+      setPendingOffers((prev) => prev.filter((o) => o.transfer_id !== tid));
+      setCrossLanOffers((prev) => prev.filter((o) => crossItemBase(o) !== tid));
+    });
+    // 用户取消拉取（P2P / 跨 LAN 共用）：与 complete 一样要收口，否则「拉取中」永远不消失。
+    // 2026-09-17 用户实测：小窗里点取消成功了、也显示「已取消」，但主窗口那条记录
+    // 一直卡在「拉取中…」——因为主窗口此前根本没订阅这个事件。
+    const unlistenPullCancelled = listen<{ transfer_id: string; kind?: string }>(
+      'file-pull-cancelled',
       (e) => {
-        setPulling((prev) => new Set(prev).add(e.payload.transfer_id));
+        const tid = e.payload.transfer_id;
+        setPulling((prev) => {
+          const n = new Set(prev);
+          n.delete(tid);
+          return n;
+        });
+        setPendingOffers((prev) => prev.filter((o) => o.transfer_id !== tid));
+        setCrossLanOffers((prev) => prev.filter((o) => crossItemBase(o) !== tid));
+        // 取消 = 彻底删除：后端不会再把它退回来（用户明确要求「从所有位置删除不需要出现」），
+        // 所以这里只作提示，列表里不会重新出现该条目。
+        flash('已取消拉取');
       },
     );
     const unlistenPullComplete = listen<{
@@ -183,7 +239,9 @@ export default function App() {
         return n;
       });
       // 拉取完成（含自动拉取）后从待拉取清单移除，避免列表里残留「拉取中…」
+      // 两段都要清：跨 LAN 条目的 transfer_id 是 crossItemBase(o)，不在 pendingOffers 里。
       setPendingOffers((prev) => prev.filter((o) => o.transfer_id !== e.payload.transfer_id));
+      setCrossLanOffers((prev) => prev.filter((o) => crossItemBase(o) !== e.payload.transfer_id));
       setPullResults((prev) => ({
         ...prev,
         [e.payload.transfer_id]: {
@@ -266,9 +324,8 @@ export default function App() {
       });
       flash(`已与「${e.payload.name}」配对`);
     });
-    const unlistenFailed = listen<{ device_id: string; reason: string }>(
-      'pairing-failed',
-      (e) => flash(`配对失败：${e.payload.reason}`),
+    const unlistenFailed = listen<{ device_id: string; reason: string }>('pairing-failed', (e) =>
+      flash(`配对失败：${e.payload.reason}`),
     );
     const unlistenUnpaired = listen<string>('peer-unpaired', (e) => {
       // 清掉残留的配对码输入框：否则该设备回到待连接列表时，因 pairingTarget
@@ -286,7 +343,9 @@ export default function App() {
       // 所以后端在 unpair 时用注册表里的名称 + 最后地址主动补了一条，
       // 并强制 mDNS 重新浏览；这里重查即可拿到（`peer-discovered` 事件
       // 到达时本机 paired 尚未更新，会被"已配对"过滤掉，必须靠重查兜底）。
-      listDiscoveredPeers().then(setDiscovered).catch(() => {});
+      listDiscoveredPeers()
+        .then(setDiscovered)
+        .catch(() => {});
     });
     // 已配对设备的信息更新（mDNS 重新发现 / 重连后名称或地址变更）。
     // 只刷新展示，不触发"已配对"提示（那是 peer-paired 的职责）。
@@ -299,14 +358,11 @@ export default function App() {
       });
     });
     // 本机复制文件夹，文件数超过 100：仅弹左下角提示，不向对端广播。
-    const unlistenCountExceeded = listen<{ folder_name: string }>(
-      'file-count-exceeded',
-      (e) => {
-        const name = e.payload.folder_name || '该';
-        setFolderWarn(`${name}文件夹文件数量超过100，请压缩后复制`);
-        window.setTimeout(() => setFolderWarn(null), 6000);
-      },
-    );
+    const unlistenCountExceeded = listen<{ folder_name: string }>('file-count-exceeded', (e) => {
+      const name = e.payload.folder_name || '该';
+      setFolderWarn(`${name}文件夹文件数量超过100，请压缩后复制`);
+      window.setTimeout(() => setFolderWarn(null), 6000);
+    });
     // 跨局域网服务端事件
     // 跨局域网服务端连接状态（标题栏左侧展示）；本处仅需在重连成功时清除「被移除」提示
     const unlistenServerStatus = listen<number>('server-status', (e) => {
@@ -319,12 +375,12 @@ export default function App() {
       // 连接状态变为已连接/已启用时主动重新拉取节点列表，兜底广播事件偶发丢失，
       // 确保（重）连后设备信息（如对外文件地址）为最新，无需重启。
       if (e.payload === 1 || e.payload === 2) {
-        getServerNodes().then(setServerNodes).catch(() => {});
+        getServerNodes()
+          .then(setServerNodes)
+          .catch(() => {});
       }
     });
-    const unlistenServerRemoved = listen('server-removed', () =>
-      setServerRemoved(true),
-    );
+    const unlistenServerRemoved = listen('server-removed', () => setServerRemoved(true));
     const unlistenServerAuthRejected = listen('server-auth-rejected', () =>
       setServerAuthRejected(true),
     );
@@ -364,8 +420,10 @@ export default function App() {
       unlistenUnpaired.then((u) => u());
       unlistenInfoUpdated.then((u) => u());
       unlistenCountExceeded.then((u) => u());
+      unlistenCleared.then((u) => u());
       unlistenFileOffer.then((u) => u());
       unlistenPullStart.then((u) => u());
+      unlistenPullCancelled.then((u) => u());
       unlistenPullComplete.then((u) => u());
       unlistenPullError.then((u) => u());
       unlistenServerStatus.then((u) => u());
@@ -388,20 +446,19 @@ export default function App() {
   // 仅在变化时刷新首页，取代原先每秒跨进程轮询读取的写法。
   useEffect(() => {
     // 首屏挂载时先读取一次，避免空白（setup 完成前调用会失败，mountCall 内部重试）。
-    getClipboardText().then(setClipboardText).catch(() => {});
-    const unlisten = listen<{ text: string | null; kind: string }>(
-      'clipboard-changed',
-      (event) => {
-        const p = event.payload;
-        if (p && p.text != null) {
-          setClipboardText(p.text);
-        } else if (p && p.kind === 'image') {
-          setClipboardText('[图片]');
-        } else if (p && p.kind === 'files') {
-          setClipboardText('[文件]');
-        }
-      },
-    );
+    getClipboardText()
+      .then(setClipboardText)
+      .catch(() => {});
+    const unlisten = listen<{ text: string | null; kind: string }>('clipboard-changed', (event) => {
+      const p = event.payload;
+      if (p && p.text != null) {
+        setClipboardText(p.text);
+      } else if (p && p.kind === 'image') {
+        setClipboardText('[图片]');
+      } else if (p && p.kind === 'files') {
+        setClipboardText('[文件]');
+      }
+    });
     return () => {
       unlisten.then((u) => u());
     };
@@ -451,6 +508,26 @@ export default function App() {
     return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   };
 
+  /// 清空客户端接收到的全部清单：「待拉取文件」（局域网 P2P）与「待复制（跨 LAN）」
+  /// 共用一个按钮——两段都是本机收到后暂存的清单，语义上是一件事。
+  /// 只清清单，不动进行中的拉取；服务端记录与对端不受影响。
+  const handleClearOffers = async () => {
+    try {
+      const r = await clearReceivedOffers();
+      const total = r.pending + r.cross_lan;
+      if (total > 0) {
+        const parts: string[] = [];
+        if (r.pending > 0) parts.push(`待拉取 ${r.pending} 条`);
+        if (r.cross_lan > 0) parts.push(`跨 LAN ${r.cross_lan} 条`);
+        setMsg(`已清空 ${parts.join('、')}`);
+      }
+    } catch (e) {
+      setMsg('清空失败: ' + String(e));
+    }
+    setPendingOffers([]);
+    setCrossLanOffers([]);
+  };
+
   /// 点击「拉取」：向对端请求文件，本端下载到 sync_dir，完成后自动写本机剪贴板。
   const doPull = async (transferId: string) => {
     setPulling((prev) => new Set(prev).add(transferId));
@@ -498,372 +575,465 @@ export default function App() {
   const pairedRef = useRef<PairedDeviceInfo[]>([]);
   pairedRef.current = paired;
 
+  // 待拉取列表：局域网（P2P Offer）与跨 LAN（中继文件通知）**合并展示**。
+  // 分开两段时同一份文件会各出现一次（来源重复），且要来回看两处；
+  // 现在统一成一段，用每条 item 上的徽章标明来源。
+  //
+  // 排序：**最新在上**。必须按后端到达时间排——局域网清单内部是 HashMap，
+  // 迭代顺序不确定，直接按数组顺序渲染会出现「最新跑到最下面」。
+  const receivedAll: ReceivedItem[] = [
+    ...pendingOffers.map((o) => ({ kind: 'lan' as const, key: o.transfer_id, offer: o })),
+    ...crossLanOffers.map((o) => ({
+      kind: 'cross' as const,
+      key: `${o.from}-${o.ext_file_ep}`,
+      offer: o,
+    })),
+  ].sort(
+    (a, b) =>
+      (b.offer.received_at ?? 0) - (a.offer.received_at ?? 0) ||
+      // 时间戳相同（极快连发）时用 key 兜底，保证渲染顺序稳定
+      a.key.localeCompare(b.key),
+  );
+  // 最多显示 MAX_VISIBLE_OFFERS 条（更早的仍在列表里，拉取/清空后会自动补位显示）
+  const receivedItems = receivedAll.slice(0, MAX_VISIBLE_OFFERS);
+
   return (
     <div className="app-shell">
-      <TitleBar onOpenSettings={() => setView('settings')} deviceName={deviceName} version={appVersion} />
+      <TitleBar
+        onOpenSettings={() => setView('settings')}
+        deviceName={deviceName}
+        version={appVersion}
+      />
       {view === 'settings' ? (
         <SettingsPage onBack={() => setView('main')} />
       ) : (
-      <>
-      <div className="app">
-        <main className="app-main">
-            <div className="app-layout">
-          <div className="app-left">
-            <section className="peers">
-              {serverRemoved && (
-                <div
-                  className="msg"
-                  style={{ color: '#dc2626', marginBottom: '0.5rem' }}
-                >
-                  设备已被服务端移除（拉黑）。如需重新使用，请在设置中重新填写服务端地址并保存以重新配对。
-                </div>
-              )}
-              {serverAuthRejected && (
-                <div
-                  className="msg"
-                  style={{ color: '#dc2626', marginBottom: '0.5rem' }}
-                >
-                  服务端拒绝接入：网络 Token 已失效。请在设置中更新服务端 Token 并保存。
-                </div>
-              )}
-              {paired.length === 0 && visibleServerNodes.length === 0 ? (
-                <p className="hint">还没有已配对设备或已连接的跨局域网设备</p>
-              ) : (
-                <ul className="peer-list">
-                  {paired.map((p) => {
-                    const isOnline = connected.has(p.id);
-                    return (
-                      <li key={`p-${p.id}`} className="peer-item peer-unified">
-                        <span className={`peer-type-icon wifi ${isOnline ? 'online' : 'offline'}`} title="局域网设备">
-                          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                            <path d="M5 12.5a10 10 0 0 1 14 0" />
-                            <path d="M8.5 16a5 5 0 0 1 7 0" />
-                            <circle cx="12" cy="19" r="1" fill="currentColor" stroke="none" />
-                          </svg>
-                          {!isOnline && <span className="icon-slash" />}
-                        </span>
-                        <div className="peer-main">
-                          <div className="peer-name-row">
-                            <span className={`peer-dot ${isOnline ? 'on' : 'off'}`} />
-                            <span className="peer-name">{p.name}</span>
-                          </div>
-                          <span className="peer-id">{p.id}</span>
-                          <div className="peer-action-row">
-                            <span className="peer-addr">
-                              {isOnline ? '已连接' : p.last_addr ? p.last_addr : '离线'}
-                            </span>
-                            <button className="btn btn-ghost btn-sm" onClick={() => removePairing(p)}>
-                              取消配对
-                            </button>
-                          </div>
-                        </div>
-                      </li>
-                    );
-                  })}
-                  {visibleServerNodes.map((n) => {
-                    const isOnline = serverStatus === 2;
-                    return (
-                      <li key={`n-${n.device_id}`} className="peer-item peer-unified">
-                        <span className={`peer-type-icon cloud ${isOnline ? 'online' : 'offline'}`} title="跨局域网设备（服务端）">
-                          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M17.5 19a4.5 4.5 0 0 0 0-9 6 6 0 0 0-11.6 1.5A3.5 3.5 0 0 0 6.5 19z" />
-                          </svg>
-                          {!isOnline && <span className="icon-slash" />}
-                        </span>
-                        <div className="peer-main">
-                          <div className="peer-name-row">
-                            <span className={`peer-dot ${isOnline ? 'on' : 'off'}`} />
-                            <span className="peer-name">{n.name}</span>
-                          </div>
-                          <span className="peer-id">{n.device_id}</span>
-                          <div className="peer-action-row">
-                            <span className="peer-addr">{n.ext_file_ep || '—'}</span>
-                          </div>
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-            </section>
-
-            <section className="peers">
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  marginBottom: '0.5rem',
-                }}
-              >
-                <h2 style={{ marginBottom: 0 }}>局域网发现的设备</h2>
-                <button
-                  className="btn btn-sm btn-ghost"
-                  onClick={refreshDiscovery}
-                  disabled={refreshing}
-                  title="重新扫描局域网内的 ClipSync 设备"
-                >
-                  {refreshing ? '刷新中…' : '刷新'}
-                </button>
-              </div>
-              {discoveredOnly.length === 0 ? (
-                <p className="hint">局域网内未发现其它 ClipSync 设备</p>
-              ) : (
-                <ul className="peer-list">
-                  {discoveredOnly.map((p) => (
-                    <li key={p.device_id} className="peer-item peer-item-action">
-                      <span className="peer-name">{p.device_name}</span>
-                      <span className="peer-addr">{p.addr}:{p.port}</span>
-                      <button
-                        className="btn btn-sm"
-                        onClick={() => {
-                          setPairingTarget(p);
-                          setPairInput('');
-                        }}
-                      >
-                        配对
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
-
-            {/* 跨局域网（服务端）板块已合并到上方统一设备列表；本机启用状态见标题栏左侧 */}
-          </div>
-
-          <div className="app-right">
-            <div className="app-right-scroll">
-            <section className="peers">
-              <h2>粘贴板文字内容</h2>
-              <div className="clipboard-box">
-                {clipboardText ? (
-                  clipboardText
-                ) : (
-                  <span className="clipboard-empty">（剪贴板没有文字内容）</span>
-                )}
-              </div>
-            </section>
-
-            <section className="peers">
-              <h2>待拉取文件</h2>
-              {pendingOffers.length === 0 ? (
-                <p className="hint">对端拷贝文件后会出现在这里</p>
-              ) : (
-                <ul className="peer-list">
-                  {pendingOffers.map((o) => {
-                    const isPulling = pulling.has(o.transfer_id);
-                    const isFolder = !!o.has_folder;
-                    const mainLabel = isFolder
-                      ? (o.top_names?.join('、') || o.files[0]?.file_name || '未知文件夹')
-                      : (o.files.length === 1
-                          ? (o.files[0]?.file_name ?? '未知文件')
-                          : `${o.files.slice(0, 2).map((f) => f.file_name).join('、')} 等 ${o.files.length} 个`);
-                    const title = isFolder
-                      ? (o.top_names?.join('、') ?? '')
-                      : o.files.map((f) => f.file_name).join('、');
-                    const subLabel = `来自 ${o.device_name || o.device_id}${isFolder ? '' : ` · ${fmtSize(o.total_size)}`}`;
-                    return (
-                      <li key={o.transfer_id} className="peer-item peer-item-action">
-                        <div className="offer-info">
-                          <span className="peer-name" title={title}>{mainLabel}</span>
-                          <span className="peer-addr">{subLabel}</span>
-                        </div>
-                {o.auto_pull ? (
-                  isPulling ? (
-                    <span className="peer-addr">自动拉取中…</span>
-                  ) : (
-                    <span className="peer-addr">将自动拉取</span>
-                  )
-                ) : isPulling ? (
-                  <span className="peer-addr">拉取中…</span>
-                ) : (
-                  <button className="btn btn-sm" onClick={() => doPull(o.transfer_id)}>
-                    拉取
-                  </button>
-                )}
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-            </section>
-
-            <section className="peers">
-              <h2>待复制（跨 LAN）</h2>
-              {crossLanOffers.length === 0 ? (
-                <p className="hint">跨局域网设备复制文件后会出现在这里</p>
-              ) : (
-                <ul className="peer-list">
-                  {crossLanOffers.map((o) => {
-                    const isPulling = crossPulling.has(o.ext_file_ep);
-                    const names = (o.manifest || [])
-                      .map((f) => f.file_name)
-                      .join('、');
-                    const total = (o.manifest || []).reduce(
-                      (s: number, f: { file_size: number }) => s + (f.file_size || 0),
-                      0,
-                    );
-                    return (
-                      <li key={`${o.from}-${o.ext_file_ep}`} className="peer-item peer-item-action">
-                        <div className="offer-info">
-                          <span className="peer-name" title={names}>{names || '未知文件'}</span>
-                          <span className="peer-addr">
-                            来自 {o.from_name || o.from}
-                            {total > 0 ? ` · ${fmtSize(total)}` : ''}
-                          </span>
-                        </div>
-                        {isPulling ? (
-                          <span className="peer-addr">拉取中…</span>
-                        ) : (
-                          <button
-                            className="btn btn-sm"
-                            onClick={() => doCrossPull(o)}
-                          >
-                            拉取
-                          </button>
-                        )}
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-            </section>
-
-            {Object.keys(pullResults).length > 0 && (
-              <section className="peers">
-                <h2 style={{ display: 'flex', alignItems: 'baseline', gap: '0.6rem' }}>
-                  已拉取的文件
-                  {(() => {
-                    const latest = Object.values(pullResults).slice(-1)[0];
-                    return latest && (
-                      <span className="peer-addr" style={{ fontSize: '0.8rem' }}>
-                        {latest.target_dir}
-                      </span>
-                    );
-                  })()}
-                </h2>
-                <ul className="peer-list">
-                  {Object.entries(pullResults).slice(-3).reverse().map(([tid, r]) => (
-                    <li key={tid} className="peer-item" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-                        <span className="peer-name">{r.device_name}</span>
-                        <span className="peer-addr">{r.target_dir}</span>
+        <>
+          <div className="app">
+            <main className="app-main">
+              <div className="app-layout">
+                <div className="app-left">
+                  <section className="peers">
+                    {serverRemoved && (
+                      <div className="msg" style={{ color: '#dc2626', marginBottom: '0.5rem' }}>
+                        设备已被服务端移除（拉黑）。如需重新使用，请在设置中重新填写服务端地址并保存以重新配对。
                       </div>
-                      <ul style={{ listStyle: 'none', marginTop: '0.4rem', fontSize: '0.8rem', color: '#888' }}>
-                        {r.files.map((f, i) => (
-                          <li key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.15rem 0' }}>
-                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginRight: '0.5rem' }}>
-                              {f.is_dir ? '📁 ' : '📄 '}{f.name}
-                            </span>
-                            <span style={{ display: 'flex', gap: '1rem', flex: '0 0 auto' }}>
-                              <span>{fmtTime(r.pulled_at)}</span>
-                              <span style={{ minWidth: '4rem', textAlign: 'right' }}>
-                                {f.is_dir ? '-' : fmtSize(f.size)}
+                    )}
+                    {serverAuthRejected && (
+                      <div className="msg" style={{ color: '#dc2626', marginBottom: '0.5rem' }}>
+                        服务端拒绝接入：网络 Token 已失效。请在设置中更新服务端 Token 并保存。
+                      </div>
+                    )}
+                    {paired.length === 0 && visibleServerNodes.length === 0 ? (
+                      <p className="hint">还没有已配对设备或已连接的跨局域网设备</p>
+                    ) : (
+                      <ul className="peer-list">
+                        {paired.map((p) => {
+                          const isOnline = connected.has(p.id);
+                          return (
+                            <li key={`p-${p.id}`} className="peer-item peer-unified">
+                              <span
+                                className={`peer-type-icon wifi ${isOnline ? 'online' : 'offline'}`}
+                                title="局域网设备"
+                              >
+                                <svg
+                                  width="15"
+                                  height="15"
+                                  viewBox="0 0 24 24"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="2"
+                                  strokeLinecap="round"
+                                >
+                                  <path d="M5 12.5a10 10 0 0 1 14 0" />
+                                  <path d="M8.5 16a5 5 0 0 1 7 0" />
+                                  <circle cx="12" cy="19" r="1" fill="currentColor" stroke="none" />
+                                </svg>
+                                {!isOnline && <span className="icon-slash" />}
                               </span>
+                              <div className="peer-main">
+                                <div className="peer-name-row">
+                                  <span className={`peer-dot ${isOnline ? 'on' : 'off'}`} />
+                                  <span className="peer-name">{p.name}</span>
+                                </div>
+                                <span className="peer-id">{p.id}</span>
+                                <div className="peer-action-row">
+                                  <span className="peer-addr">
+                                    {isOnline ? '已连接' : p.last_addr ? p.last_addr : '离线'}
+                                  </span>
+                                  <button
+                                    className="btn btn-ghost btn-sm"
+                                    onClick={() => removePairing(p)}
+                                  >
+                                    取消配对
+                                  </button>
+                                </div>
+                              </div>
+                            </li>
+                          );
+                        })}
+                        {visibleServerNodes.map((n) => {
+                          const isOnline = serverStatus === 2;
+                          return (
+                            <li key={`n-${n.device_id}`} className="peer-item peer-unified">
+                              <span
+                                className={`peer-type-icon cloud ${isOnline ? 'online' : 'offline'}`}
+                                title="跨局域网设备（服务端）"
+                              >
+                                <svg
+                                  width="15"
+                                  height="15"
+                                  viewBox="0 0 24 24"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="2"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                >
+                                  <path d="M17.5 19a4.5 4.5 0 0 0 0-9 6 6 0 0 0-11.6 1.5A3.5 3.5 0 0 0 6.5 19z" />
+                                </svg>
+                                {!isOnline && <span className="icon-slash" />}
+                              </span>
+                              <div className="peer-main">
+                                <div className="peer-name-row">
+                                  <span className={`peer-dot ${isOnline ? 'on' : 'off'}`} />
+                                  <span className="peer-name">{n.name}</span>
+                                </div>
+                                <span className="peer-id">{n.device_id}</span>
+                                <div className="peer-action-row">
+                                  <span className="peer-addr">{n.ext_file_ep || '—'}</span>
+                                </div>
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                  </section>
+
+                  <section className="peers">
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        marginBottom: '0.5rem',
+                      }}
+                    >
+                      <h2 style={{ marginBottom: 0 }}>局域网发现的设备</h2>
+                      <button
+                        className="btn btn-sm btn-ghost"
+                        onClick={refreshDiscovery}
+                        disabled={refreshing}
+                        title="重新扫描局域网内的 ClipSync 设备"
+                      >
+                        {refreshing ? '刷新中…' : '刷新'}
+                      </button>
+                    </div>
+                    {discoveredOnly.length === 0 ? (
+                      <p className="hint">局域网内未发现其它 ClipSync 设备</p>
+                    ) : (
+                      <ul className="peer-list">
+                        {discoveredOnly.map((p) => (
+                          <li key={p.device_id} className="peer-item peer-item-action">
+                            <span className="peer-name">{p.device_name}</span>
+                            <span className="peer-addr">
+                              {p.addr}:{p.port}
                             </span>
+                            <button
+                              className="btn btn-sm"
+                              onClick={() => {
+                                setPairingTarget(p);
+                                setPairInput('');
+                              }}
+                            >
+                              配对
+                            </button>
                           </li>
                         ))}
                       </ul>
-                    </li>
-                  ))}
-                </ul>
-                <p className="hint">路径已写入剪贴板，Ctrl+V 即可粘贴</p>
-              </section>
-            )}
+                    )}
+                  </section>
 
-            </div>
+                  {/* 跨局域网（服务端）板块已合并到上方统一设备列表；本机启用状态见标题栏左侧 */}
+                </div>
+
+                <div className="app-right">
+                  <div className="app-right-scroll">
+                    <section className="peers">
+                      <h2>粘贴板文字内容</h2>
+                      <div className="clipboard-box">
+                        {clipboardText ? (
+                          clipboardText
+                        ) : (
+                          <span className="clipboard-empty">（剪贴板没有文字内容）</span>
+                        )}
+                      </div>
+                    </section>
+
+                    <section className="peers">
+                      <h2>
+                        待拉取文件
+                        {receivedItems.length > 0 && (
+                          <button
+                            className="btn btn-sm"
+                            title="清空列表（不影响正在拉取的传输）"
+                            onClick={handleClearOffers}
+                            style={{ marginLeft: 'auto' }}
+                          >
+                            清空
+                          </button>
+                        )}
+                      </h2>
+                      {receivedItems.length === 0 ? (
+                        <p className="hint">对端拷贝文件后会出现在这里</p>
+                      ) : (
+                        <ul className="peer-list">
+                          {receivedItems.map((it) => {
+                            if (it.kind === 'lan') {
+                              const o = it.offer;
+                              const isPulling = pulling.has(o.transfer_id);
+                              const isFolder = !!o.has_folder;
+                              const mainLabel = isFolder
+                                ? o.top_names?.join('、') || o.files[0]?.file_name || '未知文件夹'
+                                : o.files.length === 1
+                                  ? (o.files[0]?.file_name ?? '未知文件')
+                                  : `${o.files
+                                      .slice(0, 2)
+                                      .map((f) => f.file_name)
+                                      .join('、')} 等 ${o.files.length} 个`;
+                              const title = isFolder
+                                ? (o.top_names?.join('、') ?? '')
+                                : o.files.map((f) => f.file_name).join('、');
+                              const subLabel = `来自 ${o.device_name || o.device_id}${isFolder ? '' : ` · ${fmtSize(o.total_size)}`}`;
+                              return (
+                                <li key={it.key} className="peer-item peer-item-action">
+                                  <div className="offer-info">
+                                    <span className="offer-name-line">
+                                      <span className="src-badge src-badge-lan">局域网</span>
+                                      <span className="peer-name" title={title}>
+                                        {mainLabel}
+                                      </span>
+                                    </span>
+                                    <span className="peer-addr">{subLabel}</span>
+                                  </div>
+                                  {o.auto_pull ? (
+                                    isPulling ? (
+                                      <span className="peer-addr">自动拉取中…</span>
+                                    ) : (
+                                      <span className="peer-addr">将自动拉取</span>
+                                    )
+                                  ) : isPulling ? (
+                                    <span className="peer-addr">拉取中…</span>
+                                  ) : (
+                                    <button
+                                      className="btn btn-sm"
+                                      onClick={() => doPull(o.transfer_id)}
+                                    >
+                                      拉取
+                                    </button>
+                                  )}
+                                </li>
+                              );
+                            }
+                            const o = it.offer;
+                            const isPulling = crossPulling.has(o.ext_file_ep);
+                            const names = (o.manifest || []).map((f) => f.file_name).join('、');
+                            const total = (o.manifest || []).reduce(
+                              (sum: number, f: { file_size: number }) => sum + (f.file_size || 0),
+                              0,
+                            );
+                            return (
+                              <li key={it.key} className="peer-item peer-item-action">
+                                <div className="offer-info">
+                                  <span className="offer-name-line">
+                                    <span className="src-badge src-badge-cross">跨LAN</span>
+                                    <span className="peer-name" title={names}>
+                                      {names || '未知文件'}
+                                    </span>
+                                  </span>
+                                  <span className="peer-addr">
+                                    来自 {o.from_name || o.from}
+                                    {total > 0 ? ` · ${fmtSize(total)}` : ''}
+                                  </span>
+                                </div>
+                                {isPulling ? (
+                                  <span className="peer-addr">拉取中…</span>
+                                ) : (
+                                  <button className="btn btn-sm" onClick={() => doCrossPull(o)}>
+                                    拉取
+                                  </button>
+                                )}
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      )}
+                    </section>
+
+                    {Object.keys(pullResults).length > 0 && (
+                      <section className="peers">
+                        <h2 style={{ display: 'flex', alignItems: 'baseline', gap: '0.6rem' }}>
+                          已拉取的文件
+                          {(() => {
+                            const latest = Object.values(pullResults).slice(-1)[0];
+                            return (
+                              latest && (
+                                <span className="peer-addr" style={{ fontSize: '0.8rem' }}>
+                                  {latest.target_dir}
+                                </span>
+                              )
+                            );
+                          })()}
+                        </h2>
+                        <ul className="peer-list">
+                          {Object.entries(pullResults)
+                            .slice(-3)
+                            .reverse()
+                            .map(([tid, r]) => (
+                              <li
+                                key={tid}
+                                className="peer-item"
+                                style={{ flexDirection: 'column', alignItems: 'stretch' }}
+                              >
+                                <div
+                                  style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}
+                                >
+                                  <span className="peer-name">{r.device_name}</span>
+                                  <span className="peer-addr">{r.target_dir}</span>
+                                </div>
+                                <ul
+                                  style={{
+                                    listStyle: 'none',
+                                    marginTop: '0.4rem',
+                                    fontSize: '0.8rem',
+                                    color: '#888',
+                                  }}
+                                >
+                                  {r.files.map((f, i) => (
+                                    <li
+                                      key={i}
+                                      style={{
+                                        display: 'flex',
+                                        justifyContent: 'space-between',
+                                        padding: '0.15rem 0',
+                                      }}
+                                    >
+                                      <span
+                                        style={{
+                                          overflow: 'hidden',
+                                          textOverflow: 'ellipsis',
+                                          whiteSpace: 'nowrap',
+                                          marginRight: '0.5rem',
+                                        }}
+                                      >
+                                        {f.is_dir ? '📁 ' : '📄 '}
+                                        {f.name}
+                                      </span>
+                                      <span
+                                        style={{ display: 'flex', gap: '1rem', flex: '0 0 auto' }}
+                                      >
+                                        <span>{fmtTime(r.pulled_at)}</span>
+                                        <span style={{ minWidth: '4rem', textAlign: 'right' }}>
+                                          {f.is_dir ? '-' : fmtSize(f.size)}
+                                        </span>
+                                      </span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              </li>
+                            ))}
+                        </ul>
+                        <p className="hint">路径已写入剪贴板，Ctrl+V 即可粘贴</p>
+                      </section>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </main>
           </div>
-        </div>
-      </main>
-      </div>
-      <div className="status-bar">
-        <div className="status-bar-left">
-          {folderWarn && <span className="status-warn">{folderWarn}</span>}
-          {msg && <span className="status-msg">{msg}</span>}
-        </div>
-        <div className="status-bar-right">
-          <span
-            className={
-              'titlebar-status ' +
-              (serverStatus === 2
-                ? 'active'
-                : serverStatus === 1
-                  ? 'pending'
-                  : 'disconnected')
-            }
-          >
-            {serverStatus === 2
-              ? '跨 LAN 同步 · 已启用'
-              : serverStatus === 1
-                ? '跨 LAN 同步 · 待启用'
-                : '跨 LAN 同步 · 未连接'}
-          </span>
-        </div>
-      </div>
-      {/* 配对弹窗：输入对方显示的配对码，确认或取消 */}
-      {pairingTarget && (
-        <div
-          className="modal-overlay"
-          onClick={() => {
-            setPairingTarget(null);
-            setPairInput('');
-          }}
-        >
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3 className="modal-title">与「{pairingTarget.device_name}」配对</h3>
-            <p className="modal-body">
-              请输入对方界面上显示的配对码。双方配对码各自独立，仅本次握手需一致。
-            </p>
-            <input
-              className="pair-input"
-              autoFocus
-              placeholder="输入对方显示的配对码"
-              value={pairInput}
-              onChange={(e) => setPairInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  const p = pairingTarget;
-                  setPairingTarget(null);
-                  startPair(p, pairInput);
+          <div className="status-bar">
+            <div className="status-bar-left">
+              {folderWarn && <span className="status-warn">{folderWarn}</span>}
+              {msg && <span className="status-msg">{msg}</span>}
+            </div>
+            <div className="status-bar-right">
+              <span
+                className={
+                  'titlebar-status ' +
+                  (serverStatus === 2 ? 'active' : serverStatus === 1 ? 'pending' : 'disconnected')
                 }
-              }}
-            />
-            <div className="modal-actions">
-              <button
-                className="btn btn-ghost"
-                onClick={() => {
-                  setPairingTarget(null);
-                  setPairInput('');
-                }}
               >
-                取消
-              </button>
-              <button
-                className="btn"
-                onClick={() => {
-                  const p = pairingTarget;
-                  setPairingTarget(null);
-                  startPair(p, pairInput);
-                }}
-              >
-                确认
-              </button>
+                {serverStatus === 2
+                  ? '跨 LAN 同步 · 已启用'
+                  : serverStatus === 1
+                    ? '跨 LAN 同步 · 待启用'
+                    : '跨 LAN 同步 · 未连接'}
+              </span>
             </div>
           </div>
-        </div>
-      )}
-      {/* 取消配对确认弹窗 */}
-      {unpairTarget && (
-        <ConfirmModal
-          title="取消配对"
-          body={`确定要取消与「${unpairTarget.name}」的配对吗？取消后双方将停止同步，需重新配对才能恢复。`}
-          confirm="取消配对"
-          onConfirm={() => confirmUnpair(unpairTarget)}
-          onCancel={() => setUnpairTarget(null)}
-        />
-      )}
-      </>
+          {/* 配对弹窗：输入对方显示的配对码，确认或取消 */}
+          {pairingTarget && (
+            <div
+              className="modal-overlay"
+              onClick={() => {
+                setPairingTarget(null);
+                setPairInput('');
+              }}
+            >
+              <div className="modal" onClick={(e) => e.stopPropagation()}>
+                <h3 className="modal-title">与「{pairingTarget.device_name}」配对</h3>
+                <p className="modal-body">
+                  请输入对方界面上显示的配对码。双方配对码各自独立，仅本次握手需一致。
+                </p>
+                <input
+                  className="pair-input"
+                  autoFocus
+                  placeholder="输入对方显示的配对码"
+                  value={pairInput}
+                  onChange={(e) => setPairInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      const p = pairingTarget;
+                      setPairingTarget(null);
+                      startPair(p, pairInput);
+                    }
+                  }}
+                />
+                <div className="modal-actions">
+                  <button
+                    className="btn btn-ghost"
+                    onClick={() => {
+                      setPairingTarget(null);
+                      setPairInput('');
+                    }}
+                  >
+                    取消
+                  </button>
+                  <button
+                    className="btn"
+                    onClick={() => {
+                      const p = pairingTarget;
+                      setPairingTarget(null);
+                      startPair(p, pairInput);
+                    }}
+                  >
+                    确认
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+          {/* 取消配对确认弹窗 */}
+          {unpairTarget && (
+            <ConfirmModal
+              title="取消配对"
+              body={`确定要取消与「${unpairTarget.name}」的配对吗？取消后双方将停止同步，需重新配对才能恢复。`}
+              confirm="取消配对"
+              onConfirm={() => confirmUnpair(unpairTarget)}
+              onCancel={() => setUnpairTarget(null)}
+            />
+          )}
+        </>
       )}
     </div>
   );

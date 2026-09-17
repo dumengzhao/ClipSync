@@ -168,6 +168,9 @@ body {
   font-size: 1rem;
   margin-bottom: 0.5rem;
   color: #64748b;
+  /* 标题行右侧放操作按钮（如「清空」）用 */
+  display: flex;
+  align-items: center;
 }
 
 .peer-list {
@@ -289,6 +292,36 @@ body {
 
 .peer-item-action .peer-name {
   flex: 1 1 auto;
+}
+
+/* 待拉取条目：来源徽章与文件名同一行（局域网 = P2P 直连 / 跨LAN = 经中继） */
+.offer-name-line {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.src-badge {
+  flex: 0 0 auto;
+  font-size: 0.68rem;
+  line-height: 1.25;
+  padding: 0.05rem 0.35rem;
+  border-radius: 4px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* 颜色与「待拉取小窗」的内网/外网标识保持一致 */
+.src-badge-lan {
+  color: #2563eb;
+  background: rgba(37, 99, 235, 0.16);
+}
+
+.src-badge-cross {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.16);
 }
 
 /* 待拉取文件：文件名为主、设备名为附属 */
@@ -471,8 +504,12 @@ body {
 }
 
 @keyframes modal-fade {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 .modal {
@@ -486,8 +523,14 @@ body {
 }
 
 @keyframes modal-pop {
-  from { transform: scale(0.96); opacity: 0; }
-  to { transform: scale(1); opacity: 1; }
+  from {
+    transform: scale(0.96);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
 }
 
 :root[data-theme='dark'] .modal {
@@ -600,9 +643,9 @@ body {
   flex: 1;
 }
 
-.settings .row input[type="text"],
-.settings .row input[type="number"],
-.settings .row input[type="password"],
+.settings .row input[type='text'],
+.settings .row input[type='number'],
+.settings .row input[type='password'],
 .settings .row select {
   width: 180px;
   padding: 0.35rem 0.5rem;
@@ -614,17 +657,17 @@ body {
 }
 
 /* 去掉数字输入框右侧的上下箭头加减按钮 */
-.settings .row input[type="number"] {
+.settings .row input[type='number'] {
   -moz-appearance: textfield;
   appearance: textfield;
 }
-.settings .row input[type="number"]::-webkit-outer-spin-button,
-.settings .row input[type="number"]::-webkit-inner-spin-button {
+.settings .row input[type='number']::-webkit-outer-spin-button,
+.settings .row input[type='number']::-webkit-inner-spin-button {
   -webkit-appearance: none;
   margin: 0;
 }
 
-.settings .row input[type="checkbox"] {
+.settings .row input[type='checkbox'] {
   width: 18px;
   height: 18px;
 }
@@ -671,8 +714,14 @@ body {
   background: #dc2626;
 }
 @keyframes toast-in {
-  from { opacity: 0; transform: translateX(-50%) translateY(-6px); }
-  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
 }
 
 /* ===== 自定义窗口标题栏（decorations:false 时启用） ===== */
@@ -690,7 +739,7 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 0 8px 0 12px;
-  background: rgba(148, 163, 184, 0.10);
+  background: rgba(148, 163, 184, 0.1);
   border-bottom: 1px solid rgba(148, 163, 184, 0.22);
   user-select: none;
 }
@@ -736,11 +785,14 @@ body {
   cursor: pointer;
   font-size: 12px;
   line-height: 1;
-  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease,
+    border-color 0.12s ease;
 }
 
 .tb-settings:hover {
-  background: rgba(148, 163, 184, 0.20);
+  background: rgba(148, 163, 184, 0.2);
   color: #f1f5f9;
   border-color: rgba(148, 163, 184, 0.6);
 }
@@ -808,16 +860,18 @@ body {
   border-radius: 6px;
   cursor: pointer;
   padding: 0;
-  transition: background 0.12s ease, color 0.12s ease;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
 }
 
 .tb-btn.is-hover {
-  background: rgba(148, 163, 184, 0.20);
+  background: rgba(148, 163, 184, 0.2);
   color: #f1f5f9;
 }
 
 .tb-btn:active {
-  background: rgba(148, 163, 184, 0.30);
+  background: rgba(148, 163, 184, 0.3);
 }
 
 .tb-close.is-hover {
@@ -838,7 +892,7 @@ body {
   color: #1a1a1a;
   border: 1px solid #e2e8f0;
   border-radius: 12px;
-  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.20);
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.2);
   overflow: hidden;
   font-size: 13px;
   user-select: none;
@@ -874,7 +928,7 @@ body {
 }
 
 .pt-close:hover {
-  background: rgba(148, 163, 184, 0.20);
+  background: rgba(148, 163, 184, 0.2);
   color: inherit;
 }
 
@@ -905,13 +959,13 @@ body {
 }
 
 :root[data-theme='dark'] .pt-item {
-  background: rgba(96, 165, 250, 0.10);
+  background: rgba(96, 165, 250, 0.1);
   border-color: rgba(96, 165, 250, 0.22);
 }
 
 @media (prefers-color-scheme: dark) {
   :root[data-theme='system'] .pt-item {
-    background: rgba(96, 165, 250, 0.10);
+    background: rgba(96, 165, 250, 0.1);
     border-color: rgba(96, 165, 250, 0.22);
   }
 }
