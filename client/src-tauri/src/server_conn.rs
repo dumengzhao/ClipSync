@@ -436,6 +436,9 @@ impl ServerConn {
                 match conn.connect_once(&url).await {
                     Ok(outcome) => match outcome {
                         ConnectOutcome::Authed => {
+                            // 曾入网后断开：与「已连接」的 INFO 配对留痕，否则一次干净断线
+                            // 在日志里毫无痕迹（失败 WARN 只在重连失败后才出现）
+                            tracing::info!("服务端连接已断开，将自动重连");
                             backoff = 2;
                             // 本轮曾成功入网：复位鉴权失败提示标记，之后再失败可重新提示
                             conn.auth_fail_notified.store(false, Ordering::SeqCst);
@@ -617,6 +620,13 @@ impl ServerConn {
                 // 成功入网即清除拉黑标记（管理员恢复设备 / 误报后自愈），下次循环不再走拉黑重试分支
                 self.removed.store(false, Ordering::SeqCst);
                 self.set_status(ServerStatus::from_str(&status));
+                // 成功必须留 INFO：失败路径每周期刷 WARN，而成功若静默，「日志突然安静」
+                // 无法区分「已连接」与「重连循环卡死」（2026-09-16 排查时只能靠 netstat 反查）
+                tracing::info!(
+                    "服务端已连接（中继模式）：网络 {}，在线设备 {} 台",
+                    crate::obs::logging::log_safe(&network.id),
+                    nodes.len()
+                );
                 self.update_nodes(nodes);
                 true
             }
@@ -1285,7 +1295,9 @@ mod tests {
         assert!(ok("192.0.2.10:20071"));
         assert!(ok("relay.example.com:443"));
         assert!(ok("[2001:db8::1]:20071"));
-        assert!(ok("2001:db8::1"));
+        // 裸 IPv6（无方括号）必须拒绝：与 host:port 语法无法区分（rsplit_once(':') 会把
+        // "::1" 末段当端口），实现按 host[:port] 解析必然失败。合法形式必须带方括号。
+        assert!(!ok("2001:db8::1"));
         // 非法：scheme / 路径 / userinfo / 空白 / 空host / 端口越界 / 控制字符
         assert!(!ok(""));
         assert!(!ok("http://evil.example"));

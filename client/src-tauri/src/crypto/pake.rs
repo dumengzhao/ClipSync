@@ -46,7 +46,7 @@ pub fn generate_pairing_code() -> String {
 
 /// 规范化配对码：去掉分隔符/空白、统一大写。
 ///
-/// 展示与抄写可带 `-`/空格（如 `A1B2-C3D4-E5F6`），口令一律取规范化值，
+/// 展示与抄写可带 `-`/空格（如 `A2B3-C4D5-E6F7`），口令一律取规范化值，
 /// 否则用户按带分隔符的形式抄写就会永远匹配不上。
 pub fn normalize_pairing_code(input: &str) -> String {
     input
@@ -165,12 +165,12 @@ mod tests {
     /// 规范化：分隔符/空白/小写都要能容忍，便于用户抄写带 `-` 的码。
     #[test]
     fn normalize_tolerates_separators_and_case() {
-        assert_eq!(normalize_pairing_code("a1b2-c3d4-e5f6"), "A1B2C3D4E5F6");
-        assert_eq!(normalize_pairing_code(" A1B2 C3D4 E5F6 "), "A1B2C3D4E5F6");
-        assert_eq!(normalize_pairing_code("A1B2-C3D4-E5F6"), "A1B2C3D4E5F6");
+        assert_eq!(normalize_pairing_code("a2b3-c4d5-e6f7"), "A2B3C4D5E6F7");
+        assert_eq!(normalize_pairing_code(" A2B3 C4D5 E6F7 "), "A2B3C4D5E6F7");
+        assert_eq!(normalize_pairing_code("A2B3-C4D5-E6F7"), "A2B3C4D5E6F7");
         // 规范化后仍按字母表校验（小写输入也能通过）
         assert!(pairing_code_is_current(&normalize_pairing_code(
-            "a1b2-c3d4-e5f6"
+            "a2b3-c4d5-e6f7"
         )));
     }
 }
