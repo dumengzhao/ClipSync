@@ -20,8 +20,13 @@ import {
 const DEFAULT_AUTO_HIDE_MS = 15_000;
 /** 用户已点击拉取、操作完成（或失败）后，结果反馈停留时长（毫秒） */
 const RESULT_HOLD_MS = 3_000;
-/** 窗口内「同时展示」的条目总数上限（正在拉取的也占位） */
-const MAX_TOTAL = 3;
+/** 窗口内「同时展示」的条目总数上限（正在拉取的也占位）。
+ *
+ * 固定为 1：小窗只当「最新一条」的轻量提示——拉取中只显示正在拉取的那条（带进度），
+ * 空闲时只显示最新到达的那条。完整清单（含来源徽章、清空按钮）在主窗口
+ * 「待拉取文件」里，小窗不再堆叠多条（堆叠既占地方又要来回看）。
+ */
+const MAX_TOTAL = 1;
 /** 小窗宽度（逻辑像素），必须与 tauri.conf.json 中 pull-toast 的 width 一致 */
 const WIN_W = 340;
 /** 高度自适应区间：下限避免内容过少时窗口塌缩，上限避免撑满屏幕 */
@@ -38,8 +43,7 @@ function fmtSize(n: number): string {
 }
 
 function summary(o: PendingOffer): string {
-  const names =
-    o.top_names && o.top_names.length ? o.top_names : o.files.map((f) => f.file_name);
+  const names = o.top_names && o.top_names.length ? o.top_names : o.files.map((f) => f.file_name);
   if (names.length > 2) return `${names[0]} 等 ${names.length} 项`;
   return names.join('、');
 }
@@ -69,7 +73,9 @@ function itemSize(it: Item): number {
 }
 
 function itemFrom(it: Item): string {
-  return it.kind === 'local' ? it.offer.device_name : `来自 ${it.offer.from_name || it.offer.from}（跨 LAN）`;
+  return it.kind === 'local'
+    ? it.offer.device_name
+    : `来自 ${it.offer.from_name || it.offer.from}（跨 LAN）`;
 }
 
 /**
@@ -108,13 +114,20 @@ export default function PullToast() {
   const [session, setSession] = useState(0);
   const pullingRef = useRef<Item[]>([]);
   pullingRef.current = pulling;
-  /** 正在拉取条目的「取消」操作回调：键为条目 id，由 onPull 时按 kind 填充 */
-  const cancelFnRef = useRef<Record<string, () => void>>({});
-
-  /** 用户点「取消」：调用对应的后端取消命令，前端状态由 file-pull-cancelled 事件统一收口 */
+  /** 用户点「取消」：按条目**自身**推导要调的后端命令，前端状态由 file-pull-cancelled 事件统一收口。
+   *
+   * 不再依赖「点拉取时登记的取消回调」：拉取也可能从**主窗口**发起
+   * （App.tsx 的 doPull / doCrossPull），此时小窗只是经 file-pull-start 事件被动把条目
+   * 移进「拉取中」，没有任何地方登记回调——取消按钮就会静默无反应（2026-09-17 用户实测，
+   * 那次拉取最后还是跑完了）。按 item 推导后，两条发起路径都能取消。
+   */
   const onCancel = (it: Item) => {
     setUserActed(true);
-    cancelFnRef.current[it.id]?.();
+    if (it.kind === 'local') {
+      void cancelPull(it.offer.transfer_id);
+    } else {
+      void cancelPullCrossLan(crossItemBase(it.offer));
+    }
   };
 
   /**
@@ -167,17 +180,21 @@ export default function PullToast() {
 
   /** 收到一个新条目：拉取进行中则暂存队列，否则直接显示 */
   const onNewItem = (it: Item) => {
+    // 同 id 的旧结果先清掉：取消拉取后后端会把该条目退回（重发 offer），
+    // 不清的话 `results` 里那条「已取消拉取」会残留，干扰「是否还有内容」的判断。
+    setResults((prev) => {
+      if (!(it.id in prev)) return prev;
+      const n = { ...prev };
+      delete n[it.id];
+      return n;
+    });
     if (pullingRef.current.length > 0) {
       log(`拉取进行中，新文件先暂存：${it.id}`);
-      setQueued((prev) =>
-        prev.some((x) => x.id === it.id) ? prev : [...prev, it],
-      );
+      setQueued((prev) => (prev.some((x) => x.id === it.id) ? prev : [...prev, it]));
     } else {
       log(`新条目入列：${it.id}`);
       setItems((prev) =>
-        prev.some((x) => x.id === it.id)
-          ? prev
-          : [...prev, it].sort((a, b) => b.ts - a.ts),
+        prev.some((x) => x.id === it.id) ? prev : [...prev, it].sort((a, b) => b.ts - a.ts),
       );
     }
     showSelf();
@@ -195,9 +212,7 @@ export default function PullToast() {
         setAutoHideMs(ms);
         log(`读到配置 toast_auto_hide_ms=${ms}`);
       })
-      .catch((e: unknown) =>
-        log(`读取配置失败，回落默认 ${DEFAULT_AUTO_HIDE_MS}ms: ${String(e)}`),
-      );
+      .catch((e: unknown) => log(`读取配置失败，回落默认 ${DEFAULT_AUTO_HIDE_MS}ms: ${String(e)}`));
 
     const now = () => Date.now();
 
@@ -213,9 +228,7 @@ export default function PullToast() {
         if (its.length) {
           setItems((prev) => {
             const have = new Set(prev.map((x) => x.id));
-            return [...prev, ...its.filter((x) => !have.has(x.id))].sort(
-              (a, b) => b.ts - a.ts,
-            );
+            return [...prev, ...its.filter((x) => !have.has(x.id))].sort((a, b) => b.ts - a.ts);
           });
           showSelf();
         }
@@ -234,9 +247,7 @@ export default function PullToast() {
         if (its.length) {
           setItems((prev) => {
             const have = new Set(prev.map((x) => x.id));
-            return [...prev, ...its.filter((x) => !have.has(x.id))].sort(
-              (a, b) => b.ts - a.ts,
-            );
+            return [...prev, ...its.filter((x) => !have.has(x.id))].sort((a, b) => b.ts - a.ts);
           });
           showSelf();
         }
@@ -258,7 +269,9 @@ export default function PullToast() {
 
       listen<CrossLanOffer>('cross-lan-file', (e) => {
         const o = e.payload;
-        log(`收到 cross-lan-file: from=${o.from_name || o.from} files=${(o.manifest || []).length}`);
+        log(
+          `收到 cross-lan-file: from=${o.from_name || o.from} files=${(o.manifest || []).length}`,
+        );
         onNewItemRef.current({ id: crossItemId(o), kind: 'cross', ts: now(), offer: o });
       }),
 
@@ -270,9 +283,28 @@ export default function PullToast() {
         }
         log(`file-pull-start: ${id}`);
         setItems((prev) => {
-          const it = prev.find((x) => x.id === id);
-          if (it) setPulling((p) => (p.some((x) => x.id === id) ? p : [...p, it]));
-          return prev.filter((x) => x.id !== id);
+          const found = prev.find((x) => x.id === id);
+          if (found) setPulling((p) => (p.some((x) => x.id === id) ? p : [...p, found]));
+          if (found) return prev.filter((x) => x.id !== id);
+          // 条目已不在待拉取列表（例如条目超过展示上限被裁、或快照未加载完）：
+          // 用事件载荷造一个最小条目，确保**进度与「取消」按钮一定出现**。
+          // 取消只依赖 transfer_id，不需要完整文件清单。
+          const fallback: Item = {
+            id,
+            kind: 'local',
+            ts: Date.now(),
+            offer: {
+              transfer_id: e.payload.transfer_id,
+              device_id: '',
+              device_name: '',
+              files: [],
+              total_size: 0,
+              // 名字兜底：无清单时进度行不至于只剩「0 B | 内网 | 37%」没有主体
+              top_names: ['（从其它窗口发起）'],
+            },
+          };
+          setPulling((p) => (p.some((x) => x.id === id) ? p : [...p, fallback]));
+          return prev;
         });
       }),
 
@@ -375,8 +407,12 @@ export default function PullToast() {
         (e) => {
           const ep = e.payload.ext_file_ep;
           log(`cross-lan-pull-complete: ep=${ep} ok=${e.payload.ok}`);
-          setPulling((prev) => prev.filter((x) => !(x.kind === 'cross' && x.offer.ext_file_ep === ep)));
-          setItems((prev) => prev.filter((x) => !(x.kind === 'cross' && x.offer.ext_file_ep === ep)));
+          setPulling((prev) =>
+            prev.filter((x) => !(x.kind === 'cross' && x.offer.ext_file_ep === ep)),
+          );
+          setItems((prev) =>
+            prev.filter((x) => !(x.kind === 'cross' && x.offer.ext_file_ep === ep)),
+          );
           setResults((prev) => ({
             ...prev,
             [`cross-ep:${ep}`]: {
@@ -392,7 +428,6 @@ export default function PullToast() {
       listen<{ transfer_id: string }>('file-pull-cancelled', (e) => {
         const id = `local:${e.payload.transfer_id}`;
         log(`file-pull-cancelled: ${id}`);
-        delete cancelFnRef.current[id];
         // 从「拉取中」摘除条目（若还在）：保留一份引用给结果展示
         setPulling((prev) => {
           const it = prev.find((x) => x.id === id);
@@ -418,6 +453,14 @@ export default function PullToast() {
           return n;
         });
       }),
+      // 主窗口「清空」后同步小窗：两段清单（本地 P2P + 跨 LAN）是一次清空的，
+      // 这里整表清掉；正在拉取的条目在 pulling 里，不受影响。
+      listen<number>('pending-offers-cleared', () => {
+        setItems([]);
+        // 暂存队列同样要清：它是「拉取期间到达、待补显示」的条目，后端清单已被清空，
+        // 不清的话拉取一结束它们又会冒出来（用户刚点过清空）。
+        setQueued([]);
+      }),
     ];
 
     return () => {
@@ -425,27 +468,24 @@ export default function PullToast() {
     };
   }, []);
 
-  // 数量上限：窗口内总数不超过 MAX_TOTAL（正在拉取的也占位），
-  // 即「有 1 个正在拉取时，待拉取只保留最新 2 个」。items 已按时间倒序，取前面即最新。
-  useEffect(() => {
-    const limit = Math.max(0, MAX_TOTAL - pulling.length);
-    if (items.length > limit) {
-      log(`条目超限，裁剪 ${items.length} -> ${limit}`);
-      setItems((prev) => prev.slice(0, Math.max(0, MAX_TOTAL - pulling.length)));
-    }
-  }, [items, pulling]);
+  // 数量上限：窗口内**显示**不超过 MAX_TOTAL（正在拉取的也占位）。
+  // MAX_TOTAL = 1 → 「有正在拉取的，就只显示正在拉取的；否则只显示最新的一条」。
+  //
+  // 注意：这里只裁剪**显示**，不从 state 里删条目。`file-pull-start` 是「从 items 里
+  // 找到该条目移进 pulling」，若把条目真删了，从主窗口发起的拉取就会因为找不到条目而
+  // 完全不显示进度（2026-09-17 一并修掉）。
+  const visiblePending = items.slice(0, Math.max(0, MAX_TOTAL - pulling.length));
 
-  // 拉取结束后，把暂存队列里的新文件补进待拉取列表（同样受上限约束）
+  // 拉取结束后，把暂存队列里的新文件补进列表（受上限约束 → 只留最新的一条）。
+  // 拉取过程中到达的文件**不显示**（只显示正在拉取的那条），避免打断进度视图。
   useEffect(() => {
     if (pulling.length > 0 || queued.length === 0) return;
-    log(`拉取已结束，把 ${queued.length} 个暂存文件补入列表`);
+    log(`拉取已结束，把 ${queued.length} 个暂存文件补入列表（上限 ${MAX_TOTAL} 条）`);
     const incoming = queued;
     setQueued([]);
     setItems((prev) => {
       const have = new Set(prev.map((x) => x.id));
-      return [...prev, ...incoming.filter((x) => !have.has(x.id))].sort(
-        (a, b) => b.ts - a.ts,
-      );
+      return [...prev, ...incoming.filter((x) => !have.has(x.id))].sort((a, b) => b.ts - a.ts);
     });
   }, [pulling, queued]);
 
@@ -552,11 +592,6 @@ export default function PullToast() {
           [it.id]: { ok: false, msg: '拉取失败，可重试' },
         }));
       });
-      // 登记取消回调：后端 remove active_pulls（写盘任务自然退出）+ 发 PullCancel 帧，
-      // 前端状态由 file-pull-cancelled 事件统一收口
-      cancelFnRef.current[it.id] = () => {
-        void cancelPull(tid);
-      };
     } else {
       const o = it.offer;
       setPulling((prev) => (prev.some((x) => x.id === it.id) ? prev : [...prev, it]));
@@ -576,18 +611,10 @@ export default function PullToast() {
           [it.id]: { ok: false, msg: '拉取失败，可重试' },
         }));
       });
-      // 跨 LAN 取消：后端置取消标记，下载循环在下一个分片边界中止；
-      // 随后 pull_cross_lan 命令以 Err 退出并 emit file-pull-cancelled 收口
-      cancelFnRef.current[it.id] = () => {
-        void cancelPullCrossLan(crossItemBase(o));
-      };
     }
   };
 
-  const empty =
-    items.length === 0 &&
-    pulling.length === 0 &&
-    Object.keys(results).length === 0;
+  const empty = items.length === 0 && pulling.length === 0 && Object.keys(results).length === 0;
 
   return (
     <div className="pull-toast">
@@ -605,7 +632,14 @@ export default function PullToast() {
                 <span className="pt-size">{fmtSize(itemSize(it))}</span>
               </div>
               <div className="pt-sub">{itemFrom(it)}</div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginTop: '0.5rem' }}>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.4rem',
+                  marginTop: '0.5rem',
+                }}
+              >
                 {routes[it.id] && (
                   <span
                     style={{
@@ -642,7 +676,9 @@ export default function PullToast() {
               <span className="pt-size">{fmtSize(itemSize(it))}</span>
             </div>
             <div className="pt-sub">{itemFrom(it)}</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginTop: '0.5rem' }}>
+            <div
+              style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginTop: '0.5rem' }}
+            >
               {routes[it.id] && (
                 <span
                   style={{
@@ -666,7 +702,7 @@ export default function PullToast() {
           </div>
         ))}
 
-        {items.map((it) => (
+        {visiblePending.map((it) => (
           <div className="pt-item" key={it.id}>
             <div className="pt-item-top">
               <span className="pt-name" title={itemNames(it)}>
