@@ -69,8 +69,12 @@ impl DeviceIdentity {
             }
             Err(_) => {
                 let s = StaticSecret::random_from_rng(OsRng);
-                keystore::store(service, ACCOUNT_IDENTITY_KEY, s.as_bytes())
-                    .map_err(anyhow::Error::msg)?;
+                // **持久化尽力而为**：keyring 不可用（无桌面会话 / CI / 容器）时不要让整个身份构建
+                // 失败——那会让应用（以及依赖它的用例）直接起不来。失败只告警：本次会话用新密钥，
+                // 设备身份以 config.device_id 为准，配对关系不受影响（仅身份公钥变化需重新握手）。
+                if let Err(e) = keystore::store(service, ACCOUNT_IDENTITY_KEY, s.as_bytes()) {
+                    tracing::warn!("身份密钥持久化失败（{e}）：本次会话使用临时密钥");
+                }
                 s
             }
         };
