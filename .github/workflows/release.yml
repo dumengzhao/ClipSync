@@ -143,10 +143,19 @@ jobs:
         shell: bash
         run: |
           cd client/src-tauri/target
+          # shasum 来自 Perl（macOS / Linux 有），Windows 的 Git Bash 没有它、但有 sha256sum。
+          # 踩过：缺回退时 find -exec shasum 会静默失败 → 生成 0 字节文件 →
+          # 上传时 GitHub 报 `HTTP 400: Bad Content-Length`。
+          if command -v shasum >/dev/null 2>&1; then HASH="shasum -a 256"; else HASH="sha256sum"; fi
           find . -type f \( -name "*.dmg" -o -name "*-setup.exe" \
             -o -name "*.AppImage" -o -name "*.deb" \) \
-            -exec shasum -a 256 {} \; > SHA256SUMS-${{ matrix.label }}.txt || true
-          cat SHA256SUMS-${{ matrix.label }}.txt || true
+            -exec $HASH {} \; > SHA256SUMS-${{ matrix.label }}.txt
+          cat SHA256SUMS-${{ matrix.label }}.txt
+          # 空文件 = 没匹配到产物或哈希命令不可用，必须响亮失败（别静默上传空文件）
+          if [ ! -s "SHA256SUMS-${{ matrix.label }}.txt" ]; then
+            echo "::error::SHA256SUMS-${{ matrix.label }}.txt 为空（未匹配到产物，或哈希命令不可用）"
+            exit 1
+          fi
 
       - name: Upload checksums
         if: success()
