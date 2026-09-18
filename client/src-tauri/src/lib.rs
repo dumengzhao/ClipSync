@@ -971,11 +971,12 @@ mod received_cap_tests {
         assert!(drop_c.is_empty());
 
         // 跨 LAN 更旧则丢跨 LAN（下标从大到小返回，便于安全删除）
+        // 5 条裁到 3 条 → 丢 2 条：cross 的 100/150 最旧，降序返回 [2, 0]
         let pending = vec![("p1".to_string(), 900), ("p2".to_string(), 800)];
-        let cross = vec![(0usize, 100), (1usize, 200)];
+        let cross = vec![(0usize, 100), (1usize, 200), (2usize, 150)];
         let (drop_p, drop_c) = select_over_cap(&pending, &cross, MAX_RECEIVED_OFFERS);
         assert!(drop_p.is_empty());
-        assert_eq!(drop_c, vec![1usize, 0usize]);
+        assert_eq!(drop_c, vec![2usize, 0usize]);
 
         // 未超限：什么都不丢
         let (drop_p, drop_c) =
@@ -983,9 +984,13 @@ mod received_cap_tests {
         assert!(drop_p.is_empty() && drop_c.is_empty());
 
         // 极端：全部来自同一来源也会裁到 3 条
+        // 返回的是条目 id（按 key 删除，删除顺序无关），故按集合比较、
+        // 不断言迭代顺序——只有 cross 的下标需要降序（见上方注释）。
         let many: Vec<(String, u64)> = (0..5u64).map(|i| (format!("p{i}"), i)).collect();
         let (drop_p, _) = select_over_cap(&many, &[], MAX_RECEIVED_OFFERS);
         assert_eq!(drop_p.len(), 2, "5 条只留 3 条，丢 2 条");
-        assert_eq!(drop_p, vec!["p0".to_string(), "p1".to_string()]);
+        let mut dropped = drop_p;
+        dropped.sort();
+        assert_eq!(dropped, vec!["p0".to_string(), "p1".to_string()]);
     }
 }
