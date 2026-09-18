@@ -45,6 +45,7 @@
     "active": true,
     "targets": ["nsis", "app"],
     "macOS": {
+      "minimumSystemVersion": "11.0",
       "signingIdentity": "ClipSync Dev"
     },
     "windows": {

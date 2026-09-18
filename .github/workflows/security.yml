@@ -14,16 +14,29 @@ on:
 jobs:
   cargo-audit:
     runs-on: ubuntu-22.04
+    # 发现漏洞时会自动建 issue → 需要 issues: write，其余按最小权限只读
+    permissions:
+      contents: read
+      issues: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2.0.0
+      - uses: actions/checkout@v7
+
+      # actions-rust-lang/audit 是 composite 动作（内部以 shell: python 跑 audit.py），
+      # 但它顶部就 `import requests`，而 composite 里没有 pip 安装步骤 → 镜像不带就自己装。
+      # 幂等：已存在时直接跳过。
+      - name: Ensure python requests for audit action
+        run: python -c "import requests" || python -m pip install --user --quiet requests
+
+      # 原 rustsec/audit-check 上游止于 v2.0.0（运行时 node20、无更新版本）→ 换 composite 实现，消除 Node 20 弃用警告
+      - name: Audit Rust dependencies
+        uses: actions-rust-lang/audit@v1
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          workingDirectory: client/src-tauri
 
   cargo-deny:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
@@ -32,8 +45,8 @@ jobs:
   npm-audit:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '22'
       - run: cd client && npm audit --audit-level=high

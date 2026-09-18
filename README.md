@@ -55,12 +55,10 @@ scripts/local-ci.sh
 
 ## 本地打包（macOS）
 
-生成正式签名的应用与磁盘镜像：
+生成应用与磁盘镜像（macOS ad-hoc 签名；自动更新走无签名自托管方案，因此**不需要** Tauri updater 的签名密钥）：
 
 ```bash
 cd client
-TAURI_SIGNING_PRIVATE_KEY_PATH=~/.tauri/clipsync.key \
-TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" \
 npm run tauri build -- --bundles app
 ```
 
