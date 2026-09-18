@@ -15,7 +15,11 @@ const MAX_WS_MESSAGE_BYTES: usize = 256 * 1024;
 /// 同时在线 WS 连接上限（每连接一条任务 + 一条出站队列）。
 const MAX_WS_CONNS: usize = 2048;
 /// 空闲超时：客户端每 25s 发一次 Heartbeat，长时间收不到任何帧即视为死连接。
-const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+///
+/// 取 **90s（≈3 个心跳周期）**：原值 300s 意味着「客户端断电/断网」这种静默死亡后，
+/// 服务端要等 5 分钟才判定离线并推给管理页（用户反馈「设备离线了状态等好久没更新」）。
+/// 3 次心跳全丢才断开，正常网络抖动不会误杀；客户端侧也有对称的 90s 读侧活性检测。
+const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// 当前在线 WS 连接数
 static WS_CONNS: AtomicUsize = AtomicUsize::new(0);
