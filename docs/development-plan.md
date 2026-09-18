@@ -1467,10 +1467,14 @@ jobs:
         shell: bash
         run: |
           cd src-tauri/target
+          # shasum 来自 Perl（macOS/Linux 有），Windows 的 Git Bash 没有 → 回退 sha256sum
+          if command -v shasum >/dev/null 2>&1; then HASH="shasum -a 256"; else HASH="sha256sum"; fi
           find . -type f \( -name "*.dmg" -o -name "*-setup.exe" \
             -o -name "*.AppImage" -o -name "*.deb" \) \
-            -exec shasum -a 256 {} \; > SHA256SUMS-${{ matrix.label }}.txt
+            -exec $HASH {} \; > SHA256SUMS-${{ matrix.label }}.txt
           cat SHA256SUMS-${{ matrix.label }}.txt
+          # 空文件必须响亮失败（否则会静默上传一个 0 字节资产，GitHub 回 HTTP 400 Bad Content-Length）
+          [ -s "SHA256SUMS-${{ matrix.label }}.txt" ] || { echo "::error::校验文件为空"; exit 1; }
 
       - name: Upload checksums
         if: success()
@@ -1645,9 +1649,11 @@ CI 在 release 工作流末尾为每个产物生成 SHA256：
   shell: bash
   run: |
     cd src-tauri/target
+    # shasum 来自 Perl（macOS/Linux 有），Windows 的 Git Bash 没有 → 回退 sha256sum
+    if command -v shasum >/dev/null 2>&1; then HASH="shasum -a 256"; else HASH="sha256sum"; fi
     find . -type f \( -name "*.dmg" -o -name "*-setup.exe" \
       -o -name "*.AppImage" -o -name "*.deb" \) \
-      -exec shasum -a 256 {} \; > SHA256SUMS-${{ matrix.label }}.txt
+      -exec $HASH {} \; > SHA256SUMS-${{ matrix.label }}.txt
 
 - name: Upload checksums
   if: success()
