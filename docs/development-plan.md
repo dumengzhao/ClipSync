@@ -1231,6 +1231,8 @@ Linux Wayland 测试使用 `weston-headless` 启动虚拟合成器。
 
 > 注：**只构建 Apple Silicon（arm64）**。曾经计划 Intel / ARM 分列构建（`macos-13` 为 Intel runner），现已取消：`macos-13` 标签已被 GitHub 下线、`macos-14` 亦已弃用，Intel Mac 占比可忽略。`macos-latest` 当前即 macOS 26 arm64 runner。
 
+> **CI 必须显式传 `--bundles`（2026-09-18 实跑踩到）**：`tauri.conf.json` 的 `bundle.targets` 是 `["nsis","app"]`，这两个在 Linux 上**都不是合法 bundle 类型** → 打包阶段零产物，`tauri-action` 报 `No artifacts were found.`；macOS 也只出 `.app`、不出 `.dmg`。各平台应传：linux `deb,appimage`（rpm 需 rpmbuild）、macos `app,dmg`、windows `nsis`。同理 macOS 需把签名身份覆盖成 ad-hoc（`--config` 内联 JSON 形式），否则在没有 `signingIdentity` 所指证书的机器上 `codesign` 直接失败。
+
 ### 11.2.2 ci.yml（PR 检查）
 
 ```yaml
@@ -1461,20 +1463,23 @@ jobs:
 
       # ============ 生成 SHA256 校验文件 ============
       - name: Generate SHA256 checksums
-        if: always()
+        if: success()
         shell: bash
         run: |
           cd src-tauri/target
-          find . -type f \( -name "*.dmg" -o -name "*.msi" -o -name "*-setup.exe" \
-            -o -name "*.AppImage" -o -name "*.deb" -o -name "*.rpm" \) \
+          find . -type f \( -name "*.dmg" -o -name "*-setup.exe" \
+            -o -name "*.AppImage" -o -name "*.deb" \) \
             -exec shasum -a 256 {} \; > SHA256SUMS-${{ matrix.label }}.txt
           cat SHA256SUMS-${{ matrix.label }}.txt
 
       - name: Upload checksums
-        if: always()
-        uses: softprops/action-gh-release@v3
-        with:
-          files: src-tauri/target/SHA256SUMS-${{ matrix.label }}.txt
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # 不要用 softprops/action-gh-release：它走 PATCH update-a-release，
+        # 在本仓库返回 403 Resource not accessible by integration；
+        # gh release upload 走的是与 tauri-action 相同的资产上传接口
+        run: gh release upload "${{ github.ref_name }}" "src-tauri/target/SHA256SUMS-${{ matrix.label }}.txt" --clobber
 ```
 
 **与签名相关的关键差异：**
@@ -1636,17 +1641,19 @@ CI 在 release 工作流末尾为每个产物生成 SHA256：
 
 ```yaml
 - name: Generate SHA256 checksums
+  if: success()
   shell: bash
   run: |
     cd src-tauri/target
-    find . -type f \( -name "*.dmg" -o -name "*.msi" -o -name "*-setup.exe" \
-      -o -name "*.AppImage" -o -name "*.deb" -o -name "*.rpm" \) \
-      -exec shasum -a 256 {} \; > SHA256SUMS.txt
+    find . -type f \( -name "*.dmg" -o -name "*-setup.exe" \
+      -o -name "*.AppImage" -o -name "*.deb" \) \
+      -exec shasum -a 256 {} \; > SHA256SUMS-${{ matrix.label }}.txt
 
-    - name: Upload checksums
-      uses: softprops/action-gh-release@v3
-      with:
-        files: src-tauri/target/SHA256SUMS.txt
+- name: Upload checksums
+  if: success()
+  env:
+    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  run: gh release upload "${{ github.ref_name }}" "src-tauri/target/SHA256SUMS-${{ matrix.label }}.txt" --clobber
 ```
 
 用户下载后可校验：

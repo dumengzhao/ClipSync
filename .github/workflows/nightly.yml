@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   build:
+    name: build (${{ matrix.label }})
     strategy:
       fail-fast: false
       matrix:
@@ -78,7 +79,8 @@ jobs:
           tagName: nightly
           releaseName: 'Nightly Build'
           releaseBody: '自动夜间构建，未经签名，仅用于测试。'
-          releaseDrafts: false
+          # 注意：tauri-action 的输入是单数 releaseDraft（默认就是 false）
+          releaseDraft: false
           prerelease: true
           # 必须显式给 --bundles：tauri.conf.json 的 targets 是 ["nsis","app"]，
           # 这两个在 Linux 上都不适用 → Linux 一个产物都打不出来、macOS 只出 .app
@@ -97,9 +99,10 @@ jobs:
 
       - name: Upload checksums
         if: success()
-        uses: softprops/action-gh-release@v3
-        with:
-          # 定时/手动触发时当前 ref 不是 tag，不给 tag_name 该动作会直接报
-          # "GitHub Releases requires a tag"
-          tag_name: nightly
-          files: client/src-tauri/target/SHA256SUMS-${{ matrix.label }}.txt
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # 不用 softprops/action-gh-release：它走 PATCH update-a-release，在本仓库一直
+        # 返回 403 "Resource not accessible by integration"；而 tauri-action 走的是
+        # 资产上传接口（同一份权限）且一直成功，故改用同路径的 gh release upload。
+        run: gh release upload nightly "client/src-tauri/target/SHA256SUMS-${{ matrix.label }}.txt" --clobber
