@@ -3,12 +3,49 @@ name: Release
 on:
   push:
     tags: ['v*']
+  # 手动触发（试跑用）：必须给 tag 输入——手动触发时 github.ref_name 是分支名（main），
+  # 直接用它会把 Release 建在错误的 tag 上。已有该 tag 就构建它，没有就在当前 ref 上创建。
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（形如 v0.3.1，须与包内版本一致）'
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 jobs:
+  # 廉价的前置校验：tag 与包内三处版本必须一致，否则不该烧 3 个平台的打包时间。
+  # 不一致时的典型后果：Release 标题写 v0.4.0，而安装包文件名与客户端自动更新比较的
+  # version 仍是 0.3.1 —— 用户更新链路会静默错乱。
+  verify-version:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Verify tag matches app version
+        env:
+          # push tag → github.ref_name 即 tag；手动触发 → 取输入
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          want="${TAG#v}"
+          conf=$(python3 -c "import json;print(json.load(open('client/src-tauri/tauri.conf.json'))['version'])")
+          crate=$(awk '/^\[package\]/{f=1;next} /^\[/{f=0} f && /^version *=/{gsub(/[",]/,"");print $3; exit}' client/src-tauri/Cargo.toml)
+          pkg=$(python3 -c "import json;print(json.load(open('client/package.json'))['version'])")
+          echo "tag=$TAG → 期望版本 $want"
+          echo "  tauri.conf.json = $conf"
+          echo "  Cargo.toml      = $crate"
+          echo "  package.json    = $pkg"
+          fail=0
+          [ "$want" = "$conf" ]  || { echo "::error::tag 与 tauri.conf.json 的 version 不一致"; fail=1; }
+          [ "$want" = "$crate" ] || { echo "::error::tag 与 src-tauri/Cargo.toml 的 version 不一致"; fail=1; }
+          [ "$want" = "$pkg" ]   || { echo "::error::tag 与 client/package.json 的 version 不一致"; fail=1; }
+          exit $fail
+
   release:
+    needs: verify-version
     strategy:
       fail-fast: false
       matrix:
@@ -64,14 +101,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: client
-          tagName: ${{ github.ref_name }}
-          releaseName: 'ClipSync ${{ github.ref_name }}'
+          tagName: ${{ inputs.tag || github.ref_name }}
+          releaseName: 'ClipSync ${{ inputs.tag || github.ref_name }}'
           releaseBody: |
             ## 下载说明
 
             ### macOS
             首次打开会提示「未验证开发者」，请：
-            1. 右键点击应用 -> 「打开」->「打开」
+            1. 右键点击应用 -> 「打开」-> 「打开」
             2. 或终端执行：`xattr -dr com.apple.quarantine /Applications/ClipSync.app`
 
             ### Windows
