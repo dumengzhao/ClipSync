@@ -92,7 +92,7 @@ ClipSync/
 - **客户端**：因 Tauri 内置 `updater` 插件**强制签名、无法关闭**，改为**自写更新器**（`check_update` / `download_update` / `install_update` + SHA256 完整性校验）。`tauri.conf.json` 的 `updater` 插件**已移除**。
 - **`install_update` 的参数绑定**：只接受 `AppState.pending_update` 里记录的（路径, sha256）——即本进程本次下载并校验通过的包，且启动前**复算哈希**。绝不可放宽为「接受前端传入的任意路径」：那等于给渲染器一个拉任意程序并退出主进程的入口。
 - **信任模型**：自托管，信任锚 = 用户自己的中继服务器 + TLS；**不做 ed25519 签名**。更新地址必须取自用户配置的 relay 地址，不硬编码作者服务器。
-- 因此 `tauri build` 不再需要 `TAURI_SIGNING_PRIVATE_KEY`（签名密钥生成脚本 `scripts/generate-update-key.sh` 当前已无用）。
+- 因此 `tauri build` 不再需要 `TAURI_SIGNING_PRIVATE_KEY`；CI 也不再注入 `TAURI_PRIVATE_KEY` / `TAURI_KEY_PASSWORD`（密钥生成脚本 `scripts/generate-update-key.sh` 已删除）。
 
 ## 功能现状与剩余未实现项
 
@@ -129,11 +129,16 @@ RUSTC_BOOTSTRAP=1 package.sh                   # 产出 server/dist/clipsync-ser
 
 Rust 工具链由 `rust-toolchain.toml` 自动锁定为 stable（MSRV 1.85）。
 
-**CI 门禁**（`.github/workflows/ci.yml`，三平台矩阵 ubuntu-22.04 / macos-14 / windows-latest）：
+**CI 门禁**（`.github/workflows/ci.yml`，三平台矩阵 ubuntu-22.04 / macos-latest / windows-latest）：
 `cargo fmt --all -- --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test --all --all-features`、`npm run lint`。改完先本地跑一遍 `scripts/local-ci.sh`。
 
-**已知环境限制**：Windows 本机跑不动客户端单测——`cargo test --lib` 无论 debug 还是 release 都以
-`0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND` 退出（测试进程加载失败，与应用本身无关）。要真实执行客户端单测，靠 CI 或 Linux/macOS 环境；本机只能做到 `cargo check --all-targets`（编译验证）。
+**发版**：推 `v*` 标签，或在 Actions 里**手动触发** `Release` 工作流（输入形如 `v0.3.1` 的 tag；手动触发时 `github.ref_name` 是分支名，所以必须显式给 tag）。两个入口都会先跑 `verify-version` job：**tag 必须与 `tauri.conf.json` / `src-tauri/Cargo.toml` / `client/package.json` 的 version 一致**，不一致则打包前直接失败。产出是**草稿** Release，需手动 Publish；客户端真正收到更新还要在服务端管理页上传安装包并生成 `latest.json`。
+
+**曾有的环境限制（已解决）**：Windows 本机一度跑不动客户端单测——`cargo test --lib` 以
+`0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND` 退出。根因是 `rfd` 静态导入仅 ComCtl32 v6 提供的
+`TaskDialogIndirect`，而 cargo 链接**测试目标**时不嵌入 v6 依赖；已在 `client/src-tauri/build.rs`
+用 `MANIFESTDEPENDENCY` 补上（commit `c9eaefb`），现在本机可直接 `cargo test --lib`。
+排查特征：**「cargo test 报错但 clippy 通过」**（clippy 不做链接）。
 
 ## 开发要求
 

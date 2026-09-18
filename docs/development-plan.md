@@ -1034,8 +1034,7 @@ clipboard-sync/
 │       └── security.yml          # 依赖审计与安全扫描
 ├── scripts/                      # 本地辅助脚本
 │   ├── local-ci.sh               # 本地 CI 等价脚本
-│   ├── setup-macos-keychain.sh   # macOS 本地密钥链配置
-│   └── generate-update-key.sh    # 生成更新签名密钥
+│   └── setup-macos-keychain.sh   # macOS 本地密钥链配置
 ├── .editorconfig                 # 编辑器一致性配置
 ├── .gitignore
 ├── .npmrc                        # npm 配置
@@ -1227,11 +1226,10 @@ Linux Wayland 测试使用 `weston-headless` 启动虚拟合成器。
 | 平台 | Runner | Target Triple | 产物 |
 |---|---|---|---|
 | Linux x64 | `ubuntu-22.04` | `x86_64-unknown-linux-gnu` | `.AppImage` / `.deb` / `.rpm` |
-| macOS ARM64 | `macos-14` | `aarch64-apple-darwin` | `.dmg` |
-| macOS x64 | `macos-13` | `x86_64-apple-darwin` | `.dmg` |
+| macOS ARM64 | `macos-latest` | `aarch64-apple-darwin` | `.dmg` |
 | Windows x64 | `windows-latest` | `x86_64-pc-windows-msvc` | `.msi` / `-setup.exe` |
 
-> 注：`macos-14` 是 Apple Silicon runner，`macos-13` 是 Intel runner。两端分别构建避免交叉编译 COM/ObjC 桥接的复杂性。
+> 注：**只构建 Apple Silicon（arm64）**。曾经计划 Intel / ARM 分列构建（`macos-13` 为 Intel runner），现已取消：`macos-13` 标签已被 GitHub 下线、`macos-14` 亦已弃用，Intel Mac 占比可忽略。`macos-latest` 当前即 macOS 26 arm64 runner。
 
 ### 11.2.2 ci.yml（PR 检查）
 
@@ -1257,10 +1255,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-14, windows-latest]
+        os: [ubuntu-22.04, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -1268,9 +1266,9 @@ jobs:
 
       - uses: swatinem/rust-cache@v2
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Install Linux system deps
@@ -1325,18 +1323,15 @@ jobs:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             label: linux-x64
-          - os: macos-14
+          - os: macos-latest
             target: aarch64-apple-darwin
             label: macos-arm64
-          - os: macos-13
-            target: x86_64-apple-darwin
-            label: macos-x64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             label: windows-x64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -1346,9 +1341,9 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Install Linux system deps
@@ -1399,18 +1394,15 @@ jobs:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             label: linux-x64
-          - os: macos-14
+          - os: macos-latest
             target: aarch64-apple-darwin
             label: macos-arm64
-          - os: macos-13
-            target: x86_64-apple-darwin
-            label: macos-x64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             label: windows-x64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -1420,9 +1412,9 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
 
       - name: Install Linux system deps
@@ -1439,14 +1431,11 @@ jobs:
       - run: npm ci
 
       # ============ 构建并发布 ============
-      # 不签名（macOS ad-hoc / Windows 不签名），仅 Tauri updater 签名
+      # 不做任何签名（macOS ad-hoc / Windows 不签名）；自动更新走无签名自托管，无需签名密钥
       - name: Build and release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Tauri updater 签名密钥（免费 Ed25519，唯一需要的签名密钥）
-          TAURI_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
-          TAURI_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'ClipSync ${{ github.ref_name }}'
@@ -1483,7 +1472,7 @@ jobs:
 
       - name: Upload checksums
         if: always()
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: src-tauri/target/SHA256SUMS-${{ matrix.label }}.txt
 ```
@@ -1492,7 +1481,7 @@ jobs:
 
 - 没有 macOS 证书导入步骤，Tauri 默认 ad-hoc 签名
 - 没有 Windows 证书导入步骤，安装包不签名
-- 仅注入 `TAURI_PRIVATE_KEY` / `TAURI_KEY_PASSWORD` 用于 updater 签名
+- **不注入任何签名密钥**：自动更新为无签名自托管（见 `server/UPDATE_MODULE_PLAN.md`）
 - 末尾生成 SHA256 校验文件并上传到 release
 
 ### 11.2.5 security.yml（安全审计）
@@ -1515,15 +1504,16 @@ jobs:
   cargo-audit:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2.0.0
+      - uses: actions/checkout@v7
+      - name: Audit Rust dependencies
+        uses: actions-rust-lang/audit@v1
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          workingDirectory: client/src-tauri
 
   cargo-deny:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           arguments: --all-features
@@ -1531,46 +1521,33 @@ jobs:
   npm-audit:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '22'
       - run: npm audit --audit-level=high
 ```
 
 ### 11.2.6 所需 GitHub Secrets
 
-项目不购买付费签名证书，所需 Secrets 极少：
+**签名相关 Secret：一个都不需要。** 自动更新采用无签名自托管方案（见 `server/UPDATE_MODULE_PLAN.md`）：服务端托管 `latest.json` 与安装包，客户端下载后校验 SHA256，信任锚 = 用户自己配置的中继服务器 + TLS。`GITHUB_TOKEN` 由 Actions 自动注入。
 
-| Secret | 用途 | 配置方式 |
-|---|---|---|
-| `TAURI_PRIVATE_KEY` | Tauri updater 签名私钥（Ed25519，免费生成） | `npm run tauri signer generate` 生成后粘贴 |
-| `TAURI_KEY_PASSWORD` | Tauri updater 私钥密码 | 生成时设置的密码 |
-
-`GITHUB_TOKEN` 由 Actions 自动注入，无需手动配置。
-
-**完整配置流程（约 5 分钟）：**
+**发版流程：**
 
 ```bash
-# 1. 本地生成 Tauri updater 密钥对
-npm run tauri signer generate -- -w ~/.tauri/clipsync.key
-# 输出公钥（用于 tauri.conf.json）和私钥（用于 Secret）
+# 1. 推送 tag 触发 release.yml（三平台打包，产出「草稿」Release）
+git tag v0.3.1
+git push origin v0.3.1
 
-# 2. 公钥写入 src-tauri/tauri.conf.json
-#    plugins.updater.pubkey = "<生成的公钥>"
-
-# 3. 私钥与密码填入 GitHub 仓库 Settings -> Secrets and variables -> Actions
-#    TAURI_PRIVATE_KEY = "<生成的私钥>"
-#    TAURI_KEY_PASSWORD = "<你设置的密码>"
-
-# 4. 推送 tag 触发 release
-git tag v0.1.0
-git push origin v0.1.0
+# 2. 到 GitHub Releases 页面点 Publish 使其公开
+# 3. 下载各平台安装包 → 服务端管理页（/admin）上传 → 生成 latest.json
+#    做完这一步客户端才会收到更新（GitHub Release 本身不是更新源）
 ```
+
 ### 11.2.7 缓存与构建优化
 
 - **Cargo 缓存：** `swatinem/rust-cache@v2` 自动缓存 `target/`，按 OS + target + Cargo.lock 哈希分桶
-- **npm 缓存：** `actions/setup-node@v4` 内置 `cache: 'npm'`
+- **npm 缓存：** `actions/setup-node@v7` 内置 `cache: 'npm'`
 - **并行矩阵：** `fail-fast: false` 确保一个平台失败不取消其他平台
 - **构建超时：** 单 job 上限 60 分钟，超时自动取消
 - **产物保留：** nightly 7 天，release 永久
@@ -1643,23 +1620,15 @@ echo "All checks passed."
 - **Flatpak：** 后续可选上传 Flathub（免费，需通过审核），不在 GitHub Actions 内
 - **Snap：** 后续可选上传 Snap Store（免费），不在 GitHub Actions 内
 
-### 11.3.4 Tauri Updater 签名（免费，必须配置）
+### 11.3.4 自动更新：无签名自托管（不使用 updater 签名）
 
-自动更新使用 Tauri 内置的 Ed25519 签名验证，**密钥对免费生成，是项目唯一需要的签名密钥**：
+原方案依赖 Tauri 内置 `updater` 插件的 Ed25519 签名校验，但该插件**强制签名且无法关闭**，与「不购买证书、配置尽量少」的取舍冲突，因此**已移除该插件**，改为自写更新器：
 
-```bash
-# 本地生成密钥对
-npm run tauri signer generate -- -w ~/.tauri/clipsync.key
-# 输出：
-#   公钥（写入 tauri.conf.json 的 plugins.updater.pubkey）
-#   私钥（填入 GitHub Secret: TAURI_PRIVATE_KEY）
-#   密码（填入 GitHub Secret: TAURI_KEY_PASSWORD）
+- 服务端：`GET /update/latest.json` + `GET /update/files/:platform/:file`（公开读）、`POST /api/admin/update`（admin 鉴权上传）；
+- 客户端：`check_update` / `download_update` / `install_update`，下载后校验 **SHA256**；
+- 信任锚 = 中继服务器 + TLS，**不做 ed25519 签名** → 本地 `tauri build` 不需要 `TAURI_SIGNING_PRIVATE_KEY`，CI 也不需要 `TAURI_PRIVATE_KEY` / `TAURI_KEY_PASSWORD`。
 
-# 验证签名
-npm run tauri signer verify -- ~/.tauri/clipsync.key.pub
-```
-
-**为什么 updater 签名重要：** 即使安装包本身不签名，自动更新时客户端会校验 Ed25519 签名，防止更新源被篡改后注入恶意更新。这是免费方案下最关键的安全保障。
+**安全性依据：** 更新地址取自用户自己配置的中继地址（不硬编码作者服务器）、传输走 TLS、安装前复算 SHA256 —— 更新源被篡改只会导致校验失败，而不会静默植入。详见 `server/UPDATE_MODULE_PLAN.md`。
 
 ### 11.3.5 完整性校验生成
 
@@ -1675,7 +1644,7 @@ CI 在 release 工作流末尾为每个产物生成 SHA256：
       -exec shasum -a 256 {} \; > SHA256SUMS.txt
 
     - name: Upload checksums
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@v3
       with:
         files: src-tauri/target/SHA256SUMS.txt
 ```
