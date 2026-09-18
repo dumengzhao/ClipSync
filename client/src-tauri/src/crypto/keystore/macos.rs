@@ -45,10 +45,9 @@ fn fallback_path(service: &str, account: &str) -> PathBuf {
 }
 
 pub fn store(service: &str, account: &str, data: &[u8]) -> Result<(), String> {
-    if keychain_enabled() {
-        if set_generic_password(service, account, data).is_ok() {
-            return Ok(());
-        }
+    // 合并为一个条件表达式：clippy::collapsible_if（CI 的 -D warnings 会拒绝嵌套写法）
+    if keychain_enabled() && set_generic_password(service, account, data).is_ok() {
+        return Ok(());
     }
     file_store(service, account, data)
 }
@@ -63,10 +62,8 @@ pub fn load(service: &str, account: &str) -> Result<Vec<u8>, String> {
 }
 
 pub fn delete(service: &str, account: &str) -> Result<(), String> {
-    if keychain_enabled() {
-        if delete_generic_password(service, account).is_ok() {
-            return Ok(());
-        }
+    if keychain_enabled() && delete_generic_password(service, account).is_ok() {
+        return Ok(());
     }
     file_delete(service, account)
 }

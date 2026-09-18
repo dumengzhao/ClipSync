@@ -889,7 +889,8 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
     #[cfg(target_os = "macos")]
     {
         use tauri::ActivationPolicy;
-        let _ = app.set_activation_policy(ActivationPolicy::Accessory);
+        // 返回 ()：不要用 `let _ =`（clippy::let_unit_value，CI 的 -D warnings 会拒绝）
+        app.set_activation_policy(ActivationPolicy::Accessory);
     }
 
     Ok(())
