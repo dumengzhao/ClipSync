@@ -53,12 +53,22 @@ jobs:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             label: linux-x64
+            # rpm 需要 rpmbuild，runner 上没装，因此不发 rpm
+            bundles: deb,appimage
+            extra_args: ''
           - os: macos-latest
             target: aarch64-apple-darwin
             label: macos-arm64
+            bundles: app,dmg
+            # CI 上没有本地那套 "ClipSync Dev" 证书，不覆盖会直接失败
+            # （Signing with identity "ClipSync Dev" → no identity found）→ 显式用 ad-hoc 身份 "-"
+            extra_args: --config {"bundle":{"macOS":{"signingIdentity":"-"}}}
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             label: windows-x64
+            # 只发 NSIS：MSI 安装会绕过 installer.nsh，自更新入口会失效
+            bundles: nsis
+            extra_args: ''
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -115,27 +125,33 @@ jobs:
             首次运行会看到 SmartScreen 警告，点击「更多信息」->「仍要运行」。
 
             ### Linux
-            AppImage 直接运行；deb/rpm 用对应包管理器安装。
+            AppImage 直接运行；deb 用对应包管理器安装。
 
             ### 完整性校验
             下载 SHA256SUMS 文件，执行 `shasum -a 256 -c SHA256SUMS-*.txt` 校验。
           releaseDraft: true
           prerelease: false
-          args: --target ${{ matrix.target }}
+          # 必须显式给 --bundles：tauri.conf.json 的 targets 是 ["nsis","app"]，
+          # 这两个在 Linux 上都不适用 → 一个产物都打不出来（曾导致 Linux job 报
+          # "No artifacts were found."，macOS 也因此只出 .app）
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} ${{ matrix.extra_args }}
 
       - name: Generate SHA256 checksums
-        if: always()
+        if: success()
         working-directory: .
         shell: bash
         run: |
           cd client/src-tauri/target
-          find . -type f \( -name "*.dmg" -o -name "*.msi" -o -name "*-setup.exe" \
-            -o -name "*.AppImage" -o -name "*.deb" -o -name "*.rpm" \) \
+          find . -type f \( -name "*.dmg" -o -name "*-setup.exe" \
+            -o -name "*.AppImage" -o -name "*.deb" \) \
             -exec shasum -a 256 {} \; > SHA256SUMS-${{ matrix.label }}.txt || true
           cat SHA256SUMS-${{ matrix.label }}.txt || true
 
       - name: Upload checksums
-        if: always()
+        if: success()
         uses: softprops/action-gh-release@v3
         with:
+          # 手动触发时当前 ref 不是 tag，不给 tag_name 该动作会直接报
+          # "GitHub Releases requires a tag"
+          tag_name: ${{ inputs.tag || github.ref_name }}
           files: client/src-tauri/target/SHA256SUMS-${{ matrix.label }}.txt
