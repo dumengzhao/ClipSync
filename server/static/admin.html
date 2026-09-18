@@ -321,12 +321,12 @@
         </div>
 
         <div class="panel" data-page-node-id="Gqhx4PqSYGhUB7PR06WhPP">
-          <div class="panel-title" data-page-node-id="0vnQl00hkRv8bKf7bC8EOz">NODES <span class="n" id="nodeCount" data-page-node-id="5bzgAKypvZHzFevhNiD49H"></span></div>
+          <div class="panel-title" data-page-node-id="0vnQl00hkRv8bKf7bC8EOz">NODES <span class="n" id="nodeCount" data-page-node-id="5bzgAKypvZHzFevhNiD49H"></span><button class="ghost sm" id="btnRefreshNodes" title="重新拉取设备列表">刷新</button></div>
           <div id="devList" class="empty" data-page-node-id="Bjd5qisVuowL0txfxNXv8S">加载中…</div>
         </div>
 
         <div class="panel" data-page-node-id="wYFNJUVZdFzaePR3YdoX8H">
-          <div class="panel-title" data-page-node-id="uifHR010xo7gn0A06J2LD5">BLOCKED <span class="n" id="removedCount" data-page-node-id="PjHUuEJY86Ujzuo0nEJJZb"></span></div>
+          <div class="panel-title" data-page-node-id="uifHR010xo7gn0A06J2LD5">BLOCKED <span class="n" id="removedCount" data-page-node-id="PjHUuEJY86Ujzuo0nEJJZb"></span><button class="ghost sm" id="btnRefreshBlocked" title="重新拉取黑名单">刷新</button></div>
           <div class="hint" style="margin:0 0 10px" data-page-node-id="ElFp7BG2KubqkDFt7kjx41">已移除设备被永久拒绝入网。「恢复」= 解除拉黑、允许重新配对；「彻底删除」= 清掉这条记录（同时清理节点表残留），适合已废弃设备或换机后的旧身份。</div>
           <div id="removedList" class="empty" data-page-node-id="AVC4AlGV4cmPTHAoiauB9d">加载中…</div>
         </div>
@@ -343,6 +343,8 @@ let token = localStorage.getItem('cs_admin_token') || '';
 let currentNet = null;          // 当前明细页网络 id
 let _netCache = [];             // 网络列表缓存（明细页取 name/token/desc 用）
 let _devWs = null;              // 明细页实时刷新 WebSocket
+let _devWsTimer = null;    // 管理页 WS 重连定时器
+let _detailTimer = null;   // 明细页兜底轮询定时器
 
 function toast(msg){const t=$('#toast');t.textContent=msg;t.style.display='block';setTimeout(()=>t.style.display='none',2500);}
 function authHeaders(){return {'Content-Type':'application/json','Authorization':'Bearer '+token};}
@@ -416,6 +418,7 @@ function renderNetList(){
 function openList(){
   currentNet = null;
   closeDevWs();
+  stopDetailAutoRefresh();
   showView('list');
   loadNetworks().catch(()=>{});
   loadUpdateInfo();
@@ -454,6 +457,7 @@ async function openDetail(netId){
   await loadDevicesHttp(netId);
   openDevWs(netId);
   loadRemoved(netId);
+  startDetailAutoRefresh(netId);
 }
 
 /* ================= 节点列表 ================= */
@@ -498,7 +502,22 @@ async function loadDevicesHttp(netId){
 }
 
 function closeDevWs(){
-  if(_devWs){ try{ _devWs.close(); }catch(e){} _devWs=null; }
+  if(_devWsTimer){ clearTimeout(_devWsTimer); _devWsTimer=null; }
+  if(_devWs){ try{ _devWs.onclose=null; _devWs.close(); }catch(e){} _devWs=null; }
+}
+
+/* 明细页兜底轮询：WS 推送是主路径，但推送可能因某类状态变化未覆盖、或管理页 WS 恰好
+   断开而缺失。20 秒拉一次，保证「离线」这类状态不会长时间停在旧值（2026-09-18 反馈）。 */
+function startDetailAutoRefresh(netId){
+  stopDetailAutoRefresh();
+  _detailTimer = setInterval(()=>{
+    if(currentNet!==netId) return;
+    loadDevicesHttp(netId);
+    loadRemoved(netId);
+  }, 20000);
+}
+function stopDetailAutoRefresh(){
+  if(_detailTimer){ clearInterval(_detailTimer); _detailTimer=null; }
 }
 
 function openDevWs(netId){
@@ -512,6 +531,12 @@ function openDevWs(netId){
         const msg = JSON.parse(ev.data);
         if(msg && msg.type==='nodes' && Array.isArray(msg.nodes) && currentNet===netId){ renderDevices(msg.nodes); }
       }catch(_){}
+    };
+    // 断开即自动重连（2s）：此前没有任何重连逻辑，管理页长时间开着时一旦 WS 掉线，
+    // 设备状态就永远停在旧值——且页面看不出来（2026-09-18 反馈）。
+    ws.onclose = ()=>{
+      if(currentNet!==netId || _devWsTimer) return;
+      _devWsTimer = setTimeout(()=>{ _devWsTimer=null; openDevWs(netId); }, 2000);
     };
     _devWs = ws;
   }catch(e){ /* 浏览器不支持 WS：仅保留 HTTP 初始加载 */ }
@@ -566,8 +591,11 @@ async function removeDevice(netId, devId){  if(!confirm('确定从网络移除�
   try{
     const r = await api(`/api/admin/networks/${netId}/devices/${devId}/remove`, {method:'POST'});
     if(r && r.error){ toast('移除失败: '+r.error); return; }
-    toast('已移除设备');
+    toast('已移除设备（已加入 BLOCKED）');
     await loadDevicesHttp(netId);
+    // 关键：移除 = 同时写入黑名单，必须立刻刷新 BLOCKED 列表，
+    // 否则用户要手动刷页面才能看到那条记录（2026-09-18 反馈）。
+    await loadRemoved(netId);
   }catch(e){ toast('移除失败: '+e.message); }
 }
 
@@ -594,6 +622,18 @@ $('#renameBtn').onclick = async ()=>{
     toast('已重命名');
     await loadNetworks();
   }catch(e){ toast('失败: '+e.message); }
+};
+
+/* ================= 列表手动刷新 ================= */
+$('#btnRefreshNodes').onclick = async ()=>{
+  if(!currentNet) return;
+  await loadDevicesHttp(currentNet);
+  toast('设备列表已刷新');
+};
+$('#btnRefreshBlocked').onclick = async ()=>{
+  if(!currentNet) return;
+  await loadRemoved(currentNet);
+  toast('黑名单已刷新');
 };
 
 /* ================= Token 查看 / 复制 ================= */
