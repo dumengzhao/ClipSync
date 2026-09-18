@@ -315,7 +315,10 @@ pub(crate) fn ext_file_ep_is_valid(ep: &str) -> bool {
         return false;
     }
     match ep.parse::<std::net::SocketAddr>() {
-        Ok(_) => true,
+        // 端口 0 必须拒绝：它是「未指定/任意端口」的哨兵值，拼成 `http://host:0`
+        // 不可用；而 `SocketAddr` 解析本身允许 `:0`，若在此直接放行，就等于
+        // 「IP 字面量 + 0 端口」绕过下方 Err 分支里的端口校验（域名形式:0 反而被拦）。
+        Ok(sa) => sa.port() != 0,
         Err(_) => {
             // host[:port] 形式：host 必须是合法域名或 IP；给了端口就要在 1..=65535
             let (host, port) = match ep.rsplit_once(':') {
