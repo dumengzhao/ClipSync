@@ -736,11 +736,11 @@ fn build_tray(app: &mut tauri::App) -> tauri::Result<()> {
                     tracing::error!("failed to open settings window: {e}");
                 }
             }
-            "open_logs" => {
-                if let Err(e) = crate::log_viewer::open_log_window(app.clone()) {
-                    tracing::error!("failed to open log window: {e}");
+                "open_logs" => {
+                    // 建窗不能在主线程做：托盘菜单回调就在主线程上，直接建会死锁
+                    // （Tauri 文档：Windows 上「同步命令与事件处理器」里建窗会死锁）
+                    crate::log_viewer::spawn_open_log_window(app.clone());
                 }
-            }
             "check_update" => {
                 let app_handle = app.clone();
                 tauri::async_runtime::spawn(async move {

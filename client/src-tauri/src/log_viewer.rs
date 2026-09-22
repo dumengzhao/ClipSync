@@ -15,7 +15,7 @@
 //! 兜底：若前端在 [`READY_TIMEOUT`] 内没有就绪（脚本异常/权限缺失），
 //! watchdog 会直接从文件末尾启动 tail，保证窗口至少能实时刷新。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tauri::{Emitter, Manager};
 
 /// 日志窗口的窗口 label。
@@ -36,13 +36,37 @@ const MAX_PARTIAL: usize = 1 << 20;
 /// 等待前端就绪的兜底时长
 const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// tail 任务是否已在运行。
+/// tail 任务的「代」：每次开新一代（开窗 / 重启 tail）+1。
 ///
-/// 三重作用：
+/// **为什么不能只用布尔量**：窗口关闭后旧任务最多 `POLL_INTERVAL`（400ms）才察觉并退出。
+/// 若用户在这个窗口期内重新开窗，旧任务会看到「窗口又存在了」而继续跑 —— 于是两个任务同时
+/// emit：日志出现重复行、还多跑一份文件 IO；而且其中一个退出时会把运行标记复位，让状态与
+/// 事实不符。故任务是**自己那一代**的持有者：代不匹配即立刻退出，且只有仍是当前代时才允许
+/// 复位标记。
+///
+/// 三重作用（与旧的 `TAIL_STARTED` 一致）：
 /// 1. 防止「前端就绪命令」与「兜底 watchdog」重复启动同一窗口的 tail；
 /// 2. 窗口仍在但任务已异常退出时，`open_log_window` 据此补启动；
 /// 3. 任务退出时复位，供下次开窗判断。
-static TAIL_STARTED: AtomicBool = AtomicBool::new(false);
+static TAIL_GEN: AtomicU64 = AtomicU64::new(0);
+/// 「当前代已有 tail 任务在跑」——即旧 `TAIL_STARTED` 的语义，与 `TAIL_GEN` 配对使用。
+static TAIL_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// 抢占启动权：`Some(gen)` = 本次调用负责启动新一代；`None` = 已有任务在跑，不要重复启动。
+fn claim_tail_start() -> Option<u64> {
+    if TAIL_RUNNING.swap(true, Ordering::SeqCst) {
+        None
+    } else {
+        Some(TAIL_GEN.fetch_add(1, Ordering::SeqCst) + 1)
+    }
+}
+
+/// 让当前 tail 失效（开新窗口时调用）：旧任务下一轮会发现代不匹配而退出，
+/// 同时解除运行标记，允许新一代启动。
+fn invalidate_tail() {
+    TAIL_GEN.fetch_add(1, Ordering::SeqCst);
+    TAIL_RUNNING.store(false, Ordering::SeqCst);
+}
 
 /// 当前正在写入的日志文件：扫日志目录，取 `clipsync.log*` 中修改时间最新的那个。
 ///
@@ -83,23 +107,68 @@ async fn current_log_path() -> Option<std::path::PathBuf> {
 /// 渲染日志组件（与 pull-toast 同机制）。
 /// 已存在 → show + unminimize + focus（用户选定：聚焦而非再开新实例），
 /// 并顺带检查 tail 是否还活着；不存在 → 动态创建，等前端就绪后启动 tail。
+///
+/// ## 为什么建窗必须离开主线程（2026-09-22 用户实测的 Windows 死锁）
+///
+/// `WebviewWindowBuilder::new` 的官方文档在 **Known issues** 里写明：
+///
+/// > On Windows, this function deadlocks when used in a synchronous command and event
+/// > handlers … You should use async commands and separate threads when creating windows.
+///
+/// 根因：IPC 自定义协议请求由 WebView2 在**主线程**派发，而同步命令是**就地执行**的
+/// （`tauri::ipc::private::ResponseTag::block`），于是 `build()` 在主线程里等 WebView2
+/// 控制器的创建回调——而那个回调需要主线程继续泵消息循环才能送达。消息循环被自己堵死：
+/// 新窗口只剩一个白框、点 X 无反应，托盘与「退出」也全部失灵，只能任务管理器结束进程；
+/// 且 `build()` 之后的日志一行都写不出来（这就是故障现场日志里没有「日志窗口已打开」的原因）。
+///
+/// 因此：**命令标 `async`，并把真正阻塞的建窗放进 `spawn_blocking` 的独立线程**——
+/// 正好对应官方给的两条修法（async 命令 + 独立线程）。历史上的「dev 模式建独立窗口
+/// 白屏」极可能是同一根因：dev 下页面要等 dev server，创建回调来得更晚，主线程被堵的
+/// 概率更高，所以表现为「有时候」。
 #[tauri::command]
-pub fn open_log_window(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn open_log_window(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || open_log_window_blocking(app))
+        .await
+        .map_err(|e| format!("日志窗口任务异常终止: {e}"))?
+}
+
+/// 供 Rust 侧**主线程回调**（托盘菜单、窗口事件等）使用的入口：把建窗交给独立线程。
+///
+/// 托盘 `open_logs` 菜单项原先直接调用 `open_log_window`，而菜单回调运行在**主线程**上——
+/// 这与「同步命令」是同一个死锁面（官方文档点名的是 "synchronous command **and event
+/// handlers**"）。**Rust 侧的调用点一律走这里**，别再直接调阻塞实现。
+pub(crate) fn spawn_open_log_window(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Err(e) = open_log_window_blocking(app) {
+            tracing::error!("failed to open log window: {e}");
+        }
+    });
+}
+
+/// [`open_log_window`] 的阻塞实现。**只能从非主线程调用**（原因见上方文档注释）。
+fn open_log_window_blocking(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(existing) = app.get_webview_window(LOG_WINDOW_LABEL) {
+        // 这条分支也要留痕：窗口已存在却白屏时，日志里必须能看出「走的是聚焦分支」
+        tracing::info!("日志窗口已存在：聚焦（不重复开窗）");
         if existing.is_minimized().unwrap_or(false) {
             let _ = existing.unminimize();
         }
         let _ = existing.show();
         let _ = existing.set_focus();
         // 窗口还在但任务已退出（异常/被 kill）：补一次启动，否则日志不再刷新。
-        if !TAIL_STARTED.swap(true, Ordering::SeqCst) {
-            tracing::warn!("日志窗口已存在但 tail 未在运行，重新启动（无历史回放）");
-            spawn_tail_task(app.clone(), None);
+        if let Some(gen) = claim_tail_start() {
+            tracing::warn!(
+                gen,
+                "日志窗口已存在但 tail 未在运行，重新启动（无历史回放）"
+            );
+            spawn_tail_task(app.clone(), None, gen);
         }
         return Ok(());
     }
 
-    TAIL_STARTED.store(false, Ordering::SeqCst);
+    tracing::info!("正在创建日志窗口（label={LOG_WINDOW_LABEL}）");
+    // 窗口重建 → 让上一代任务失效（否则旧任务会继续往新窗口 emit，产生重复行）
+    invalidate_tail();
     let window = tauri::WebviewWindowBuilder::new(
         &app,
         LOG_WINDOW_LABEL,
@@ -111,17 +180,30 @@ pub fn open_log_window(app: tauri::AppHandle) -> Result<(), String> {
     .resizable(true)
     .decorations(true)
     .build()
-    .map_err(|e| format!("创建日志窗口失败: {e}"))?;
+    .map_err(|e| {
+        let msg = format!("创建日志窗口失败: {e}");
+        tracing::error!("{msg}");
+        msg
+    })?;
     let _ = window.set_focus();
     tracing::info!("日志窗口已打开：等待前端就绪后启动日志 tail");
 
     // 兜底：前端因故未能发出就绪信号时，也不让窗口永远空白（只是没有历史）。
+    // 记住「创建这一刻的代」：若这 3 秒内窗口被关掉又重开（代已变），本兜底必须作废 ——
+    // 否则它会替新窗口抢先启动一个「无历史」的 tail，把新窗口的历史回放顶掉。
+    let gen_at_creation = TAIL_GEN.load(Ordering::SeqCst);
     let app_fallback = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(READY_TIMEOUT).await;
-        if !TAIL_STARTED.swap(true, Ordering::SeqCst) {
-            tracing::warn!("日志窗口前端 {READY_TIMEOUT:?} 内未就绪，直接启动 tail（无历史回放）");
-            spawn_tail_task(app_fallback, None);
+        if TAIL_GEN.load(Ordering::SeqCst) != gen_at_creation {
+            return;
+        }
+        if let Some(gen) = claim_tail_start() {
+            tracing::warn!(
+                gen,
+                "日志窗口前端 {READY_TIMEOUT:?} 内未就绪，直接启动 tail（无历史回放）"
+            );
+            spawn_tail_task(app_fallback, None, gen);
         }
     });
     Ok(())
@@ -134,15 +216,16 @@ pub fn open_log_window(app: tauri::AppHandle) -> Result<(), String> {
 /// 此时增量推送已经在跑，前端只需等着收事件。
 #[tauri::command]
 pub async fn log_window_ready(app: tauri::AppHandle) -> Result<Vec<String>, String> {
-    if TAIL_STARTED.swap(true, Ordering::SeqCst) {
+    let Some(gen) = claim_tail_start() else {
         return Ok(Vec::new());
-    }
+    };
     let (lines, offset) = read_history().await;
     tracing::info!(
+        gen,
         "日志窗口前端就绪：回放 {} 行历史，tail 从偏移 {offset} 续推",
         lines.len()
     );
-    spawn_tail_task(app, Some(offset));
+    spawn_tail_task(app, Some(offset), gen);
     Ok(lines)
 }
 
@@ -186,7 +269,7 @@ async fn read_history() -> (Vec<String>, u64) {
 /// - `Some(off)`：首次读取文件时从 `off` 开始（前端已回放到该处）；
 /// - `None`：首次从文件**当前末尾**开始（无历史回放，兜底/重启路径）；
 /// - 跨天轮转到的**新文件**一律从头读（新文件内容少且不会与历史重复）。
-fn spawn_tail_task(app: tauri::AppHandle, mut initial_offset: Option<u64>) {
+fn spawn_tail_task(app: tauri::AppHandle, mut initial_offset: Option<u64>, gen: u64) {
     tauri::async_runtime::spawn(async move {
         let mut cur_path: Option<std::path::PathBuf> = None;
         let mut offset: u64 = 0;
@@ -198,8 +281,13 @@ fn spawn_tail_task(app: tauri::AppHandle, mut initial_offset: Option<u64>) {
         let mut ticks_since_scan: u32 = 0;
 
         loop {
-            // 窗口没了 → 任务退出（「仅窗口存在才刷新」的核心保证）
-            if app.get_webview_window(LOG_WINDOW_LABEL).is_none() {
+            // 退出条件（两者缺一不可）：
+            // 1) 窗口没了 → 正常关闭（「仅窗口存在才刷新」的核心保证）；
+            // 2) 代不匹配 → 已被新一代取代（窗口被关掉又重开），旧任务必须让位，
+            //    否则会与新任务同时 emit，日志出现重复行并多跑一份 IO。
+            if TAIL_GEN.load(Ordering::SeqCst) != gen
+                || app.get_webview_window(LOG_WINDOW_LABEL).is_none()
+            {
                 break;
             }
 
@@ -283,9 +371,12 @@ fn spawn_tail_task(app: tauri::AppHandle, mut initial_offset: Option<u64>) {
             tokio::time::sleep(POLL_INTERVAL).await;
         }
 
-        // 退出即复位，供「窗口仍在但任务已退」的重启判断与下次开窗使用
-        TAIL_STARTED.store(false, Ordering::SeqCst);
-        tracing::info!("日志窗口已关闭：停止日志 tail");
+        // 只有自己仍是当前代时才复位 —— 否则会把新一代的运行标记误抹掉，
+        // 导致「窗口仍在但标记为 false」→ 下次开窗重复启动一个 tail。
+        if TAIL_GEN.load(Ordering::SeqCst) == gen {
+            TAIL_RUNNING.store(false, Ordering::SeqCst);
+        }
+        tracing::info!(gen, "日志 tail 任务退出（窗口关闭或被新一代取代）");
     });
 }
 
