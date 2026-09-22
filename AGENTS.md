@@ -132,7 +132,7 @@ Rust 工具链由 `rust-toolchain.toml` 自动锁定为 stable（MSRV 1.85）。
 **CI 门禁**（`.github/workflows/ci.yml`，三平台矩阵 ubuntu-22.04 / macos-latest / windows-latest）：
 `cargo fmt --all -- --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test --all --all-features`、`npm run lint`。改完先本地跑一遍 `scripts/local-ci.sh`。
 
-**发版**：推 `v*` 标签，或在 Actions 里**手动触发** `Release` 工作流（输入形如 `v0.3.1` 的 tag；手动触发时 `github.ref_name` 是分支名，所以必须显式给 tag）。两个入口都会先跑 `verify-version` job：**tag 必须与 `tauri.conf.json` / `src-tauri/Cargo.toml` / `client/package.json` 的 version 一致**，不一致则打包前直接失败。产出是**草稿** Release，需手动 Publish；客户端真正收到更新还要在服务端管理页上传安装包并生成 `latest.json`。
+**发版**：推 `v*` 标签，或在 Actions 里**手动触发** `Release` 工作流（输入形如 `v0.3.2` 的 tag；手动触发时 `github.ref_name` 是分支名，所以必须显式给 tag）。两个入口都会先跑 `verify-version` job：**tag 必须与 `tauri.conf.json` / `src-tauri/Cargo.toml` / `client/package.json` 的 version 一致**，不一致则打包前直接失败。产出是**草稿** Release，需手动 Publish；客户端真正收到更新还要在服务端管理页上传安装包并生成 `latest.json`。
 
 **曾有的环境限制（已解决）**：Windows 本机一度跑不动客户端单测——`cargo test --lib` 以
 `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND` 退出。根因是 `rfd` 静态导入仅 ComCtl32 v6 提供的

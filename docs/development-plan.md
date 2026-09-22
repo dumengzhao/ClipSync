@@ -1545,8 +1545,8 @@ jobs:
 
 ```bash
 # 1. 推送 tag 触发 release.yml（三平台打包，产出「草稿」Release）
-git tag v0.3.1
-git push origin v0.3.1
+git tag v0.3.2
+git push origin v0.3.2
 
 # 2. 到 GitHub Releases 页面点 Publish 使其公开
 # 3. 下载各平台安装包 → 服务端管理页（/admin）上传 → 生成 latest.json
