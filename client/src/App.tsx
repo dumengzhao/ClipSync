@@ -16,6 +16,7 @@ import {
   listCrossLanOffers,
   pullCrossLan,
   crossItemBase,
+  assertCrossPeerReachable,
   getVersion,
   type DiscoveredPeer,
   type PairedDeviceInfo,
@@ -121,7 +122,7 @@ export default function App() {
   const [serverNodes, setServerNodes] = useState<RemoteNode[]>([]);
   // 跨 LAN「待复制」文件清单
   const [crossLanOffers, setCrossLanOffers] = useState<CrossLanOffer[]>([]);
-  // 跨 LAN 拉取中的 ext_file_ep 集合
+  // 跨 LAN 拉取中的条目 id 集合（= crossItemBase(o)，不是 ext_file_ep：同一设备多条通知共享 ep）
   const [crossPulling, setCrossPulling] = useState<Set<string>>(new Set());
   // 本机计算机名（底部状态栏右侧展示）
   const [deviceName, setDeviceName] = useState('');
@@ -196,6 +197,29 @@ export default function App() {
     // 任一侧（主窗口 / 小窗）清空待拉取后同步列表，避免另一侧残留死条目
     const unlistenCleared = listen<number>('pending-offers-cleared', () => {
       setPendingOffers([]);
+    });
+    // 后端丢弃某条跨 LAN 通知（拉取失败即删 / 3 条上限淘汰）→ 同步移除，
+    // 否则另一侧会留下点不动的死条目；淘汰还必须**明确告知**，
+    // 否则用户视角就是「文件凭空少了」（2026-09-23 用户要求）。
+    const unlistenCrossDropped = listen<{
+      from: string;
+      ext_file_ep: string;
+      manifest: CrossLanOffer['manifest'];
+      from_name?: string;
+      reason?: string;
+    }>('cross-lan-offer-dropped', (e) => {
+      const p = e.payload;
+      const id = crossItemBase({
+        from: p.from,
+        ext_file_ep: p.ext_file_ep,
+        manifest: p.manifest,
+      } as CrossLanOffer);
+      setCrossLanOffers((prev) => prev.filter((x) => crossItemBase(x) !== id));
+      if (p.reason === 'evicted') {
+        flash(
+          `待复制清单最多 3 条：已移除最早的一条（来自 ${p.from_name || p.from}）——需要请对方重新复制`,
+        );
+      }
     });
     const unlistenPullStart = listen<{ transfer_id: string }>('file-pull-start', (e) => {
       const tid = e.payload.transfer_id;
@@ -387,9 +411,15 @@ export default function App() {
     const unlistenServerNodes = listen<RemoteNode[]>('server-nodes', (e) =>
       setServerNodes(e.payload),
     );
-    const unlistenCrossLanFile = listen<CrossLanOffer>('cross-lan-file', (e) =>
-      setCrossLanOffers((prev) => [...prev, e.payload]),
-    );
+    // 收到跨 LAN 通知：**按 id 去重（同 id 用新的替换旧的）**，绝不能盲追加 ——
+    // 后端对「内容完全相同」的通知是去重替换的，前端若直接 push 就会出现两条 id 相同的行；
+    // 而 crossPulling / isPulling 都按 id 判定，点其中一条会让两条一起变「拉取中」
+    //（用户实测 2026-09-23：主窗口里「两个相同的文件」就是这么来的）。
+    const unlistenCrossLanFile = listen<CrossLanOffer>('cross-lan-file', (e) => {
+      const offer = e.payload;
+      const id = crossItemBase(offer);
+      setCrossLanOffers((prev) => [...prev.filter((x) => crossItemBase(x) !== id), offer]);
+    });
     // 客户端自更新：下载进度回传。此前下载阶段完全静默，用户点了「下载并安装」后
     // 界面毫无反应，会误以为程序卡死或已退出，故把阶段与百分比显示出来。
     const unlistenUpdateProgress = listen<{
@@ -421,6 +451,7 @@ export default function App() {
       unlistenInfoUpdated.then((u) => u());
       unlistenCountExceeded.then((u) => u());
       unlistenCleared.then((u) => u());
+    unlistenCrossDropped.then((u) => u());
       unlistenFileOffer.then((u) => u());
       unlistenPullStart.then((u) => u());
       unlistenPullCancelled.then((u) => u());
@@ -508,6 +539,11 @@ export default function App() {
     return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   };
 
+  /// 待拉取条目的**到达时间**（本机时区 HH:MM）。
+  /// `received_at` 是 unix **毫秒**，而 `fmtTime` 收的是秒（`pulled_at` 那种），
+  /// 所以这里必须先除以 1000 —— 直接把毫秒喂进去会显示成 1970 年附近的时间。
+  const fmtReceivedAt = (ms?: number): string => (ms ? fmtTime(Math.floor(ms / 1000)) : '');
+
   /// 清空客户端接收到的全部清单：「待拉取文件」（局域网 P2P）与「待复制（跨 LAN）」
   /// 共用一个按钮——两段都是本机收到后暂存的清单，语义上是一件事。
   /// 只清清单，不动进行中的拉取；服务端记录与对端不受影响。
@@ -546,15 +582,26 @@ export default function App() {
   };
 
   /// 跨 LAN 拉取：从对端 ext_file_ep 下载文件并写本机剪贴板。
+  ///
+  /// 条目标识必须用 crossItemBase(o)、不能用 ext_file_ep：同一台设备连发多条通知时
+  /// 它们的 ep 完全相同，用 ep 当键会导致「点一条 → 同源条目全部变成拉取中、失败后一起消失」
+  /// （2026-09-22 实测）。事件处理（file-pull-* / file-pull-progress）本来就是按 base id 匹配的，
+  /// 这里与之一致。
   const doCrossPull = async (o: CrossLanOffer) => {
-    const key = o.ext_file_ep;
+    const key = crossItemBase(o);
     setCrossPulling((prev) => new Set(prev).add(key));
     try {
-      await pullCrossLan(crossItemBase(o), o.from, o.ext_file_ep, o.manifest);
-      setCrossLanOffers((prev) => prev.filter((x) => x.ext_file_ep !== o.ext_file_ep));
+      // 预检对端可达性：否则失败只会抛 reqwest 英文原文，用户既看不懂也定位不到地址
+      await assertCrossPeerReachable(o);
+      await pullCrossLan(key, o.from, o.ext_file_ep, o.manifest);
+      setCrossLanOffers((prev) => prev.filter((x) => crossItemBase(x) !== key));
       flash('已拉取跨 LAN 文件');
     } catch (e) {
-      flash('跨 LAN 拉取失败: ' + String(e));
+      // 失败即终结（用户要求 2026-09-23）：条目直接移除（后端也已删除该通知），
+      // 提示里带上文件名 —— 否则列表里多条时根本分不清是哪条失败。
+      const names = (o.manifest || []).map((f) => f.file_name).join('、') || '未知文件';
+      setCrossLanOffers((prev) => prev.filter((x) => crossItemBase(x) !== key));
+      flash(`拉取失败（${names}）：${String(e)}`);
     } finally {
       setCrossPulling((prev) => {
         const n = new Set(prev);
@@ -585,7 +632,8 @@ export default function App() {
     ...pendingOffers.map((o) => ({ kind: 'lan' as const, key: o.transfer_id, offer: o })),
     ...crossLanOffers.map((o) => ({
       kind: 'cross' as const,
-      key: `${o.from}-${o.ext_file_ep}`,
+      // 必须唯一：同一设备可有多条通知，用 from-ep 会重复（React key 冲突 + 渲染错乱）
+      key: crossItemBase(o),
       offer: o,
     })),
   ].sort(
@@ -804,7 +852,8 @@ export default function App() {
                               const title = isFolder
                                 ? (o.top_names?.join('、') ?? '')
                                 : o.files.map((f) => f.file_name).join('、');
-                              const subLabel = `来自 ${o.device_name || o.device_id}${isFolder ? '' : ` · ${fmtSize(o.total_size)}`}`;
+                              const arrivedAt = fmtReceivedAt(o.received_at);
+                              const subLabel = `来自 ${o.device_name || o.device_id}${isFolder ? '' : ` · ${fmtSize(o.total_size)}`}${arrivedAt ? ` · ${arrivedAt}` : ''}`;
                               return (
                                 <li key={it.key} className="peer-item peer-item-action">
                                   <div className="offer-info">
@@ -836,12 +885,13 @@ export default function App() {
                               );
                             }
                             const o = it.offer;
-                            const isPulling = crossPulling.has(o.ext_file_ep);
+                            const isPulling = crossPulling.has(crossItemBase(o));
                             const names = (o.manifest || []).map((f) => f.file_name).join('、');
                             const total = (o.manifest || []).reduce(
                               (sum: number, f: { file_size: number }) => sum + (f.file_size || 0),
                               0,
                             );
+                            const arrivedAt = fmtReceivedAt(o.received_at);
                             return (
                               <li key={it.key} className="peer-item peer-item-action">
                                 <div className="offer-info">
@@ -854,6 +904,7 @@ export default function App() {
                                   <span className="peer-addr">
                                     来自 {o.from_name || o.from}
                                     {total > 0 ? ` · ${fmtSize(total)}` : ''}
+                                    {arrivedAt ? ` · ${arrivedAt}` : ''}
                                   </span>
                                 </div>
                                 {isPulling ? (

@@ -357,6 +357,57 @@ pub(crate) fn normalize_ext_file_ep(ep: &str, default_port: u16) -> String {
     format!("{ep}:{default_port}")
 }
 
+/// 把 reqwest 的发送错误翻译成「哪条地址 + 什么原因 + 该怎么办」。
+///
+/// 用户实测（2026-09-22）界面上只有 reqwest 原文
+/// `error sending request for url (http://203.0.113.7:20071/file/…)`，对排查毫无帮助。
+fn explain_send_err(base: &str, e: &reqwest::Error) -> String {
+    let ep = base.trim_start_matches("http://").trim_end_matches('/');
+    let kind = if e.is_timeout() {
+        "连接超时（对方未响应：可能防火墙拦截、设备已不在该地址，或该地址只是运营商出口 IP）"
+    } else if e.is_connect() {
+        "连接被拒绝或不可达"
+    } else {
+        "请求发送失败"
+    };
+    format!("对端文件地址 {ep} {kind}。跨 LAN 拉取必须直连对端 20071（中继只转发通知、不转发文件本体）；请确认对方设备已放行该端口、地址填写正确，两台机器同网段时应优先走局域网直连")
+}
+
+/// 对端返回非 2xx 时的可读解释（否则前端只能看到「HTTP 404」这种无信息量的话）。
+fn explain_http_status(s: reqwest::StatusCode) -> &'static str {
+    match s.as_u16() {
+        401 | 403 => "对端拒绝了请求：网络密钥不一致，或该文件已不在对端的共享清单里",
+        404 => "对端已不再共享该文件（设备重启或剪贴板已被覆盖，可让对方重新复制一次）",
+        _ => "对端返回了非 2xx 状态",
+    }
+}
+
+/// 汇总 manifest（`Vec<FileMeta>` 的 JSON）的文件数 / 总大小 / 文件名列表，供日志使用。
+///
+/// 对端可控，返回的字符串进日志前由调用方过 `log_safe`（见 `handle_file_notify`）。
+/// 文件名最多列 8 个，超出以「…共 N 个」收尾，避免超长日志行。
+fn summarize_manifest(manifest: &serde_json::Value) -> (usize, u64, String) {
+    let Some(arr) = manifest.as_array() else {
+        return (0, 0, "<manifest 不是数组>".to_string());
+    };
+    let mut total: u64 = 0;
+    let mut names: Vec<String> = Vec::new();
+    for it in arr {
+        total = total.saturating_add(it.get("file_size").and_then(|v| v.as_u64()).unwrap_or(0));
+        if names.len() < 8 {
+            if let Some(n) = it.get("file_name").and_then(|v| v.as_str()) {
+                names.push(n.to_string());
+            }
+        }
+    }
+    let tail = if arr.len() > names.len() {
+        format!("…共 {} 个", arr.len())
+    } else {
+        String::new()
+    };
+    (arr.len(), total, format!("{}{}", names.join("、"), tail))
+}
+
 impl ServerConn {
     pub fn new(app: AppHandle, engine: Arc<SyncEngine>) -> Arc<Self> {
         Arc::new(Self {
@@ -774,6 +825,19 @@ impl ServerConn {
             .find(|n| n.device_id == from)
             .map(|n| n.name.clone())
             .unwrap_or_else(|| from.to_string());
+        // 观测：这条路径此前一行日志都没有 —— 2026-09-22 排查「弹窗里有错误 / 条目数与预期不符」
+        // 时完全无从下手（用户只复制了一次却出现多条通知，无法判定是发送侧还是接收侧）。
+        // 记录来源、文件数、总大小、地址与文件名，足以复现协议层的行为。
+        let (file_count, total_bytes, names) = summarize_manifest(manifest);
+        tracing::info!(
+            "收到跨 LAN 文件通知：来自 {}（{}），{} 个文件 / {} 字节，地址 {}，文件名 [{}]",
+            crate::obs::logging::log_safe(&name),
+            from,
+            file_count,
+            total_bytes,
+            ext_file_ep,
+            crate::obs::logging::log_safe(&names)
+        );
         let offer = CrossLanOffer {
             from: from.to_string(),
             from_name: name,
@@ -1089,8 +1153,22 @@ impl ServerConn {
                             routes.insert(0, hit);
                             break;
                         }
-                        Ok(r) => last_err = Some(anyhow::anyhow!("HTTP {}", r.status())),
-                        Err(e) => last_err = Some(anyhow::anyhow!("{e}")),
+                        Ok(r) => {
+                            last_err = Some(anyhow::anyhow!(
+                                "对端返回 HTTP {}：{}",
+                                r.status(),
+                                explain_http_status(r.status())
+                            ))
+                        }
+                        Err(e) => {
+                            // reqwest 原文（`error sending request for url (http://…)`）用户实测
+                            // 完全看不懂（2026-09-22）：既不知哪条地址、也不知该怎么办。
+                            // 原文降到 DEBUG 留档，面向前端的是「地址 + 原因 + 怎么办」。
+                            tracing::debug!(
+                                "跨 LAN 拉取 {pull_id} 候选地址 {base} 发送失败（原文）: {e}"
+                            );
+                            last_err = Some(anyhow::anyhow!("{}", explain_send_err(base, &e)))
+                        }
                     }
                     i += 1;
                 }

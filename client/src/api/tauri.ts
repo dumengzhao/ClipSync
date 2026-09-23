@@ -241,7 +241,7 @@ export async function getServerNodes(): Promise<RemoteNode[]> {
 export interface CrossLanOffer {
   from: string;
   from_name: string;
-  manifest: { file_name: string; file_size: number; is_dir: boolean }[];
+  manifest: { file_name: string; file_size: number; is_dir: boolean; hash?: string | null }[];
   ext_file_ep: string;
   /** 到达时间（unix 毫秒），用于「最新在上」排序（与局域网 PendingOffer 同语义） */
   received_at?: number;
@@ -277,12 +277,60 @@ export function crossItemBase(o: CrossLanOffer): string {
     (s: number, f: { file_size: number }) => s + (f.file_size || 0),
     0,
   );
-  return `${o.from}:${o.ext_file_ep}:${names}:${total}`;
+  // **内容哈希也要进 id**：只用「文件名 + 总大小」时，「同名同大小的两份不同内容」
+  // 会算出同一个 id —— 撞车之后主窗口点一条拉取，两条都会显示「拉取中」
+  //（`crossPulling`/`isPulling` 都按 id 判定；用户实测 2026-09-23）。
+  const hashes = (o.manifest || [])
+    .map((f: { hash?: string | null }) => (f.hash || '').slice(0, 8))
+    .join(',');
+  return `${o.from}:${o.ext_file_ep}:${names}:${total}:${hashes}`;
+}
+
+/** 丢弃单条局域网（P2P）待拉取条目：拉取失败即终结（不再"放回去可重试"）。 */
+export async function dropPendingOffer(transferId: string): Promise<number> {
+  return invoke<number>('drop_pending_offer', { transferId });
 }
 
 /** 跨 LAN 条目在小窗中的完整 id（带 `local:` 前缀，与进度事件 key 对齐）。 */
 export function crossItemId(o: CrossLanOffer): string {
   return `local:${crossItemBase(o)}`;
+}
+
+/**
+ * 跨 LAN 拉取前的可达性预检：把「注定失败的请求」提前拦下，并给出人能看懂的原因。
+ *
+ * 背景（2026-09-22 用户实测）：对端文件地址不可达时，界面上只有 reqwest 的英文原文
+ * error sending request for url (http://203.0.113.7:20071/file/…) —— 既看不出是哪条地址、
+ * 也不知道该做什么。跨 LAN 拉取必须直连对端 20071（中继只转发通知、不转发文件本体），
+ * 所以对端不可达时先探一次、直接把结论告诉用户，比发一个必然失败的请求更好。
+ *
+ * 顺带拦截「地址指向了另一台设备」这种配置错误（探测结果带 device_id）。
+ */
+export async function assertCrossPeerReachable(o: CrossLanOffer): Promise<void> {
+  const ep = (o.ext_file_ep || '').trim();
+  if (!ep) {
+    throw new Error('该条目没有对外文件地址，无法直连拉取（可在对方设备的网络设置里配置后重试）');
+  }
+  let probe: ProbeResult | null = null;
+  try {
+    probe = await probeExtFileEp(ep);
+  } catch {
+    probe = null;
+  }
+  if (!probe || !probe.ok) {
+    const why = probe && probe.error ? '（' + probe.error + '）' : '';
+    throw new Error(
+      '对端文件地址 ' + ep + ' 不可达' + why +
+        '。跨 LAN 拉取必须直连对端 20071（中继只转发通知、不转发文件本体）；' +
+        '请确认对方设备已放行该端口、地址填写正确，两台机器同网段时应优先走局域网直连',
+    );
+  }
+  if (probe.device_id && o.from && probe.device_id !== o.from) {
+    const who = probe.device_name || probe.device_id.slice(0, 8);
+    throw new Error(
+      '地址 ' + ep + ' 指向的是另一台设备（' + who + '），与这条通知的来源不一致，请核对对方配置的对外地址',
+    );
+  }
 }
 
 /** 对外文件地址探测结果（Rust 端 `ProbeResult`） */

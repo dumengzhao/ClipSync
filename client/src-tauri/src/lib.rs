@@ -187,20 +187,48 @@ impl AppState {
     /// - 上限：只保留最新 `MAX_CROSS_LAN_OFFERS` 条，超出的从最旧开始淘汰并记 WARN
     ///   （与局域网侧 `track_and_trim` 同语义：静默丢弃会让「列表越来越长」难以察觉）。
     pub fn push_cross_lan_offer(&self, offer: CrossLanOffer) {
+        // 被淘汰的条目先收集起来，等锁释放后再广播（不跨锁发事件）
+        let mut evicted: Vec<crate::server_conn::CrossLanOffer> = Vec::new();
         {
             // 单来源上限（防御性；权威上限是 enforce_received_cap 的全局 3 条）
             let mut g = self.cross_lan_offers.lock();
+            let before = g.len();
             g.retain(|o| {
                 !(o.from == offer.from
                     && o.ext_file_ep == offer.ext_file_ep
                     && o.manifest == offer.manifest)
             });
+            // 去重命中也要留痕：否则「同一份文件被重复投递」时前端条目数不变，
+            // 排查时无法区分「只收到一条」和「收到多条但被去重」（2026-09-22 实测场景）。
+            let deduped = before.saturating_sub(g.len());
+            if deduped > 0 {
+                tracing::debug!(
+                    "跨 LAN 通知与既有条目内容完全相同，按「最新」替换（去重 {deduped} 条）"
+                );
+            }
             g.push(offer);
             while g.len() > MAX_CROSS_LAN_OFFERS {
                 let dropped = g.remove(0);
                 tracing::warn!(
                     "跨 LAN 待复制清单超过 {MAX_CROSS_LAN_OFFERS} 条上限，已淘汰最早的一条（来自 {}）",
                     crate::obs::logging::log_safe(&dropped.from_name)
+                );
+                evicted.push(dropped);
+            }
+        }
+        // 淘汰必须**让前端也知道**：此前只记 WARN，用户视角是「文件凭空少了」
+        // （2026-09-23 用户要求给提示）。前端收到后把该条从列表移除并提示重新复制。
+        if let Some(app) = self.hub.app_handle() {
+            for o in evicted {
+                let _ = app.emit(
+                    "cross-lan-offer-dropped",
+                    serde_json::json!({
+                        "from": o.from,
+                        "ext_file_ep": o.ext_file_ep,
+                        "manifest": o.manifest,
+                        "from_name": o.from_name,
+                        "reason": "evicted",
+                    }),
                 );
             }
         }
@@ -323,6 +351,15 @@ pub mod firewall {
 /// 应用入口
 pub fn run() {
     crate::obs::logging::init_file_logging();
+    // panic 默认只写 stderr，而 GUI 进程没有控制台 —— 现场完全不可见（2026-09-22 排查
+    // 「异常退出/弹窗报错」时正因为没有任何 panic 记录而无从下手）。装 hook 让它落盘。
+    std::panic::set_hook(Box::new(|info| {
+        let loc = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "<未知位置>".to_string());
+        tracing::error!("PANIC at {loc}: {info}");
+    }));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -592,6 +629,7 @@ pub fn run() {
             tauri_cmd::cancel_pull,
             tauri_cmd::list_pending_offers,
             tauri_cmd::clear_received_offers,
+            tauri_cmd::drop_pending_offer,
             tauri_cmd::open_settings,
             tauri_cmd::quit_app,
             log_viewer::open_log_window,
@@ -622,8 +660,8 @@ pub fn run() {
             tauri_cmd::debug_report_mount,
             #[cfg(debug_assertions)]
             tauri_cmd::simulate_cross_lan_offer,
-            #[cfg(debug_assertions)]
-            tauri_cmd::debug_toast_log,
+            // frontend_log 必须**始终注册**（release 也要用）：前端可见的错误文案要能落盘
+            tauri_cmd::frontend_log,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

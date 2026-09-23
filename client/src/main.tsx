@@ -23,14 +23,30 @@ ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   </React.StrictMode>,
 );
 
-// [DEBUG] 挂载上报：确认 pull-toast 窗口实际渲染的是 PullToast 而不是 App。
-// 若日志里出现 `窗口 pull-toast 挂载, is_toast=false`，说明 label 判断失效，
-// 小窗会显示成主界面缩影 —— 表面「弹了」，用户却认不出那是待拉取小窗。
-if (import.meta.env.DEV) {
+/**
+ * 全局错误上报 —— release 也生效（后端 frontend_log 会带上窗口 label 写进日志文件）。
+ *
+ * 没有这段时，界面上出现的异常（小窗里的报错文案、渲染崩溃、未处理的 Promise 拒绝）
+ * 在日志里完全查不到：2026-09-22 排查「弹窗里有错误」时就卡在这里 —— 用户看得见、我们查不到。
+ */
+function reportFrontendError(kind: string, detail: unknown): void {
+  const text =
+    detail instanceof Error ? detail.name + ': ' + detail.message : String(detail);
   void import('@tauri-apps/api/core')
-    .then((m) =>
-      m.invoke('debug_report_mount', { label: getCurrentWindow().label, isToast }),
-    )
+    .then((m) => m.invoke('frontend_log', { msg: kind + ': ' + text }))
+    .catch(() => {});
+}
+
+window.addEventListener('error', (e) => reportFrontendError('window.error', e.error ?? e.message));
+window.addEventListener('unhandledrejection', (e) =>
+  reportFrontendError('unhandledrejection', e.reason),
+);
+
+// [DEBUG] 挂载上报（仅 dev）：确认 pull-toast 窗口渲染的是 PullToast 而不是 App ——
+// 若 label 判断失效，小窗会显示成主界面缩影，表面「弹了」但用户认不出。
+if (import.meta.env.DEV && isToast) {
+  void import('@tauri-apps/api/core')
+    .then((m) => m.invoke('frontend_log', { msg: 'pull-toast 已挂载（label 判断正常）' }))
     .catch(() => {});
 }
 

@@ -11,6 +11,8 @@ import {
   listCrossLanOffers,
   pullCrossLan,
   crossItemBase,
+  assertCrossPeerReachable,
+  dropPendingOffer,
   crossItemId,
   CrossLanOffer,
   getConfig,
@@ -94,6 +96,11 @@ export default function PullToast() {
   const [queued, setQueued] = useState<Item[]>([]);
   /** 已完成/失败的结果反馈 */
   const [results, setResults] = useState<Record<string, { ok: boolean; msg: string }>>({});
+  /** 结果反馈阶段的剩余秒数（每秒刷新）。
+   *
+   * 此前该阶段把 countdown 置 0，页脚就停在「60 秒内未点击将自动关闭」不再变化 ——
+   * 用户既看不到真实关闭时间、也不知道还要等多久（2026-09-23 反馈）。 */
+  const [holdLeft, setHoldLeft] = useState(0);
   /** 已完成但保留「100% 进度条」可见片刻的条目（避免直接关闭看不到满） */
   const [completed, setCompleted] = useState<Record<string, Item>>({});
   const [progress, setProgress] = useState<Record<string, number>>({});
@@ -145,14 +152,31 @@ export default function PullToast() {
   const footRef = useRef<HTMLDivElement>(null);
   /** 上一次已设置的高度，避免每帧/每秒倒计时都重复调用 setSize */
   const lastH = useRef(0);
+  /** 我们是否「打算让窗口可见」：showSelf 置 true、hideSelf 置 false。
+   *
+   * 用于阻止「高度自适应」effect 把**已隐藏**的窗口重新显示出来 —— 那是真 bug：
+   * 结果/条目变化引起内容变化 → effect 里 setSize 后无条件 show_pull_toast →
+   * 刚收起的小窗又冒出来（2026-09-23 实测：报错收起的窗口自己弹回来两次）。 */
+  const shownRef = useRef(false);
 
   // [DEBUG] 诊断上报：把前端关键节点写进 Rust 日志，便于排查前端黑盒问题。
   const log = (m: string) => {
-    if (import.meta.env.DEV) void invoke('debug_toast_log', { msg: m });
+    // release 也上报：否则「小窗里显示的错误」在日志里完全查不到
+    // （2026-09-22 实测：用户看到拉取失败，而日志一行都没有）。
+    void invoke('frontend_log', { msg: m });
   };
 
   const hideSelf = () => {
     log('hideSelf 被调用（关闭按钮/自动收起）');
+    // 先标记「不打算可见」：这样后续内容变化触发的自适应不会再把它弹回来
+    shownRef.current = false;
+    // 清掉本次的「结果/完成/进度/路由」展示：小窗是**一次性通知**，收起后应回到干净状态。
+    // 不清的话旧的失败结果会让「失败优先」分支一直命中 —— 下次弹出时**永远不进入倒计时**
+    //（用户实测 2026-09-23：关窗后再复制，小窗不倒计时），旧完成框也会继续挂在那里。
+    setResults({});
+    setCompleted({});
+    setRoutes({});
+    setProgress({});
     // 走 Rust 命令而不是直接 window.hide()：macOS 上小窗曾是 key window，
     // 隐藏后系统会把主窗口顶上来，需要在 Rust 侧做补偿重新隐藏主窗口。
     void invoke('hide_pull_toast')
@@ -174,6 +198,7 @@ export default function PullToast() {
   // 显隐统一收归 Rust：定位/置顶/提升都在 Rust 侧完成。
   // 每次调用都自增 session，确保倒计时一定重启。
   const showSelf = () => {
+    shownRef.current = true;
     void invoke('show_pull_toast');
     setSession((s) => s + 1);
   };
@@ -183,6 +208,15 @@ export default function PullToast() {
     // 同 id 的旧结果先清掉：取消拉取后后端会把该条目退回（重发 offer），
     // 不清的话 `results` 里那条「已取消拉取」会残留，干扰「是否还有内容」的判断。
     setResults((prev) => {
+      if (!(it.id in prev)) return prev;
+      const n = { ...prev };
+      delete n[it.id];
+      return n;
+    });
+    // **completed 也要一起清**：只清 results 会留下一条陈旧完成框 ——
+    // 它没有结果可渲染，就会显示「路由 + 100% 进度条」一直挂着，而内容明明失败了
+    //（用户实测 2026-09-23）。条目现在重新回到 items（待拉取）✓
+    setCompleted((prev) => {
       if (!(it.id in prev)) return prev;
       const n = { ...prev };
       delete n[it.id];
@@ -273,6 +307,25 @@ export default function PullToast() {
           `收到 cross-lan-file: from=${o.from_name || o.from} files=${(o.manifest || []).length}`,
         );
         onNewItemRef.current({ id: crossItemId(o), kind: 'cross', ts: now(), offer: o });
+      }),
+
+      // 后端丢弃某条跨 LAN 通知（失败即删 / 上限淘汰）：从本窗口移除，
+      // 这样另一侧触发的删除也能同步过来（只清待拉取条目，失败结果的展示保留）。
+      listen<{
+        from: string;
+        ext_file_ep: string;
+        manifest: CrossLanOffer['manifest'];
+        from_name?: string;
+        reason?: string;
+      }>('cross-lan-offer-dropped', (e) => {
+        const p = e.payload;
+        const id = crossItemId({
+          from: p.from,
+          ext_file_ep: p.ext_file_ep,
+          manifest: p.manifest,
+        } as CrossLanOffer);
+        log(`cross-lan-offer-dropped: reason=${p.reason || '?'}`);
+        setItems((prev) => prev.filter((x) => x.id !== id));
       }),
 
       listen<{ transfer_id: string; route?: string }>('file-pull-start', (e) => {
@@ -393,6 +446,9 @@ export default function PullToast() {
                     : `拉取失败：${e.payload.error || '未知错误'}`,
               },
             }));
+            if (!ok) {
+              log(`file-pull-complete 显示为失败：${err || e.payload.error || '未知错误'}`);
+            }
             setProgress((prev) => {
               const n = { ...prev };
               delete n[id];
@@ -496,6 +552,17 @@ export default function PullToast() {
   useEffect(() => {
     if (!ready) return;
 
+    // 0) **失败 → 取消一切自动关闭，只能手动关**（用户要求 2026-09-23：
+    //    「弹出错误就销毁定时任务只能手动关闭」）。
+    //    必须放在 busy 判断**之前**：失败条目现在也进 completed，会命中 busy 分支而被
+    //    "保持显示"，但我们要的是明确语义 —— 不倒计时、不自动关，用户看清后自己点 ×。
+    if (Object.values(results).some((r) => r && r.ok === false)) {
+      log('结果区含失败 → 取消自动关闭（只能手动关闭）');
+      setCountdown(0);
+      setHoldLeft(0);
+      return;
+    }
+
     const busy = pulling.length > 0 || Object.keys(completed).length > 0;
     const hasItems = items.length > 0;
 
@@ -503,6 +570,7 @@ export default function PullToast() {
     if (busy) {
       log('拉取进行中 → 保持显示，等待任务完成');
       setCountdown(0);
+      setHoldLeft(0);
       return;
     }
 
@@ -516,6 +584,9 @@ export default function PullToast() {
       const total = Math.max(1, Math.round(autoHideMs / 1000));
       log(`有待拉取条目，启动未操作倒计时 ${autoHideMs}ms（session=${session}）`);
       setCountdown(total);
+      // 清掉可能残留的「结果反馈」秒数：否则页脚优先显示 holdLeft，
+      // 会把 60 秒的未操作倒计时显示成一个陈旧的短秒数（用户实测 2026-09-23）。
+      setHoldLeft(0);
       let left = total;
       const iv = window.setInterval(() => {
         left -= 1;
@@ -529,13 +600,35 @@ export default function PullToast() {
       return () => window.clearInterval(iv);
     }
 
-    // 3) 已点击拉取（完成/失败）或已无条目 → 结果反馈停留后关闭
+    // 3) 有结果反馈（完成/失败）→ 停留后关闭。
+    //
+    // **必须加前置条件**：此前这里是无条件兜底 —— 窗口已收起、结果也已被 hideSelf 清空时，
+    // 它仍会 arm 一个 3 秒定时器并把 holdLeft 置成 3，于是下次弹出时页脚先显示这个陈旧秒数
+    // （表现为「倒计时只剩几秒」），那个定时器到点还会把新弹出的窗口提前关掉
+    //（用户实测 2026-09-23）。
+    const hasResult = Object.keys(results).length > 0 || Object.keys(completed).length > 0;
+    if (!shownRef.current || !hasResult) {
+      setCountdown(0);
+      setHoldLeft(0);
+      return;
+    }
     setCountdown(0);
+    // 失败已在上方提前返回（改为手动关闭），走到这里的只有「无条目」或成功结果 → 统一 3 秒。
+    const hold = RESULT_HOLD_MS;
+    // 让「还有多久关闭」可见：每秒递减（否则页脚一直显示那句 60 秒的旧文案）
+    setHoldLeft(Math.ceil(hold / 1000));
+    const iv = window.setInterval(() => {
+      setHoldLeft((s) => (s > 0 ? s - 1 : 0));
+    }, 1000);
     const t = window.setTimeout(() => {
-      log(`结果反馈停留 ${RESULT_HOLD_MS}ms 结束 → 关闭`);
+      log(`结果反馈停留 ${hold}ms 结束 → 关闭`);
       hideSelfRef.current();
-    }, RESULT_HOLD_MS);
-    return () => window.clearTimeout(t);
+    }, hold);
+    return () => {
+      window.clearTimeout(t);
+      window.clearInterval(iv);
+      setHoldLeft(0);
+    };
   }, [ready, items, pulling, completed, results, userActed, autoHideMs, session]);
 
   // 窗口高度自适应内容：固定 200px 时，条目少会在列表与页脚之间留下大片空白。
@@ -562,7 +655,12 @@ export default function PullToast() {
     log(`高度自适应: ${target}px（列表 ${listH} + 页脚 ${footH} + 边框 ${BORDER_H}）`);
     void getCurrentWindow()
       .setSize(new LogicalSize(WIN_W, target))
-      .then(() => invoke('show_pull_toast'))
+      .then(() => {
+        // 只让**本来可见**的窗口保持尺寸正确；绝不复活已隐藏的窗口
+        // （否则「失败后条目/结果变化」会把刚收起的小窗又弹出来）。
+        if (shownRef.current) return invoke('show_pull_toast');
+        return undefined;
+      })
       .catch((e: unknown) => log(`高度自适应失败: ${String(e)}`));
   }, [items, pulling, results, completed, countdown, ready]);
 
@@ -579,18 +677,26 @@ export default function PullToast() {
         delete n[it.id];
         return n;
       });
-      pullFiles(tid).catch(() => {
+      pullFiles(tid).catch((e: unknown) => {
+        // 失败即终结（用户要求 2026-09-23）：**不放回**待拉取列表（否则混在一起看不出哪条失败），
+        // 就在原框里显示「哪条 + 什么原因」，并让后端把该条目删掉 —— 想再要就重新复制。
+        log(`本地拉取失败：${itemNames(it)} —— ${String(e)}`);
         setPulling((prev) => prev.filter((x) => x.id !== it.id));
-        setItems((prev) => (prev.some((x) => x.id === it.id) ? prev : [it, ...prev]));
         setProgress((prev) => {
           const n = { ...prev };
           delete n[it.id];
           return n;
         });
+        // 把条目放进 completed：那里渲染**完整条目框**（文件名/来源/大小），只把「拉取」
+        // 按钮的位置换成错误文案 —— 用户要求保留原待拉取信息，别把整条 UI 删掉（2026-09-23）。
+        setCompleted((c) => ({ ...c, [it.id]: it }));
         setResults((prev) => ({
           ...prev,
-          [it.id]: { ok: false, msg: '拉取失败，可重试' },
+          [it.id]: { ok: false, msg: `拉取失败：${String(e)}` },
         }));
+        void dropPendingOffer(tid).catch((err: unknown) =>
+          log(`dropPendingOffer 失败：${String(err)}`),
+        );
       });
     } else {
       const o = it.offer;
@@ -603,14 +709,22 @@ export default function PullToast() {
         delete n[it.id];
         return n;
       });
-      pullCrossLan(crossItemBase(o), o.from, o.ext_file_ep, o.manifest).catch(() => {
-        setPulling((prev) => prev.filter((x) => x.id !== it.id));
-        setItems((prev) => (prev.some((x) => x.id === it.id) ? prev : [it, ...prev]));
-        setResults((prev) => ({
-          ...prev,
-          [it.id]: { ok: false, msg: '拉取失败，可重试' },
-        }));
-      });
+      // 先探对端可达性，再拉取：失败时把「哪条地址、什么原因」显示出来，
+      // 而不是只给一句「拉取失败，可重试」（用户实测 2026-09-22）。
+      assertCrossPeerReachable(o)
+        .then(() => pullCrossLan(crossItemBase(o), o.from, o.ext_file_ep, o.manifest))
+        .catch((e: unknown) => {
+          // 失败即终结：不放回列表；后端在失败分支已把该通知从待复制清单删除
+          // （见 tauri_cmd::pull_cross_lan）。
+          log(`跨 LAN 拉取失败：${itemNames(it)} —— ${String(e)}`);
+          setPulling((prev) => prev.filter((x) => x.id !== it.id));
+          // 同上：保留完整条目框，只在按钮位置显示错误
+          setCompleted((c) => ({ ...c, [it.id]: it }));
+          setResults((prev) => ({
+            ...prev,
+            [it.id]: { ok: false, msg: `拉取失败：${String(e)}` },
+          }));
+        });
     }
   };
 
@@ -676,6 +790,12 @@ export default function PullToast() {
               <span className="pt-size">{fmtSize(itemSize(it))}</span>
             </div>
             <div className="pt-sub">{itemFrom(it)}</div>
+            {/* 失败：保留上面的文件名/来源/大小，只把「拉取」按钮的位置换成错误文案 */}
+            {results[id]?.ok === false ? (
+              <div style={{ marginTop: '0.5rem' }}>
+                <span className="pt-err">✗ {results[id].msg}</span>
+              </div>
+            ) : results[id]?.ok === true ? (
             <div
               style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginTop: '0.5rem' }}
             >
@@ -699,6 +819,14 @@ export default function PullToast() {
                 <span className="pt-pct">100%</span>
               </div>
             </div>
+            ) : null}
+            {/* 成功文案也在这个框里显示：上一轮把裸文本结果区改成"只兜底"后，
+                「✓ 已保存到本地（内网直连）」被过滤掉了（回归，2026-09-23 一并修）。 */}
+            {results[id]?.ok === true ? (
+              <div style={{ marginTop: '0.35rem' }}>
+                <span className="pt-ok">✓ {results[id].msg}</span>
+              </div>
+            ) : null}
           </div>
         ))}
 
@@ -721,19 +849,27 @@ export default function PullToast() {
           </div>
         ))}
 
-        {Object.entries(results).map(([k, r]) => (
-          <div className="pt-item pt-result" key={k}>
-            <span className={r.ok ? 'pt-ok' : 'pt-err'}>
-              {r.ok ? '✓ ' : '✗ '}
-              {r.msg}
-            </span>
-          </div>
-        ))}
+        {/* 兜底：找不到条目可渲染时的结果文本（例如 fatal 且条目已不存在）。
+            正常失败条目已在 completed 里带完整信息渲染过，这里过滤掉避免重复显示。 */}
+        {Object.entries(results)
+          .filter(([k]) => !(k in completed))
+          .map(([k, r]) => (
+            <div className="pt-item pt-result" key={k}>
+              <span className={r.ok ? 'pt-ok' : 'pt-err'}>
+                {r.ok ? '✓ ' : '✗ '}
+                {r.msg}
+              </span>
+            </div>
+          ))}
       </div>
       <div className="pt-foot" ref={footRef}>
         <span className="pt-foot-msg">
           {pulling.length > 0 ? (
             <span className="pt-foot-wait">等待任务完成后关闭…</span>
+          ) : Object.values(results).some((r) => r && r.ok === false) ? (
+            <span className="pt-foot-wait">拉取失败 — 请手动关闭</span>
+          ) : holdLeft > 0 ? (
+            <span className="pt-foot-count">{holdLeft} 秒后自动关闭</span>
           ) : countdown > 0 ? (
             <span className="pt-foot-count">{countdown} 秒后自动关闭</span>
           ) : autoHideMs > 0 ? (

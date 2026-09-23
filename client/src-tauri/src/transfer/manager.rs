@@ -1568,7 +1568,7 @@ impl ConnectionHub {
                             serde_json::json!({
                                 "transfer_id": transfer_id,
                                 "message": format!(
-                                    "对端「{}」当前未连接，已保留在待拉取列表，可稍后重试",
+                                    "对端「{}」当前未连接，已从待拉取列表移除；请让对方重新复制一次",
                                     offer.device_name
                                 ),
                                 "failed_files": [],
@@ -1576,17 +1576,10 @@ impl ConnectionHub {
                             }),
                         );
                     }
-                    // 放回待拉取清单（对端重连后可再试），并同步维护插入顺序与上限
-                    let mut g = self.pending_offers.lock();
-                    g.insert(transfer_id.clone(), offer);
-                    drop(g);
-                    Self::track_and_trim(
-                        &self.pending_offers,
-                        &self.pending_offer_order,
-                        &transfer_id,
-                        MAX_PENDING_OFFERS,
-                        "待拉取清单（pending_offers）",
-                    );
+                    // 失败即终结（用户要求 2026-09-23）：**不放回**待拉取清单。
+                    // 此前放回是为了「对端重连后可再试」，但那会让列表里留下点不动的条目、
+                    // 多条时用户也分不清是哪条失败。现在与跨 LAN 侧一致：想再要就重新复制。
+                    tracing::info!("拉取失败（对端未连接）：条目已从待拉取清单移除 {transfer_id}");
                     return;
                 }
             }

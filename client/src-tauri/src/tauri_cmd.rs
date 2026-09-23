@@ -480,6 +480,19 @@ pub fn clear_received_offers(state: State<AppState>, app: AppHandle) -> serde_js
     serde_json::json!({ "pending": pending, "cross_lan": cross_lan })
 }
 
+/// 丢弃单条**局域网（P2P）**待拉取条目 —— 拉取失败即终结。
+///
+/// 与跨 LAN 侧的失败删除对称（用户要求 2026-09-23：「失败就失败，直接删除重新复制」）。
+/// 只动内存清单，不碰进行中的传输；想再要这份文件就让对端重新复制。
+#[tauri::command]
+pub fn drop_pending_offer(state: State<AppState>, transfer_id: String) -> usize {
+    let n = state
+        .hub
+        .drop_pending_offers(std::slice::from_ref(&transfer_id));
+    tracing::info!("拉取失败即终结：丢弃待拉取条目 {transfer_id}（移除 {n} 条）");
+    n
+}
+
 /// 弹出「待拉取文件」小窗，定位统一由 Rust 负责：
 /// macOS 落在屏幕右上角（跟随菜单栏托盘），Windows 落在右下角（跟随任务栏）。
 /// 前端只在待拉取清空时主动 hide()，避免各端坐标错位。
@@ -553,12 +566,14 @@ pub fn debug_report_mount(label: String, is_toast: bool) {
     );
 }
 
-/// [DEBUG] 小窗诊断日志：前端把关键节点上报到 Rust 日志。
-/// 用于排查「窗口弹了但内容为空」「点关闭没反应」这类只看截图/日志查不出的前端问题。
-#[cfg(debug_assertions)]
+/// 前端诊断日志：把关键节点/错误文案上报到 Rust 日志（**release 也启用**）。
+///
+/// 2026-09-22 起从前端 DEV-only 改为始终可用：那次排查「拉取弹窗里显示的错误」时，
+/// 用户看得见报错、我们却因为日志里一行都没有而完全查不到 —— 前端可见状态必须能落盘。
 #[tauri::command]
-pub fn debug_toast_log(msg: String) {
-    tracing::info!("[TOAST] {msg}");
+pub fn frontend_log(window: tauri::WebviewWindow, msg: String) {
+    // 带窗口 label：主窗口 / 小窗 / 日志窗口共用同一命令，日志里能区分来源。
+    tracing::info!("[前端/{}] {}", window.label(), msg);
 }
 
 /// [DEBUG] 模拟一次**跨 LAN** 文件通知：走与真实跨 LAN 完全相同的链路
@@ -774,7 +789,8 @@ pub async fn pull_cross_lan(
     let sc = state.server_conn.lock().clone();
     let sc = sc.ok_or_else(|| "服务端未连接".to_string())?;
     let r = sc
-        .pull_cross_lan(&pull_id, &from, &ext_file_ep, manifest)
+        // manifest 传引用计数的克隆：失败分支要用原始值定位并删除该通知
+        .pull_cross_lan(&pull_id, &from, &ext_file_ep, manifest.clone())
         .await
         .map_err(|e| e.to_string());
     // 用户主动取消：以专属事件收口（带 cancelled 标记），不走失败补发，
@@ -809,6 +825,33 @@ pub async fn pull_cross_lan(
     // 拉取过程由 server_conn 实时上报 file-pull-progress / file-pull-complete(ok:true)。
     // 仅当整条拉取失败（如网络不可达）时在此补发一次失败完成事件，便于前端提示。
     if let Err(e) = &r {
+        // **失败即终结**（用户要求 2026-09-23：「失败就失败，直接删除重新复制」）：
+        // 把这条通知从待复制清单真正删掉。不删的话窗口下次挂载会用后端快照回填，
+        // 失败条目又冒出来 —— 用户视角就是「删不掉、又回来了」，且看不出是哪条失败。
+        // 想再要这份文件就让对端重新复制一次。
+        let removed = {
+            let mut g = state.cross_lan_offers.lock();
+            let before = g.len();
+            g.retain(|o| {
+                !(o.from == from && o.ext_file_ep == ext_file_ep && o.manifest == manifest)
+            });
+            before - g.len()
+        };
+        state.enforce_received_cap();
+        tracing::info!(
+            "跨 LAN 拉取 {pull_id} 失败：条目已从待复制清单删除（{removed} 条），原因：{e}"
+        );
+        // 广播给两个窗口：主窗口/小窗各持一份 state，不广播就会残留点不动的死条目。
+        // 带身份（from + ep + manifest）让前端能算出同一条的 id（crossItemBase 只依赖这三项）。
+        let _ = app.emit(
+            "cross-lan-offer-dropped",
+            serde_json::json!({
+                "from": from,
+                "ext_file_ep": ext_file_ep,
+                "manifest": manifest,
+                "reason": "failed",
+            }),
+        );
         let _ = app.emit(
             "file-pull-complete",
             serde_json::json!({
