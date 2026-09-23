@@ -66,7 +66,7 @@ fn parse_ip_lax(raw: &str) -> Option<IpAddr> {
 /// 直连地址既非环回也不在受信列表（客户端直连 20070，或**未经声明**的代理）时
 /// **一律忽略转发头**：那些头在公网可任意伪造，采信等于把退避键交给攻击者选择。
 /// 注意「异机反代」必须在 `TRUSTED_PROXIES` 里显式声明代理出口 IP 才会被采信——
-/// 2026-09-17 实测的生产形态就是异机 1Panel/OpenResty（203.0.113.20）→ 源站，
+/// 2026-09-17 实测的生产形态就是异机 1Panel/OpenResty（如 203.0.113.20）→ 源站，
 /// 只认环回会让该路径退回单桶。
 fn client_throttle_key(
     peer: Option<SocketAddr>,

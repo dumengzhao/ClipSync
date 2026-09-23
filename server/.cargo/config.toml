@@ -8,7 +8,10 @@
 # 本机绝对路径见下方 linker。换机器时把路径改成自己 ~/.cargo/bin/ld.lld.exe 即可。
 # 构建时需 RUSTC_BOOTSTRAP=1（linker-flavor=gnu-lld 在 stable 仍属不稳定项）。
 [target.x86_64-unknown-linux-musl]
-linker = "C:\\Users\\<用户名>\\.cargo\\bin\\ld.lld.exe"
+# ⚠️ 不要提交本机 linker 的绝对路径：既泄露用户名与目录结构，也会让 clone 下来的人编译失败。
+# 需要交叉编译 musl 时用环境变量指定即可（无需改本文件）：
+#   CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="$HOME/.cargo/bin/ld.lld.exe" RUSTC_BOOTSTRAP=1 ./package.sh
+# linker = "<你的 ld.lld 路径>"
 rustflags = [
   "-Z", "unstable-options",
   "-C", "linker-flavor=gnu-lld",

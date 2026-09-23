@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 #
-# 一键部署到腾讯云中继服务端（在拥有 root@203.0.113.10 SSH 密钥的机器上运行）。
+# 一键部署到自建中继服务端（在拥有目标机 SSH 密钥的机器上运行）。
 # 前置：先 package.sh 生成 dist/clipsync-server-linux/。
 # 用法：
-#   ./deploy.sh                  # 默认部署到 root@203.0.113.10
+#   ./deploy.sh user@host        # 必须显式指定目标机（仓库不内置任何默认地址）
 #   ./deploy.sh user@host:port   # 自定义目标（覆盖 HOST 默认值）
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIST="$HERE/dist/clipsync-server-linux"
-HOST="${1:-root@203.0.113.10}"
+HOST="${1:?用法: ./deploy.sh <user@host> —— 仓库不提供默认目标机，请显式指定}"
 
 [ -d "$DIST" ] || {
   echo "找不到 $DIST，请先运行 package.sh 交叉编译并打包" >&2
