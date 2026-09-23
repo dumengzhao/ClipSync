@@ -54,12 +54,14 @@ jobs:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             label: linux-x64
+            platform: linux-x86_64
             # rpm 需要 rpmbuild，runner 上没装，因此不发 rpm
             bundles: deb,appimage
             extra_args: ''
           - os: macos-latest
             target: aarch64-apple-darwin
             label: macos-arm64
+            platform: darwin-aarch64
             bundles: app,dmg
             # CI 上没有本地那套 "ClipSync Dev" 证书，不覆盖会直接失败
             # （Signing with identity "ClipSync Dev" → no identity found）→ 显式用 ad-hoc 身份 "-"
@@ -67,6 +69,7 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             label: windows-x64
+            platform: windows-x86_64
             # 只发 NSIS：MSI 安装会绕过 installer.nsh，自更新入口会失效
             bundles: nsis
             extra_args: ''
@@ -167,3 +170,58 @@ jobs:
         # 资产上传接口（同一份权限）且一直成功，故改用同路径的 gh release upload。
         # 手动触发时当前 ref 不是 tag，必须显式给 tag 名。
         run: gh release upload "${{ inputs.tag || github.ref_name }}" "client/src-tauri/target/SHA256SUMS-${{ matrix.label }}.txt" --clobber
+
+      # 产出**本平台**的更新清单片段：{platform, file, sha256}
+      # 跨平台汇总必须在一个 job 里做 → 交给后面的 manifest job。
+      - name: Write platform manifest fragment
+        if: success()
+        working-directory: .
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" tools/make-manifest-fragment.py \
+            --platform "${{ matrix.platform }}" \
+            --search-dir client/src-tauri/target \
+            --out-dir client/src-tauri/target/manifest-fragment
+
+      - name: Upload manifest fragment
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: manifest-fragment-${{ matrix.platform }}
+          path: client/src-tauri/target/manifest-fragment/${{ matrix.platform }}.json
+          if-no-files-found: error
+
+  # 汇总各平台片段 → latest.json → 作为 **Release 资产** 上传。
+  # 两条链路都读这个文件：
+  #   客户端「检查更新 GitHub」→ https://github.com/<repo>/releases/latest/download/latest.json
+  #   服务端「从 GitHub 拉取」 → 同上（再转存到自己的服务器，供 GitHub 不可达的客户端使用）
+  # 注意：**草稿 Release 不生效**，必须先 Publish —— 与现有「草稿 → 手动发布」流程一致。
+  manifest:
+    name: publish latest.json
+    needs: [release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: manifest-fragment-*
+          path: fragments
+          merge-multiple: true
+
+      - name: Assemble latest.json
+        run: |
+          python3 tools/build-latest-json.py \
+            --repo "${{ github.repository }}" \
+            --tag "${{ inputs.tag || github.ref_name }}" \
+            --fragments fragments \
+            --out latest.json \
+            --notes "ClipSync ${{ inputs.tag || github.ref_name }}（三平台安装包）"
+
+      - name: Upload latest.json to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # 与 checksum 上传同一条路径：gh release upload 在本仓库可用，
+        # softprops/action-gh-release 走 PATCH update-a-release 会返回 403。
+        run: gh release upload "${{ inputs.tag || github.ref_name }}" latest.json --clobber
