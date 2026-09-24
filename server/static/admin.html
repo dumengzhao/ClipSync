@@ -292,6 +292,26 @@
             <button id="updSubmit" type="button" data-page-node-id="bfnXa4NyOGuAghY9a13vaG">发布更新</button>
           </div>
           <div class="hint" data-page-node-id="eQ97gcqmSmZYR43VP4BRmZ">选好各平台安装包、填好版本号即可；安装包 <b data-page-node-id="p01iWwZwb0r0xjmSu2BQP1">sha256 由服务端在落盘时计算</b>并写入清单（不再依赖浏览器加密能力）。服务端按<b>平台键合并</b>进线上 latest.json：本次上传的平台覆盖更新，未涉及的平台原样保留，无需一次传齐。</div>
+          <!-- ===== GitHub 同步（可选；服务端需配置 GITHUB_REPO 才可用）===== -->
+          <div class="fld" style="min-width:280px">
+            <label>GitHub 同步（可选）</label>
+            <div class="hint" id="ghInfo">加载中…</div>
+          </div>
+          <div class="fld" style="min-width:190px">
+            <label>定时同步</label>
+            <div style="display:flex;align-items:center;gap:.5rem">
+              <input type="checkbox" id="ghEnabled" />
+              <span class="hint" style="margin:0">开启</span>
+              <input id="ghInterval" type="number" min="5" step="5" style="width:96px" placeholder="间隔(分)" />
+            </div>
+          </div>
+          <div class="fld">
+            <label>&nbsp;</label>
+            <div style="display:flex;gap:.5rem">
+              <button id="ghRun" type="button">从 GitHub 同步</button>
+              <button id="ghSave" type="button" class="ghost sm">保存定时设置</button>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -709,7 +729,65 @@ async function loadUpdateInfo(){
     box.innerHTML='尚未发布更新。填版本号 + 选安装包即可发布。';
   }
   refreshUpdateHints(); // 线上平台键拿到后，可给已选文件补一次架构兜底
+  loadGithubSync();     // 顺带刷新「GitHub 同步」区的状态
 }
+
+/* ===== GitHub 同步（可选）=====
+   服务端从 GitHub Release 把安装包转存到自己这里；GitHub 直连不通的客户端
+   走原来的更新入口（relay）即可拿到同一个版本。 */
+async function loadGithubSync(){
+  const box=$('#ghInfo');
+  if(!box) return;
+  try{
+    const r=await api('/api/admin/github-sync');
+    if(!r.configured){
+      box.innerHTML='未启用：服务端未配置 <b>GITHUB_REPO</b>（如 dumengzhao/ClipSync），配置后重启服务即可。';
+      $('#ghRun').disabled=true; $('#ghSave').disabled=true; $('#ghEnabled').disabled=true;
+      return;
+    }
+    $('#ghEnabled').checked=!!r.enabled;
+    $('#ghEnabled').disabled=false;
+    $('#ghInterval').value=r.interval_minutes||720;
+    $('#ghRun').disabled=false; $('#ghSave').disabled=false;
+    const last=r.last_run_at?`上次 ${esc(r.last_run_at)} · ${esc(r.last_result||'-')}`:'尚未运行过';
+    box.innerHTML=`仓库 <b>${esc(r.repo)}</b> · ${last}`;
+  }catch(e){
+    box.textContent='读取失败：'+e.message;
+  }
+}
+
+async function runGithubSync(){
+  const box=$('#ghInfo');
+  $('#ghRun').disabled=true;
+  box.textContent='正在从 GitHub 同步（逐个平台下载并校验，耗时取决于包大小）…';
+  try{
+    const r=await api('/api/admin/github-sync/run',{method:'POST'});
+    const lines=(r.report.outcomes||[]).map(o=>
+      `${esc(o.platform)}：${esc(o.status)}${o.detail?'（'+esc(o.detail)+'）':''}`).join('<br>');
+    box.innerHTML=`<span style="color:var(--cyan)">✓ 同步完成</span>：版本 <b>${esc(r.report.version)}</b>（合并 ${r.report.merged_platforms} 个平台）<br>${lines||'（无可同步平台）'}`;
+    await loadUpdateInfo(); // 清单已更新，刷新线上版本显示
+  }catch(e){
+    box.textContent='同步失败：'+e.message;
+  }finally{
+    $('#ghRun').disabled=false;
+  }
+}
+
+async function saveGithubConfig(){
+  const box=$('#ghInfo');
+  try{
+    const body={enabled:$('#ghEnabled').checked, interval_minutes:parseInt($('#ghInterval').value||'720',10)};
+    await api('/api/admin/github-sync/config',{method:'POST',body:JSON.stringify(body)});
+    await loadGithubSync();
+    toast('已保存 GitHub 同步设置');
+  }catch(e){
+    box.textContent='保存失败：'+e.message;
+  }
+}
+
+// 存在性判断：区块若被移除/隐藏，别让整段脚本在这里崩掉
+if($('#ghRun')) $('#ghRun').onclick=runGithubSync;
+if($('#ghSave')) $('#ghSave').onclick=saveGithubConfig;
 
 function updAddRow(){
   const row=document.createElement('div');

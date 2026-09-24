@@ -18,6 +18,9 @@ anyhow = "1"
 hmac = "0.12"
 base64 = "0.22"
 rust-embed = "8"
+# 注意：**服务端刻意不引入 reqwest/rustls** —— 它们会拉进含 C 代码的 ring，
+# 而 ring 需要 musl C 编译器（本机与部署机都没有、也没有 sudo）→ 会直接毁掉
+# 「musl 静态单文件」这个交付形态 ✗。GitHub 同步走系统 curl 子进程（见 github_sync.rs）。
 
 # Windows 服务支持（仅在 Windows 编译时启用；非 Windows 目标忽略）
 [target.'cfg(windows)'.dependencies]

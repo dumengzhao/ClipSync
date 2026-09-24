@@ -23,13 +23,30 @@ cargo build --release --target x86_64-unknown-linux-musl   # 静态单二进制
 ./target/x86_64-unknown-linux-musl/release/clipsync-server
 ```
 
-> **从 Windows 主机交叉编译** 还需两步（纯 Rust，无需安装任何 Linux C 工具链）：
-> 1. 复制 Rust 自带的 ELF 链接器 `ld.lld` 到 cargo bin：
->    `cp "$HOME/.rustup/toolchains/stable-x86_64-pc-windows-msvc/lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe" "$HOME/.cargo/bin/ld.lld.exe"`
-> 2. 构建时开启 `RUSTC_BOOTSTRAP=1`（`.cargo/config.toml` 已为该目标配好 `linker-flavor=gnu-lld` + `link-self-contained=yes`，用自带 musl libc 启动对象与 rust-lld）。
+> **在 Linux 上构建（推荐；CI 也走这条路）**：直接跑上面那条命令即可。
+> rustup 自带自包含的 musl 启动对象（`link-self-contained`），**不需要 `musl-gcc`，也不需要任何额外 config**，
+> 实测 30 秒左右出静态产物。
 >
-> 产出为 **全静态 x86_64 ELF**，可直接拷到任意 glibc / musl 的 Linux 主机运行，零运行时依赖。
-> 注：服务端会话 JWT 已改为纯 Rust 自实现 HS256（移除 `jsonwebtoken`/`ring`），故整个依赖图纯 Rust，musl 目标无需 C 编译器。
+> **在 Windows 上交叉编译（可选）**：需要本机自备 lld，并**临时**建一份**只属于本机、绝不提交**的
+> `server/.cargo/config.toml`：
+>
+> ```toml
+> [target.x86_64-unknown-linux-musl]
+> linker = "C:\\Users\\<你的用户名>\\.cargo\\bin\\ld.lld.exe"
+> rustflags = ["-Z", "unstable-options", "-C", "linker-flavor=gnu-lld", "-C", "link-self-contained=yes"]
+> ```
+>
+> 前置（一次性）：把 Rust 自带的 ELF 链接器复制成 `ld.lld.exe` 放进 cargo bin
+> （`cp "$HOME/.rustup/toolchains/stable-x86_64-pc-windows-msvc/lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe" "$HOME/.cargo/bin/ld.lld.exe"`），
+> 然后 `RUSTC_BOOTSTRAP=1 cargo build --release --target x86_64-unknown-linux-musl`。
+>
+> ⚠️ **这份 config 会破坏 Linux 原生构建**（Linux 上没有 `ld.lld`，且 `-Z` 在 stable 上需要 RUSTC_BOOTSTRAP），
+> 因此**它不随仓库提交** —— 2026-09-24 已从仓库删除该文件，需要交叉编译时按上面自建。
+>
+> 产出为 **全静态 x86_64 ELF**（`file` 显示 `static-pie linked`、`ldd` 显示 `statically linked`），
+> 可直接拷到任意 glibc / musl 的 Linux 主机运行，零运行时依赖。
+> 注：服务端依赖图**始终保持纯 Rust**（无 `ring` / `rustls` / `reqwest` / `openssl`）—— 这是 musl 静态产物的前提，
+> `release.yml` 的 `server-musl` job 有门禁在守（引到 C 依赖会直接失败）。
 
 前置 nginx 终止 TLS 并反代 `/ws`、`/api/admin`、`/admin`。可选 `Dockerfile` + `docker-compose.yml`。
 

@@ -1,6 +1,7 @@
 mod admin;
 mod admin_ws;
 mod crypto;
+mod github_sync;
 mod hub;
 mod models;
 mod state;
@@ -154,6 +155,13 @@ fn build_router(state: Arc<AppState>) -> axum::Router {
         .layer(axum::extract::DefaultBodyLimit::max(
             state.update_max_upload.min(usize::MAX as u64) as usize,
         ))
+        // GitHub 同步：手动触发 / 读配置 / 改开关（都在 admin_auth 之下）
+        .route("/api/admin/github-sync", get(github_sync::admin_get))
+        .route("/api/admin/github-sync/run", post(github_sync::admin_run))
+        .route(
+            "/api/admin/github-sync/config",
+            post(github_sync::admin_set_config),
+        )
         .route_layer(from_fn_with_state(state.clone(), admin::admin_auth));
 
     axum::Router::new()
@@ -181,10 +189,15 @@ fn listen_addr() -> String {
 
 /// 启动 axum 服务，直到 shutdown future 触发才优雅退出。
 async fn serve(
+    state: Arc<AppState>,
     router: axum::Router,
     listen: String,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) {
+    // GitHub 同步的定时轮询：未配置 GITHUB_REPO 时内部立即返回，几乎零开销。
+    // 放在 serve 里而不是 load_state 里：服务模式下的 load_state 跑在 tokio 运行时之外，
+    // 在那里 tokio::spawn 会 panic。
+    github_sync::spawn_ticker(state);
     let listener = tokio::net::TcpListener::bind(&listen)
         .await
         .expect("bind listen addr");
@@ -215,9 +228,9 @@ async fn main() {
     }
 
     let state = load_state();
-    let router = build_router(state);
+    let router = build_router(state.clone());
     let listen = listen_addr();
-    serve(router, listen, async {
+    serve(state, router, listen, async {
         let _ = tokio::signal::ctrl_c().await;
     })
     .await;
@@ -266,11 +279,11 @@ fn run_service() -> windows_service::Result<()> {
     })?;
 
     let state = load_state();
-    let router = build_router(state);
+    let router = build_router(state.clone());
     let listen = listen_addr();
 
     let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
-    rt.block_on(serve(router, listen, async {
+    rt.block_on(serve(state, router, listen, async {
         let _ = shutdown_rx.await;
     }));
 

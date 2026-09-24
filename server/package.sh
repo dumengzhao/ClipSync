@@ -10,7 +10,8 @@ OUT="$HERE/dist/clipsync-server-linux"
 
 [ -f "$BIN" ] || {
   echo "找不到二进制：$BIN" >&2
-  echo "先交叉编译：RUSTC_BOOTSTRAP=1 cargo build --release --target x86_64-unknown-linux-musl" >&2
+  echo "先在 Linux 上构建：cargo build --release --target x86_64-unknown-linux-musl" >&2
+  echo "（Windows 交叉编译见 server/README.md「构建与部署」，需本机自备 lld + 临时 config）" >&2
   exit 1
 }
 
