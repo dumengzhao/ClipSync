@@ -31,6 +31,16 @@ import argparse
 import json
 import pathlib
 import sys
+
+# Windows 控制台默认用 ANSI 代码页（cp1252 / cp936）：**直接打印中文会抛 UnicodeEncodeError 并以退出码 1 收场**
+# —— 2026-09-24 实测事故：release 工作流的 windows-x64 job 就是挂在我们的片段脚本这一步（macOS/Linux 正常）。
+# 这里把标准流显式切到 UTF-8，脚本自身保证可移植（不依赖调用方的终端/CI 设置）。
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None:
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
 from datetime import datetime, timezone
 
 # 与服务端 update.rs 的 PLATFORMS 白名单保持一致

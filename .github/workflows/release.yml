@@ -177,8 +177,14 @@ jobs:
         if: success()
         working-directory: .
         shell: bash
+        # 双保险：脚本内部也会把标准流切成 UTF-8，这里再显式声明一次环境变量。
+        # （Windows 控制台默认 cp1252，打印中文会让 Python 直接以退出码 1 退出 ✗）
+        env:
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: "1"
         run: |
           if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          echo "使用 Python 解释器: $PY"
           "$PY" tools/make-manifest-fragment.py \
             --platform "${{ matrix.platform }}" \
             --search-dir client/src-tauri/target \
@@ -186,7 +192,7 @@ jobs:
 
       - name: Upload manifest fragment
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: manifest-fragment-${{ matrix.platform }}
           path: client/src-tauri/target/manifest-fragment/${{ matrix.platform }}.json
@@ -204,13 +210,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: manifest-fragment-*
           path: fragments
           merge-multiple: true
 
       - name: Assemble latest.json
+        env:
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: "1"
         run: |
           python3 tools/build-latest-json.py \
             --repo "${{ github.repository }}" \
