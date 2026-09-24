@@ -16,10 +16,59 @@ permissions:
   contents: write
 
 jobs:
+  # 廉价前置判断：**这次到底要不要构建**。
+  #
+  # 为什么需要它：在 GitHub 上点「Publish release」时，若该 tag 的 ref 还不存在，
+  # GitHub 会在这一刻才创建 tag；而「创建 tag」属于 push 事件 → 会把本工作流
+  # **再触发一次**。那次运行检出的是 **tag 指向的那个提交**，而它往往不是你以为的
+  # 最新提交（草稿是更早的运行创建的 ⇒ tag 就指向那个旧提交）。
+  # 后果：用旧代码重建、把 Release 上已经好的资产**覆盖**掉；若中途失败，还会留下
+  # 「资产已更新、latest.json 没更新」的不一致 → 两端 sha256 校验必然失败。
+  # （2026-09-24 实踩：run #6 就是这样把 run #5 的成果毁掉的。）
+  guard:
+    name: decide whether to build
+    runs-on: ubuntu-24.04
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+    steps:
+      - name: Decide
+        id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          # 人工触发 = 明确意图（就是要重建）→ 永远构建
+          if [ "$EVENT" != "push" ]; then
+            echo "人工触发（$EVENT）→ 按意图构建"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # tag 事件：该 tag 的 Release 若已存在且**已发布**，说明本次是
+          # 「Publish 草稿」自动创建 tag 引起的二次触发 → 跳过，别覆盖已发布的资产。
+          draft=$(gh release view "$TAG" --json isDraft --jq '.isDraft' 2>/dev/null || echo missing)
+          case "$draft" in
+            false)
+              echo "::notice::tag $TAG 的 Release 已发布 —— 本次为 Publish 触发 tag 创建引起的二次运行，跳过重复构建，保留现有资产与 latest.json"
+              echo "build=false" >> "$GITHUB_OUTPUT"
+              ;;
+            true)
+              echo "tag $TAG 的 Release 仍是草稿 → 正常构建"
+              echo "build=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "tag $TAG 还没有 Release → 正常构建"
+              echo "build=true" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
   # 廉价的前置校验：tag 与包内三处版本必须一致，否则不该烧 3 个平台的打包时间。
   # 不一致时的典型后果：Release 标题写 v0.4.0，而安装包文件名与客户端自动更新比较的
   # version 仍是 0.3.1 —— 用户更新链路会静默错乱。
   verify-version:
+    needs: [guard]
+    if: needs.guard.outputs.build == 'true'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
@@ -46,7 +95,8 @@ jobs:
 
   release:
     name: release (${{ matrix.label }})
-    needs: verify-version
+    needs: [guard, verify-version]
+    if: needs.guard.outputs.build == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -205,7 +255,8 @@ jobs:
   # 注意：**草稿 Release 不生效**，必须先 Publish —— 与现有「草稿 → 手动发布」流程一致。
   manifest:
     name: publish latest.json
-    needs: [release]
+    needs: [guard, release]
+    if: needs.guard.outputs.build == 'true'
     # 显式钉版本：`ubuntu-latest` 会在 2026-10-19 静默切到 Ubuntu 26（GitHub 已发 notice），
     # 与本仓其余 job 一致改用钉死的 LTS，避免「某天突然换了系统」影响清单生成。
     runs-on: ubuntu-24.04
@@ -246,7 +297,8 @@ jobs:
   #      所以这里加了一道门禁，把「有人不小心引入 C 依赖」挡在发布之前。
   server-musl:
     name: server (linux musl static)
-    needs: [release]
+    needs: [guard, release]
+    if: needs.guard.outputs.build == 'true'
     # 同上：钉 LTS，别吃 `ubuntu-latest` 的静默迁移。
     runs-on: ubuntu-24.04
     steps:
@@ -300,4 +352,30 @@ jobs:
             /tmp/clipsync-server-linux-x86_64-musl
           gh release upload "$TAG" server/clipsync-server-linux.tar.gz --clobber
           gh release upload "$TAG" /tmp/clipsync-server-linux-x86_64-musl --clobber
+
+  # 收尾自校验：**latest.json 必须与 Release 上真实存在的字节逐一对得上**。
+  #
+  # 为什么必须是「总是运行」的独立 job：它要覆盖两种时机 ——
+  #   ① 正常发版：清单刚写进草稿就校验 → **在 Publish 之前**就把不一致挡出来；
+  #   ② Publish 触发的那次二次运行：构建被 guard 跳过，只剩它能告诉你
+  #      「刚发布的这份 Release 是坏的」。
+  # 只看 Release 上的实际资产（不看构建产物），所以资产被谁覆盖过都躲不过。
+  verify-manifest:
+    name: verify release consistency
+    needs: [guard, manifest]
+    # always() 是有意的：manifest 被 guard 跳过时也必须跑，否则最该报警的场景反而静默。
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Verify latest.json against release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: "1"
+        run: |
+          python3 tools/verify-release-manifest.py \
+            --repo "${{ github.repository }}" \
+            --tag "${{ inputs.tag || github.ref_name }}"
 
