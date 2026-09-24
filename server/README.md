@@ -70,6 +70,7 @@ cargo build --release --target x86_64-unknown-linux-musl   # 静态单二进制
 2. **放文件**（以 `/opt/clipsync-server` 为例）：
    - `clipsync-server` → `/opt/clipsync-server/clipsync-server`（`chmod +x`，属主 `root`）
    - `clipsync-server.env.example` 复制为 `/opt/clipsync-server/clipsync-server.env` 并改密码
+     （**所有环境变量都写在这个文件里**，systemd 用 `EnvironmentFile=` 读它；想启用「服务端从 GitHub 拉取更新包」就在此加一行 `GITHUB_REPO=owner/name`，改完 `systemctl restart clipsync-server`）
    - `clipsync-server.service` → `/etc/systemd/system/`
    - 建用户/目录：`useradd -r -d /opt/clipsync-server -s /usr/sbin/nologin clipsync && mkdir -p /opt/clipsync-server/data && chown -R clipsync:clipsync /opt/clipsync-server`
 3. **起服务**：
