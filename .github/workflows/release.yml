@@ -37,6 +37,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag || github.ref_name }}
           EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           # 人工触发 = 明确意图（就是要重建）→ 永远构建
@@ -45,23 +46,42 @@ jobs:
             echo "build=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # tag 事件：该 tag 的 Release 若已存在且**已发布**，说明本次是
-          # 「Publish 草稿」自动创建 tag 引起的二次触发 → 跳过，别覆盖已发布的资产。
-          draft=$(gh release view "$TAG" --json isDraft --jq '.isDraft' 2>/dev/null || echo missing)
-          case "$draft" in
-            false)
-              echo "::notice::tag $TAG 的 Release 已发布 —— 本次为 Publish 触发 tag 创建引起的二次运行，跳过重复构建，保留现有资产与 latest.json"
+
+          # tag 事件：该 tag 的 Release 若**已发布**，说明本次是「Publish 草稿」
+          # 自动创建 tag（或人工移动 tag）引起的二次触发 → 跳过，别覆盖已发布的资产。
+          #
+          # ⚠️ 两个必须注意的点（2026-09-24 首次上线就把两条都踩了）：
+          #   ① 本 job **没有 actions/checkout**，`gh` 拿不到 git remote 会直接失败
+          #      ⇒ 必须显式 --repo / 走 api 路径带上仓库名；
+          #   ② 绝不能用 `|| echo missing` 之类的写法吞掉退出码 —— 那会把「gh 自己出错」
+          #      静默降级成「按需要构建」，guard 就形同虚设了。
+          #      （当时日志里明明写着「还没有 Release」，而 Release 明明是已发布的。）
+          # 用 api 而不是 `gh release view`：前者对草稿一律返回 404，正好让
+          # 「已发布」与「其余一切（无 Release / 草稿）」天然二分，不用再解析字段。
+          err=""
+          if draft=$(gh api "repos/$REPO/releases/tags/$TAG" --jq '.draft' 2>&1); then
+            if [ "$draft" = "false" ]; then
+              echo "::notice::tag $TAG 的 Release 已发布 —— 本次为 Publish 触发 tag 创建 / 人工移动 tag 引起的二次运行，跳过重复构建，保留现有资产与 latest.json"
               echo "build=false" >> "$GITHUB_OUTPUT"
-              ;;
-            true)
-              echo "tag $TAG 的 Release 仍是草稿 → 正常构建"
-              echo "build=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "tag $TAG 的 Release 仍是草稿 → 正常构建"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          else
+            err="$draft"
+          fi
+
+          case "$err" in
+            *"HTTP 404"*|*"Not Found"*)
+              echo "tag $TAG 上还没有 Release → 正常构建"
               ;;
             *)
-              echo "tag $TAG 还没有 Release → 正常构建"
-              echo "build=true" >> "$GITHUB_OUTPUT"
+              # 查不动 ≠ 没有：明确告警，别让一次 API 故障反过来掩盖真实状态。
+              echo "::warning::查询 tag $TAG 的 Release 状态失败，保守按「需要构建」处理：$err"
               ;;
           esac
+          echo "build=true" >> "$GITHUB_OUTPUT"
 
   # 廉价的前置校验：tag 与包内三处版本必须一致，否则不该烧 3 个平台的打包时间。
   # 不一致时的典型后果：Release 标题写 v0.4.0，而安装包文件名与客户端自动更新比较的
