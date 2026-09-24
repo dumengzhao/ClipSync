@@ -206,7 +206,9 @@ jobs:
   manifest:
     name: publish latest.json
     needs: [release]
-    runs-on: ubuntu-latest
+    # 显式钉版本：`ubuntu-latest` 会在 2026-10-19 静默切到 Ubuntu 26（GitHub 已发 notice），
+    # 与本仓其余 job 一致改用钉死的 LTS，避免「某天突然换了系统」影响清单生成。
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
@@ -234,3 +236,68 @@ jobs:
         # 与 checksum 上传同一条路径：gh release upload 在本仓库可用，
         # softprops/action-gh-release 走 PATCH update-a-release 会返回 403。
         run: gh release upload "${{ inputs.tag || github.ref_name }}" latest.json --clobber
+
+  # 服务端 Linux musl 静态产物：与客户端安装包放在同一个 Release 里，部署时整目录拷过去即可。
+  #
+  # 为什么单独一个 job：
+  #   1) 服务端**必须**是 musl 静态（零 .so 依赖，任意发行版都能跑）；
+  #   2) 而 musl 静态的前提是**依赖树纯 Rust** —— 只要引入 ring/rustls/reqwest 这类含 C 代码的 crate，
+  #      就需要 musl C 编译器，直接在 Windows 上交叉编译也会失败（2026-09-24 实测踩过）。
+  #      所以这里加了一道门禁，把「有人不小心引入 C 依赖」挡在发布之前。
+  server-musl:
+    name: server (linux musl static)
+    needs: [release]
+    # 同上：钉 LTS，别吃 `ubuntu-latest` 的静默迁移。
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "server -> target"
+
+      - name: 门禁：服务端依赖树不得含 C 依赖
+        run: |
+          cd server
+          if cargo tree -p clipsync-server | grep -E "(^|[^a-z-])(ring|rustls|reqwest|aws-lc-rs|openssl)( |$| v)"; then
+            echo "::error::服务端依赖树里出现了含 C 代码的依赖 —— 会毁掉 musl 静态构建，请改用纯 Rust 实现（例如 HTTP 走系统 curl）"
+            exit 1
+          fi
+          echo "✓ 服务端依赖树保持纯 Rust"
+
+      - name: 构建 musl 静态二进制
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cd server
+          cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: 校验确实是静态链接（不看「编译成功」就算数）
+        run: |
+          BIN=server/target/x86_64-unknown-linux-musl/release/clipsync-server
+          file "$BIN"
+          ldd "$BIN" 2>&1 | tee /tmp/ldd.txt || true
+          grep -q "statically linked" /tmp/ldd.txt || {
+            echo "::error::产物不是静态链接 —— 拷到目标机会依赖 .so，拒绝上传"
+            exit 1
+          }
+          grep -q "static-pie linked" <(file "$BIN") || echo "::warning::不是 static-pie（仍可用，但预期是 static-pie）"
+
+      - name: 打包部署目录
+        run: |
+          cd server
+          ./package.sh
+          tar czf clipsync-server-linux.tar.gz -C dist clipsync-server-linux
+
+      - name: 上传到 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # 与 checksum / latest.json 同一条路径（gh release upload 在本仓库可用）
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          cp server/target/x86_64-unknown-linux-musl/release/clipsync-server \
+            /tmp/clipsync-server-linux-x86_64-musl
+          gh release upload "$TAG" server/clipsync-server-linux.tar.gz --clobber
+          gh release upload "$TAG" /tmp/clipsync-server-linux-x86_64-musl --clobber
+
