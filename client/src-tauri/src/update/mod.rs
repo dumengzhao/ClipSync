@@ -730,16 +730,22 @@ mod tests {
         let ok = |u: &str| github_url_allowed(&reqwest::Url::parse(u).unwrap()).is_ok();
 
         // 允许：仓库本体 + 资产 CDN 实际落点
-        assert!(ok("https://github.com/dumengzhao/ClipSync/releases/download/v1/a.exe"));
+        assert!(ok(
+            "https://github.com/dumengzhao/ClipSync/releases/download/v1/a.exe"
+        ));
         assert!(ok("https://release-assets.githubusercontent.com/a/b"));
         assert!(ok("https://objects.githubusercontent.com/a/b"));
 
         // 拒绝：明文 http
-        assert!(!ok("http://github.com/dumengzhao/ClipSync/releases/download/v1/a.exe"));
+        assert!(!ok(
+            "http://github.com/dumengzhao/ClipSync/releases/download/v1/a.exe"
+        ));
 
         // 拒绝：其它域名
         assert!(!ok("https://evil.tld/a.exe"));
-        assert!(!ok("https://raw.githubusercontent.com/dumengzhao/ClipSync/main/a.exe"));
+        assert!(!ok(
+            "https://raw.githubusercontent.com/dumengzhao/ClipSync/main/a.exe"
+        ));
 
         // 关键：看像但不是的，不能被子串/后缀判断骗过（必须是精确主机名相等）
         assert!(!ok("https://github.com.evil.tld/a.exe"));

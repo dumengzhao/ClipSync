@@ -294,7 +294,8 @@ pub fn load_config(data_dir: &Path) -> SyncConfig {
 
 pub fn save_config(data_dir: &Path, cfg: &SyncConfig) -> Result<(), String> {
     let text = serde_json::to_string_pretty(cfg).map_err(|e| format!("序列化配置失败: {e}"))?;
-    crate::storage::atomic_write(&config_path(data_dir), &text).map_err(|e| format!("写入配置失败: {e}"))
+    crate::storage::atomic_write(&config_path(data_dir), &text)
+        .map_err(|e| format!("写入配置失败: {e}"))
 }
 
 // ---------- 纯函数（可单测） ----------
@@ -613,7 +614,10 @@ async fn curl_text(
         .output()
         .await
         .map_err(|e| {
-            hint_if_no_proxy(format!("无法启动 curl（服务端需要系统安装 curl）: {e}"), proxy)
+            hint_if_no_proxy(
+                format!("无法启动 curl（服务端需要系统安装 curl）: {e}"),
+                proxy,
+            )
         })?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
@@ -687,9 +691,12 @@ async fn download_verified(
         match sha256_file(dst) {
             Ok(got) if got == expected => return Ok("skipped"),
             Ok(got) => {
-                return Err(format!(
+                // 消息里带两个哈希，写成独立变量让 rustfmt 有稳定的布局
+                // （直接内联时它会在这两种排版之间来回震荡，`cargo fmt --check` 永远不通过）
+                let msg = format!(
                     "本地已有同名文件但哈希不同（本地 {got}，清单 {expected}）——已拒绝覆盖，请人工确认"
-                ))
+                );
+                return Err(msg);
             }
             Err(e) => return Err(format!("读取本地已有文件失败: {e}")),
         }
@@ -711,7 +718,10 @@ async fn download_verified(
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| {
-            hint_if_no_proxy(format!("无法启动 curl（服务端需要系统安装 curl）: {e}"), proxy)
+            hint_if_no_proxy(
+                format!("无法启动 curl（服务端需要系统安装 curl）: {e}"),
+                proxy,
+            )
         })?;
     let mut stdout = match child.stdout.take() {
         Some(s) => s,
@@ -781,18 +791,21 @@ async fn download_verified(
             proxy,
         ));
     }
-    let got: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    let got: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     if got != expected {
         let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(format!("sha256 校验失败（清单 {expected}，实际 {got}）——已丢弃下载文件"));
+        return Err(format!(
+            "sha256 校验失败（清单 {expected}，实际 {got}）——已丢弃下载文件"
+        ));
     }
     tokio::fs::rename(&tmp, dst)
         .await
         .map_err(|e| format!("重命名失败: {e}"))?;
-    tracing::info!(
-        "已下载 {platform}/{}（{total} 字节）",
-        basename_of(url)
-    );
+    tracing::info!("已下载 {platform}/{}（{total} 字节）", basename_of(url));
     Ok("downloaded")
 }
 
@@ -827,8 +840,9 @@ fn now_rfc3339() -> String {
 
 /// 执行一次同步。返回报告；任何**致命**问题（未配置 / 清单取不到 / 全部平台失败）都返回 Err。
 pub async fn sync_once(state: &Arc<AppState>) -> Result<SyncReport, String> {
-    let repo = repo_for(state)
-        .ok_or_else(|| "未配置仓库：请在管理页填写 owner/name，或给服务进程设置 GITHUB_REPO".to_string())?;
+    let repo = repo_for(state).ok_or_else(|| {
+        "未配置仓库：请在管理页填写 owner/name，或给服务进程设置 GITHUB_REPO".to_string()
+    })?;
     let cfg = load_config(&state.store.dir);
     let proxy = cfg.proxy.as_deref();
     if let Some(p) = proxy {
@@ -887,7 +901,10 @@ pub async fn sync_once(state: &Arc<AppState>) -> Result<SyncReport, String> {
             continue;
         }
         if !url_allowed(&entry.url) {
-            reject(&mut outcomes, format!("下载地址不在允许的域名内: {}", entry.url));
+            reject(
+                &mut outcomes,
+                format!("下载地址不在允许的域名内: {}", entry.url),
+            );
             continue;
         }
         let dst = files_root(state).join(platform).join(&name);
@@ -900,9 +917,7 @@ pub async fn sync_once(state: &Arc<AppState>) -> Result<SyncReport, String> {
                     detail: None,
                 });
                 // 只有真的拿到字节（含"本地已有且一致"）才把它写进清单
-                merged
-                    .platforms
-                    .insert(platform.clone(), entry.clone());
+                merged.platforms.insert(platform.clone(), entry.clone());
             }
             Err(e) => {
                 tracing::warn!("平台 {platform} 失败：{e}");
@@ -1076,7 +1091,10 @@ fn parse_rfc3339_epoch(s: &str) -> Option<u64> {
 /// POST /api/admin/github-sync/run —— 立即同步一次。
 pub async fn admin_run(State(state): State<Arc<AppState>>) -> Response {
     match run_and_record(&state).await {
-        Ok(report) => (StatusCode::OK, Json(serde_json::json!({ "ok": true, "report": report })))
+        Ok(report) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true, "report": report })),
+        )
             .into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
@@ -1386,9 +1404,7 @@ pub async fn admin_set_config(
 /// 「为什么没自动同步」这类问题基本靠这三行日志就能定位。
 pub fn spawn_ticker(state: Arc<AppState>) {
     let Some(repo) = repo_for(&state) else {
-        tracing::info!(
-            "GitHub 同步未启用（未配置仓库：管理页填 owner/name 或设置 GITHUB_REPO）"
-        );
+        tracing::info!("GitHub 同步未启用（未配置仓库：管理页填 owner/name 或设置 GITHUB_REPO）");
         return;
     };
     let cfg = load_config(&state.store.dir);
@@ -1468,7 +1484,10 @@ mod tests {
 
     #[test]
     fn proxy_validation_accepts_known_schemes() {
-        assert_eq!(validate_proxy("http://1.2.3.4:7890").unwrap(), "http://1.2.3.4:7890");
+        assert_eq!(
+            validate_proxy("http://1.2.3.4:7890").unwrap(),
+            "http://1.2.3.4:7890"
+        );
         assert_eq!(
             validate_proxy("  socks5h://user:pw@1.2.3.4:1080  ").unwrap(), // 首尾空白应被 trim
             "socks5h://user:pw@1.2.3.4:1080"
@@ -1491,16 +1510,16 @@ mod tests {
     #[test]
     fn proxy_validation_rejects_bad_input() {
         for bad in [
-            "",                                  // 空
-            "1.2.3.4:7890",                      // 无 scheme
-            "ftp://1.2.3.4:21",                  // 非白名单协议
-            "socks4://1.2.3.4:1080",             // 已淘汰
-            "http://1.2.3.4",                    // 缺端口
-            "http://:7890",                      // 缺主机
-            "http://1.2.3.4:",                   // 空端口
-            "http://1.2.3.4:",                   // 空端口
-            "http://1.2.3.4:7890\nX-Evil: 1",    // 换行注入（污染日志/参数）
-            "http://1.2.3.4:7890 x",             // 含空格
+            "",                               // 空
+            "1.2.3.4:7890",                   // 无 scheme
+            "ftp://1.2.3.4:21",               // 非白名单协议
+            "socks4://1.2.3.4:1080",          // 已淘汰
+            "http://1.2.3.4",                 // 缺端口
+            "http://:7890",                   // 缺主机
+            "http://1.2.3.4:",                // 空端口
+            "http://1.2.3.4:",                // 空端口
+            "http://1.2.3.4:7890\nX-Evil: 1", // 换行注入（污染日志/参数）
+            "http://1.2.3.4:7890 x",          // 含空格
         ] {
             assert!(validate_proxy(bad).is_err(), "应拒绝: {bad:?}");
         }
@@ -1572,12 +1591,12 @@ mod tests {
     #[test]
     fn cron_validation_rejects_garbage_and_too_frequent() {
         for bad in [
-            "not a cron",      // 完全不是
-            "* * *",           // 段数不对
-            "99 3 * * *",      // 分钟越界
-            "0 25 * * *",      // 小时越界
-            "*/1 * * * *",     // 每 1 分钟：太频繁
-            "0,2,4 * * * *",   // 每小时 3 次：间隔 2 分钟，同样太频繁
+            "not a cron",    // 完全不是
+            "* * *",         // 段数不对
+            "99 3 * * *",    // 分钟越界
+            "0 25 * * *",    // 小时越界
+            "*/1 * * * *",   // 每 1 分钟：太频繁
+            "0,2,4 * * * *", // 每小时 3 次：间隔 2 分钟，同样太频繁
         ] {
             assert!(validate_cron(bad).is_err(), "应拒绝: {bad:?}");
         }
@@ -1652,7 +1671,10 @@ mod tests {
         // 无关文本、没配代理、代理串不在文本里 → 原样返回
         assert_eq!(scrub_proxy_in("别的错误", Some(p)), "别的错误");
         assert_eq!(scrub_proxy_in("别的错误", None), "别的错误");
-        assert_eq!(scrub_proxy_in("curl: (7) Failed to connect", Some(p)), "curl: (7) Failed to connect");
+        assert_eq!(
+            scrub_proxy_in("curl: (7) Failed to connect", Some(p)),
+            "curl: (7) Failed to connect"
+        );
     }
 
     #[test]
@@ -1683,7 +1705,10 @@ mod tests {
         assert!(has_pw, "有口令，但口令本身绝不返回");
         // 脱敏串里也不能出现口令
         let red = redact_proxy(&full);
-        assert!(!red.contains("p@ss") && !red.contains("p%40ss"), "脱敏漏了口令: {red}");
+        assert!(
+            !red.contains("p@ss") && !red.contains("p%40ss"),
+            "脱敏漏了口令: {red}"
+        );
     }
 
     #[test]
@@ -1703,11 +1728,17 @@ mod tests {
     #[test]
     fn proxy_curl_args_add_proxy_only_when_set() {
         let plain = curl_args(None);
-        assert!(!plain.iter().any(|a| a == "--proxy"), "未配代理时不传 --proxy（交给环境变量）");
+        assert!(
+            !plain.iter().any(|a| a == "--proxy"),
+            "未配代理时不传 --proxy（交给环境变量）"
+        );
         assert!(plain.contains(&"--proto-redir".to_string()));
 
         let with = curl_args(Some("socks5h://1.2.3.4:1080"));
-        let i = with.iter().position(|a| a == "--proxy").expect("应带 --proxy");
+        let i = with
+            .iter()
+            .position(|a| a == "--proxy")
+            .expect("应带 --proxy");
         assert_eq!(with[i + 1], "socks5h://1.2.3.4:1080");
         // 协议限制仍在（不能因为配了代理就放开 https 约束）
         assert!(with.contains(&"=https".to_string()));

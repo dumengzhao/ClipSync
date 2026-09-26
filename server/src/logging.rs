@@ -46,7 +46,11 @@ struct LocalTimer;
 
 impl FormatTime for LocalTimer {
     fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
-        write!(w, "{}", chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z"))
+        write!(
+            w,
+            "{}",
+            chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z")
+        )
     }
 }
 
@@ -145,7 +149,10 @@ pub fn init(data_dir: &str) {
         }
         Err(e) => {
             // 日志目录建不出来就只走 stdout，别让服务起不来
-            eprintln!("[clipsync-server] 无法创建日志目录 {}：{e}（只输出到 stdout）", dir.display());
+            eprintln!(
+                "[clipsync-server] 无法创建日志目录 {}：{e}（只输出到 stdout）",
+                dir.display()
+            );
         }
     }
     let stdout_layer = tracing_subscriber::fmt::layer()

@@ -1,7 +1,7 @@
 use crate::models::Network;
 use anyhow::Result;
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::password_hash::Error as HashError;
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Algorithm, Argon2, Params, Version};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -63,7 +63,9 @@ impl Store {
     /// 改密码：校验旧口令通过后才落新哈希，并刷新 `updated_at`（使旧会话失效）。
     /// 返回新凭据；旧口令不对返回 `Err`。
     pub fn change_password(&self, old_pass: &str, new_pass: &str) -> Result<AdminCreds> {
-        let cur = self.load_admin().ok_or_else(|| anyhow::anyhow!("凭据未初始化"))?;
+        let cur = self
+            .load_admin()
+            .ok_or_else(|| anyhow::anyhow!("凭据未初始化"))?;
         if !verify_pass(&cur.pass_hash, old_pass) {
             anyhow::bail!("当前密码不正确");
         }
@@ -314,7 +316,10 @@ mod tests {
             .unwrap()
             .to_string();
         assert_eq!(legacy.split('$').nth(1), Some("argon2d"));
-        assert!(verify_pass(&legacy, "legacy-pw"), "非 Argon2id 的历史哈希也要能验过");
+        assert!(
+            verify_pass(&legacy, "legacy-pw"),
+            "非 Argon2id 的历史哈希也要能验过"
+        );
         assert!(!verify_pass(&legacy, "nope"));
     }
 
@@ -352,7 +357,10 @@ mod tests {
         let huge = "$argon2id$v=19$m=4194304,t=100,p=8$c2FsdHNhbHRzYWx0c2FsdA$\
                     aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNo";
         let e = validate_hash_input(huge).unwrap_err();
-        assert!(e.contains("过大") || e.contains("过多"), "应报参数超限: {e}");
+        assert!(
+            e.contains("过大") || e.contains("过多"),
+            "应报参数超限: {e}"
+        );
 
         // 单看每一维也要拦（只超 p 的那种）
         assert!(check_hash_params_bounded("$argon2id$v=19$m=19456,t=2,p=64$x$y").is_err());

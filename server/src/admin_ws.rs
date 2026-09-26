@@ -24,10 +24,7 @@ pub async fn admin_ws(
     // 自鉴权（WS 升级请求无法走 admin_auth 中间件的 Bearer 头）
     // 未初始化时直接拒：没有凭据也就没有合法会话
     let epoch = {
-        let g = state
-            .admin_creds
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let g = state.admin_creds.lock().unwrap_or_else(|e| e.into_inner());
         match g.as_ref() {
             Some(c) => c.updated_at,
             None => return (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),

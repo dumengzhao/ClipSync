@@ -986,7 +986,8 @@ impl ConnectionHub {
         // 一个空文件。注意 `files` 与 `local_paths` 是**下标一一对应**的两组，
         // 过滤必须成对进行 —— 只留一组会让对端清单与实际文件错位（发错内容）。
         if *self.skip_empty_files.lock() {
-            let (kept_files, kept_paths, skipped_names) = Self::drop_empty_entries(files, local_paths);
+            let (kept_files, kept_paths, skipped_names) =
+                Self::drop_empty_entries(files, local_paths);
             if !skipped_names.is_empty() {
                 let count = skipped_names.len();
                 // 名字只留给本地日志与提示，不进网络元数据
@@ -3737,11 +3738,13 @@ mod tests {
         .map(PathBuf::from)
         .collect();
 
-        let (kept_files, kept_paths, skipped) =
-            ConnectionHub::drop_empty_entries(files, paths);
+        let (kept_files, kept_paths, skipped) = ConnectionHub::drop_empty_entries(files, paths);
 
         assert_eq!(
-            kept_files.iter().map(|m| m.file_name.as_str()).collect::<Vec<_>>(),
+            kept_files
+                .iter()
+                .map(|m| m.file_name.as_str())
+                .collect::<Vec<_>>(),
             vec!["keep.bin", "tail.bin"]
         );
         assert_eq!(
@@ -3764,10 +3767,8 @@ mod tests {
             mime_type: String::new(),
             hash: None,
         };
-        let (f, p, s) = ConnectionHub::drop_empty_entries(
-            vec![one_empty],
-            vec![PathBuf::from("dir/zero.dat")],
-        );
+        let (f, p, s) =
+            ConnectionHub::drop_empty_entries(vec![one_empty], vec![PathBuf::from("dir/zero.dat")]);
         assert!(f.is_empty() && p.is_empty());
         assert_eq!(s, vec!["zero.dat"]);
     }

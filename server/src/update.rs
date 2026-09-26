@@ -441,7 +441,11 @@ pub async fn downloads_page() -> Response {
             f.data.to_vec(),
         )
             .into_response(),
-        None => (StatusCode::NOT_FOUND, "downloads page not embedded".to_string()).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            "downloads page not embedded".to_string(),
+        )
+            .into_response(),
     }
 }
 
@@ -487,13 +491,17 @@ async fn current_version_of(state: &AppState) -> Option<String> {
     let raw = tokio::fs::read_to_string(state.update_dir.join("latest.json"))
         .await
         .ok()?;
-    serde_json::from_str::<UpdateManifest>(&raw).ok().map(|m| m.version)
+    serde_json::from_str::<UpdateManifest>(&raw)
+        .ok()
+        .map(|m| m.version)
 }
 
 /// 版本号排序键：按点切段转成数字（`0.10.0` > `0.9.0`，字符串比较会搞反）。
 /// 解析不出来的（“未识别版本”）得到 `[0]`，自然排到最后。
 fn version_sort_key(v: &str) -> Vec<u64> {
-    v.split('.').map(|s| s.parse::<u64>().unwrap_or(0)).collect()
+    v.split('.')
+        .map(|s| s.parse::<u64>().unwrap_or(0))
+        .collect()
 }
 
 /// GET /api/admin/update/history —— **所有历史上的安装包**，按版本分组。
@@ -1515,7 +1523,11 @@ mod history_tests {
             ("ClipSync-0.3.2-1.x86_64.rpm", "0.3.2"),
             ("ClipSync_1.10.0_arm64.apk", "1.10.0"),
         ] {
-            assert_eq!(parse_version_from_name(name).as_deref(), Some(want), "{name}");
+            assert_eq!(
+                parse_version_from_name(name).as_deref(),
+                Some(want),
+                "{name}"
+            );
         }
         // 平台串里那些数字不能被误当成版本：没有点、点后不是数字、只有两段
         for name in [
@@ -1543,7 +1555,8 @@ mod history_tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!("clipsync-hist-ut-{}-{uniq}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("clipsync-hist-ut-{}-{uniq}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // update_dir 也要先建出来：有几个用例直接往里写 downloads.json
         std::fs::create_dir_all(dir.join("update")).unwrap();
@@ -1600,7 +1613,7 @@ mod history_tests {
         assert_eq!(versions[0]["is_current"], true);
         assert_eq!(versions[0]["files"].as_array().unwrap().len(), 2);
         assert_eq!(versions[0]["files"][0]["size"], 300); // linux 排在前（按平台名）
-        // 0.3.1 只剩 darwin
+                                                          // 0.3.1 只剩 darwin
         assert_eq!(versions[1]["version"], "0.3.1");
         assert_eq!(versions[1]["is_current"], false);
         assert_eq!(versions[1]["files"][0]["platform"], "darwin-aarch64");
@@ -1644,7 +1657,8 @@ mod history_tests {
         )
         .unwrap();
         std::fs::write(
-            root.join("darwin-aarch64").join("ClipSync_0.3.1_aarch64.dmg"),
+            root.join("darwin-aarch64")
+                .join("ClipSync_0.3.1_aarch64.dmg"),
             vec![b'x'; 222],
         )
         .unwrap();
@@ -1668,7 +1682,11 @@ mod history_tests {
         assert_eq!(v["notes"], "修了几个 bug");
         assert_eq!(v["pub_date"], "2026-09-25T10:00:00Z");
         assert_eq!(v["public_history"], false);
-        assert_eq!(v["history"].as_array().unwrap().len(), 0, "默认不该泄露历史");
+        assert_eq!(
+            v["history"].as_array().unwrap().len(),
+            0,
+            "默认不该泄露历史"
+        );
         assert_eq!(v["platforms"]["windows-x86_64"]["available"], true);
         assert_eq!(v["platforms"]["windows-x86_64"]["size"], 111);
     }
@@ -1703,12 +1721,22 @@ mod history_tests {
     #[tokio::test]
     async fn downloads_config_fails_closed() {
         let state = tmp_state();
-        assert!(!load_downloads_config(&state.update_dir).await.public_history);
+        assert!(
+            !load_downloads_config(&state.update_dir)
+                .await
+                .public_history
+        );
         std::fs::write(downloads_config_path(&state.update_dir), b"{ not json").unwrap();
-        assert!(!load_downloads_config(&state.update_dir).await.public_history);
-        assert!(!serde_json::from_str::<DownloadsConfig>("{}")
-            .unwrap()
-            .public_history);
+        assert!(
+            !load_downloads_config(&state.update_dir)
+                .await
+                .public_history
+        );
+        assert!(
+            !serde_json::from_str::<DownloadsConfig>("{}")
+                .unwrap()
+                .public_history
+        );
     }
 
     /// 开关端点读写往返。
@@ -1721,7 +1749,11 @@ mod history_tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
-        assert!(load_downloads_config(&state.update_dir).await.public_history);
+        assert!(
+            load_downloads_config(&state.update_dir)
+                .await
+                .public_history
+        );
 
         let resp = admin_set_downloads(
             State(state.clone()),
@@ -1729,6 +1761,10 @@ mod history_tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
-        assert!(!load_downloads_config(&state.update_dir).await.public_history);
+        assert!(
+            !load_downloads_config(&state.update_dir)
+                .await
+                .public_history
+        );
     }
 }

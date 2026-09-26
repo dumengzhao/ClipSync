@@ -213,7 +213,7 @@ pub async fn admin_login(
                     return Json(json!({
                         "error": format!("登录尝试过于频繁，请 {left} 秒后再试")
                     }))
-                        .into_response();
+                    .into_response();
                 }
             }
         }
@@ -294,7 +294,10 @@ pub async fn admin_init_status(State(state): State<Arc<AppState>>) -> Json<Value
 /// - 写入后**不签发会话**：管理员必须用真实口令登录一次，能登进去才证明他贴的这串
 ///   哈希确实对应他知道的那个口令。否则贴错一串就等于把自己永久锁在门外（只能去
 ///   服务器上删 admin.json）。
-pub async fn admin_init(State(state): State<Arc<AppState>>, Json(body): Json<InitBody>) -> Response {
+pub async fn admin_init(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<InitBody>,
+) -> Response {
     let user = body.user.trim().to_string();
     if user.is_empty() {
         return (
@@ -325,10 +328,7 @@ pub async fn admin_init(State(state): State<Arc<AppState>>, Json(body): Json<Ini
         Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
     };
     // 检查与写入在同一个临界区内，避免两个并发请求都通过「未初始化」检查
-    let mut guard = state
-        .admin_creds
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut guard = state.admin_creds.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_some() {
         return (
             StatusCode::CONFLICT,
@@ -413,10 +413,7 @@ pub async fn change_password(
     // 内存态同步：改完密码，新哈希与版本号都要立刻生效（否则新密码登不进来、
     // 旧令牌也还在用）
     let user = {
-        let mut cur = state
-            .admin_creds
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut cur = state.admin_creds.lock().unwrap_or_else(|e| e.into_inner());
         *cur = Some(updated.clone());
         updated.user.clone()
     };
@@ -752,7 +749,8 @@ mod init_tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!("clipsync-init-ut-{}-{uniq}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("clipsync-init-ut-{}-{uniq}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let state = Arc::new(AppState {
             store: storage::Store::new(dir.clone()),
@@ -801,7 +799,11 @@ mod init_tests {
         .await;
 
         assert_eq!(resp.status(), StatusCode::CONFLICT);
-        assert_eq!(on_disk_hash(&state), Some(original), "磁盘上的凭据必须纹丝不动");
+        assert_eq!(
+            on_disk_hash(&state),
+            Some(original),
+            "磁盘上的凭据必须纹丝不动"
+        );
     }
 
     /// 场景二：内存说没初始化，但磁盘上已经有凭据文件（运行期间被手工放进去的）→
@@ -829,7 +831,11 @@ mod init_tests {
         .await;
 
         assert_eq!(resp.status(), StatusCode::CONFLICT);
-        assert_eq!(on_disk_hash(&state), Some(original), "不能覆盖磁盘上已有的凭据");
+        assert_eq!(
+            on_disk_hash(&state),
+            Some(original),
+            "不能覆盖磁盘上已有的凭据"
+        );
         // 顺便自愈：内存态补成磁盘内容，之后不用重启也能正常登录
         assert!(creds_snapshot(&state).is_some(), "内存态应被补成磁盘内容");
     }
@@ -860,6 +866,10 @@ mod init_tests {
         )
         .await;
         assert_eq!(resp2.status(), StatusCode::CONFLICT);
-        assert_eq!(on_disk_hash(&state), Some(mine), "第二次不得改写已写入的凭据");
+        assert_eq!(
+            on_disk_hash(&state),
+            Some(mine),
+            "第二次不得改写已写入的凭据"
+        );
     }
 }

@@ -236,11 +236,16 @@ mod tests {
     fn skip_empty_files_defaults_to_on() {
         assert!(AppConfig::default().skip_empty_files);
         // 老配置里没有这个字段 ⇒ 也要回退到「开」
-        let old: AppConfig = serde_json::from_str(r#"{"device_name":"x","auto_start":false,
+        let old: AppConfig = serde_json::from_str(
+            r#"{"device_name":"x","auto_start":false,
             "sync_text":true,"sync_image":true,"sync_file":true,"max_file_size_mb":10,
             "max_image_size_mb":50,"listen_port":20071,"enable_mdns":true,
-            "manual_addresses":[],"sync_primary_selection":false,"cache_ttl_hours":24}"#)
+            "manual_addresses":[],"sync_primary_selection":false,"cache_ttl_hours":24}"#,
+        )
         .unwrap();
-        assert!(old.skip_empty_files, "旧配置缺字段时必须默认跳过 0 字节文件");
+        assert!(
+            old.skip_empty_files,
+            "旧配置缺字段时必须默认跳过 0 字节文件"
+        );
     }
 }
