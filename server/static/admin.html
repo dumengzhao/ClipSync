@@ -37,7 +37,7 @@
       linear-gradient(90deg, rgba(56,189,248,.035) 1px, transparent 1px);
     background-size:100% 100%,100% 100%,44px 44px,44px 44px;
   }
-  #login,#app{position:relative;z-index:1}
+  #login,#init,#app{position:relative;z-index:1}
 
   h1,h2,h3{margin:0;font-weight:600}
   button{font-family:var(--sans);cursor:pointer;border:none;border-radius:8px;font-size:13px;padding:9px 16px;min-height:38px;
@@ -88,21 +88,32 @@
   .panel-title::after{content:'';flex:1;height:1px;background:linear-gradient(90deg,var(--line-strong),transparent)}
   .panel-title .n{color:var(--cyan);letter-spacing:.05em}
 
-  /* ---------- 登录 ---------- */
-  #login{display:none;max-width:380px;margin:0 auto;padding:12vh 16px 0}
-  #login .logo{text-align:center;margin-bottom:26px}
-  #login .logo .mark{
+  /* ---------- 登录 / 首次初始化 ---------- */
+  #login,#init{display:none;max-width:380px;margin:0 auto;padding:12vh 16px 0}
+  #login .logo,#init .logo{text-align:center;margin-bottom:26px}
+  #login .logo .mark,#init .logo .mark{
     width:56px;height:56px;margin:0 auto 14px;border-radius:14px;
     background:linear-gradient(135deg,rgba(34,211,238,.2),rgba(37,99,235,.25));
     border:1px solid var(--line-strong);display:flex;align-items:center;justify-content:center;
     font-family:var(--mono);font-size:22px;color:var(--cyan);
     box-shadow:0 0 30px rgba(34,211,238,.3);animation:logoPulse 3s ease-in-out infinite;}
   @keyframes logoPulse{50%{box-shadow:0 0 46px rgba(34,211,238,.55)}}
-  #login h1{font-family:var(--mono);font-size:18px;letter-spacing:.2em;text-align:center}
-  #login h1 b{color:var(--cyan)}
-  #login .sub{text-align:center;color:var(--muted);font-size:11px;letter-spacing:.3em;margin-top:6px;font-family:var(--mono)}
-  #login form{display:flex;flex-direction:column;gap:12px;margin-top:22px}
-  #loginErr{color:var(--red);font-size:12px;text-align:center;min-height:16px}
+  #login h1,#init h1{font-family:var(--mono);font-size:18px;letter-spacing:.2em;text-align:center}
+  #login h1 b,#init h1 b{color:var(--cyan)}
+  #login .sub,#init .sub{text-align:center;color:var(--muted);font-size:11px;letter-spacing:.3em;margin-top:6px;font-family:var(--mono)}
+  #login form,#init form{display:flex;flex-direction:column;gap:12px;margin-top:22px}
+  #loginErr,#initErr{color:var(--red);font-size:12px;text-align:center;min-height:16px}
+  /* 初始化卡片：要放哈希串 + 生成说明，比登录框宽一点 */
+  #init{max-width:480px}
+  #init .hint{font-size:12px;color:var(--muted);line-height:1.75}
+  #init .hint b{color:var(--text);font-weight:600}
+  #init code{font-family:var(--mono);font-size:11px;color:var(--cyan);word-break:break-all}
+  #init details{margin-top:16px;font-size:12px;color:var(--muted)}
+  #init details summary{cursor:pointer;color:var(--cyan);outline:none}
+  #init pre{font-family:var(--mono);font-size:11px;line-height:1.75;color:var(--text);
+    background:rgba(4,9,20,.85);border:1px solid var(--line);border-radius:8px;
+    padding:10px;margin:8px 0 0;white-space:pre-wrap;word-break:break-all}
+  #initHash{font-family:var(--mono);font-size:12px}
   /* 密码框 + 明文切换眼睛 */
   .pwd-wrap{position:relative}
   .pwd-wrap input{width:100%;padding-right:44px}
@@ -224,6 +235,60 @@
     .meta-item{padding:14px 0 0;border-left:none;border-top:1px solid var(--line)}
     .meta-item:first-child{padding-top:0;border-top:none}
   }
+  /* ===== 已发布安装包列表：每行一个，包名可点直接下载 ===== */
+  .pkg-list{margin:0 0 12px;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:rgba(4,9,20,.35)}
+  .pkg-row{
+    display:grid;grid-template-columns:130px minmax(0,1fr) 80px 132px;gap:12px;align-items:center;
+    padding:9px 12px;border-top:1px solid var(--line);font-size:13px}
+  .pkg-row:first-child{border-top:none}
+  .pkg-plat{font-family:var(--mono);font-size:11px;color:var(--cyan);letter-spacing:.02em}
+  .pkg-name{
+    font-family:var(--mono);font-size:12px;color:var(--text);text-decoration:none;min-width:0;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  a.pkg-name:hover{color:var(--cyan);text-decoration:underline}
+  .pkg-name.missing{color:var(--amber);cursor:not-allowed}
+  .pkg-size,.pkg-time{font-family:var(--mono);font-size:11px;color:var(--muted);text-align:right;white-space:nowrap}
+  .pkg-empty{padding:10px 12px;font-size:12px;color:var(--muted)}
+  /* ===== 历史版本：按版本分组，每组一段包列表 ===== */
+  .hist-head{
+    display:flex;align-items:baseline;gap:8px;margin:14px 0 6px;
+    font-family:var(--mono);font-size:13px}
+  .hist-head b{color:var(--text);letter-spacing:.04em}
+  .hist-cur{
+    font-size:10px;color:var(--cyan);border:1px solid var(--line-strong);
+    border-radius:20px;padding:1px 8px;letter-spacing:.06em}
+  .hist-time{margin-left:auto;color:var(--muted);font-size:11px}
+  /* ===== 右上角账号（头像 + 下拉菜单）===== */
+  .acct{position:relative;display:flex;align-items:center}
+  .acct-btn{
+    display:flex;align-items:center;gap:8px;background:transparent;border:1px solid var(--line);
+    border-radius:999px;padding:4px 10px 4px 4px;color:var(--text);cursor:pointer;
+    font-family:inherit;font-size:12px}
+  .acct-btn:hover{border-color:var(--cyan);color:var(--cyan)}
+  .avatar{
+    width:26px;height:26px;border-radius:50%;display:grid;place-items:center;flex-shrink:0;
+    background:linear-gradient(135deg,var(--cyan),var(--violet));color:#04121f;
+    font-weight:700;font-size:12px}
+  .acct-name{max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .acct-menu{
+    position:absolute;right:0;top:calc(100% + 6px);min-width:158px;z-index:60;
+    background:rgba(9,15,29,.98);border:1px solid var(--line);border-radius:10px;padding:6px;
+    box-shadow:0 14px 34px rgba(0,0,0,.5)}
+  .acct-menu button{
+    display:block;width:100%;text-align:left;background:transparent;border:0;color:var(--text);
+    padding:8px 10px;border-radius:7px;cursor:pointer;font-family:inherit;font-size:12px}
+  .acct-menu button:hover{background:rgba(56,189,248,.14);color:var(--cyan)}
+  /* ===== 修改密码弹窗 ===== */
+  .modal{position:fixed;inset:0;z-index:100;display:grid;place-items:center;background:rgba(2,5,12,.72)}
+  .modal-box{
+    width:min(420px,calc(100vw - 32px));background:var(--panel);border:1px solid var(--line);
+    border-radius:14px;padding:18px;box-shadow:0 24px 60px rgba(0,0,0,.6)}
+  .modal-box .fld{margin-bottom:12px}
+  .modal-box .fld input{width:100%}
+  @media (max-width:720px){
+    .pkg-row{grid-template-columns:1fr;gap:4px}
+    .pkg-size,.pkg-time{text-align:left}
+  }
 </style>
 </head>
 <body data-page-node-id="feHfuTssihyUXtfBYh9HiQ">
@@ -249,11 +314,62 @@
     </div>
   </div>
 
+  <!-- ============ 首次初始化（还没有管理员凭据时显示） ============ -->
+  <div id="init" style="display:none">
+    <div class="logo">
+      <div class="mark">⇄</div>
+      <h1>CLIP<b>SYNC</b></h1>
+      <div class="sub">FIRST-TIME SETUP</div>
+    </div>
+    <div class="panel" style="padding:18px 16px">
+      <div class="panel-title"><span class="n">01</span> 设置管理员</div>
+      <p class="hint">
+        服务端<b>不保存明文口令</b>，也不接收明文口令 —— 请填入<b>口令哈希串</b>
+        （形如 <code>$argon2id$v=19$m=19456,t=2,p=1$…$…</code>）。<br>
+        最简单的是在服务器上跑 <code>clipsync-server hash</code>（输入不回显），
+        具体做法见下面「这串哈希怎么生成？」。<br>
+        写入后请<b>用真实密码登录一次</b>：能登进去，才说明这串哈希确实对应你手里那个口令。
+      </p>
+      <form id="initForm">
+        <input id="initUser" placeholder="用户名（默认 admin）" autocomplete="username" value="admin" />
+        <input id="initHash" placeholder="$argon2id$v=19$m=19456,t=2,p=1$..." autocomplete="off" spellcheck="false" />
+        <button type="submit" id="initBtn">写入并启用</button>
+        <div id="initErr"></div>
+      </form>
+      <details>
+        <summary>这串哈希怎么生成？</summary>
+        <pre># 推荐：服务端自带命令（输入不回显，参数与服务端校验完全一致）
+/opt/clipsync-server/clipsync-server hash
+
+# 或用三方工具生成，只要指定这几个参数即可：
+#   算法 argon2id，m=19456 KiB，t=2，p=1，输出 PHC 格式串
+#   （形如 $argon2id$v=19$m=19456,t=2,p=1$&lt;盐&gt;$&lt;哈希&gt;）</pre>
+        <p class="hint" style="margin-top:8px">
+          任何能输出 <b>argon2id</b> PHC 串的工具都可以。口令只在你本机出现一次，
+          不会经过网络，也不会被写进服务端的任何文件。<br>
+          <b>盐不用另外记</b>：它就明文写在这串哈希里（`…$&lt;盐&gt;$&lt;哈希&gt;` 这两段），
+          登录时服务端从串里读出同一个盐、同样的参数再算一遍比对。所以盐是随机值也<b>不会登不上</b>——
+          它的作用只是让同一个口令每次生成的串都不一样（防彩虹表）。
+        </p>
+      </details>
+    </div>
+  </div>
+
   <!-- ============ 主界面 ============ -->
   <div id="app" style="display:none" data-page-node-id="nMcaAkL9pckZAstdFvchjr">
     <header class="topbar" data-page-node-id="7urXqVXtlrqmWAn3Je0nU0">
       <div class="brand" data-page-node-id="w8dcAMpBXnH2ML4OmA5nNs">CLIP<b data-page-node-id="ccEf6mm9e7VqavzzkD8THC">SYNC</b><em data-page-node-id="9w2yc5KAMwIArpCyXwMVaO">CONTROL</em></div>
-      <button class="ghost sm" id="logout" data-page-node-id="TF4txOE639hnjA2FHcc9bB">退出</button>
+      <div class="acct">
+        <button class="acct-btn" id="acctBtn" type="button" aria-haspopup="menu" aria-expanded="false">
+          <span class="avatar" id="acctAvatar">A</span>
+          <span class="acct-name" id="acctName">admin</span>
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
+        <div class="acct-menu hidden" id="acctMenu" role="menu">
+          <button type="button" id="menuChangePwd" role="menuitem">修改密码</button>
+          <button type="button" id="menuLogout" role="menuitem">退出登录</button>
+        </div>
+      </div>
     </header>
     <div class="wrap" data-page-node-id="mOZOFLqQc9jbihl2KiZOmM">
 
@@ -292,26 +408,80 @@
             <button id="updSubmit" type="button" data-page-node-id="bfnXa4NyOGuAghY9a13vaG">发布更新</button>
           </div>
           <div class="hint" data-page-node-id="eQ97gcqmSmZYR43VP4BRmZ">选好各平台安装包、填好版本号即可；安装包 <b data-page-node-id="p01iWwZwb0r0xjmSu2BQP1">sha256 由服务端在落盘时计算</b>并写入清单（不再依赖浏览器加密能力）。服务端按<b>平台键合并</b>进线上 latest.json：本次上传的平台覆盖更新，未涉及的平台原样保留，无需一次传齐。</div>
-          <!-- ===== GitHub 同步（可选；服务端需配置 GITHUB_REPO 才可用）===== -->
-          <div class="fld" style="min-width:280px">
-            <label>GitHub 同步（可选）</label>
-            <div class="hint" id="ghInfo">加载中…</div>
+
+          <!-- 历史版本：数据目录里所有落过盘的包，按版本分组（手动上传 + GitHub 同步都在内） -->
+          <div style="display:flex;align-items:baseline;gap:10px;margin-top:20px;flex-wrap:wrap">
+            <span style="font-family:var(--mono);font-size:12px;letter-spacing:.12em;color:var(--muted)">
+              HISTORY <span class="cnt" id="updHistCount"></span>
+            </span>
+            <button class="ghost sm" id="updHistReload" type="button">刷新列表</button>
+            <a href="/downloads" target="_blank" rel="noopener" class="ghost sm"
+               style="text-decoration:none;display:inline-flex;align-items:center;padding:6px 12px;border:1px solid var(--line-strong);border-radius:8px;color:var(--text);font-size:12px">打开公开下载页 ↗</a>
+            <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer"
+                   title="默认关闭：公开页只显示当前线上版本。打开后，下面列出的历史版本也会出现在公开下载页上（含测试包，注意甄别）。">
+              <input type="checkbox" id="updPublicHistory" />
+              公开页也列出历史版本
+            </label>
           </div>
-          <div class="fld" style="min-width:190px">
-            <label>定时同步</label>
-            <div style="display:flex;align-items:center;gap:.5rem">
-              <input type="checkbox" id="ghEnabled" />
-              <span class="hint" style="margin:0">开启</span>
-              <input id="ghInterval" type="number" min="5" step="5" style="width:96px" placeholder="间隔(分)" />
+          <div id="updHistory" class="hint" style="margin:6px 0 0">加载中…</div>
+        </div>
+
+        <!-- ===== GitHub 同步（独立面板：服务端需配置 GITHUB_REPO 才可用）===== -->
+        <div class="panel" style="margin-top:16px">
+          <div class="panel-title">GITHUB SYNC <span class="n" id="ghState"></span></div>
+          <div id="ghInfo" class="hint" style="margin:0 0 12px">加载中…</div>
+
+          <div class="form-row" style="margin-bottom:10px">
+            <div class="fld" style="min-width:280px">
+              <label>仓库（owner/name）</label>
+              <input id="ghRepo" placeholder="如 dumengzhao/ClipSync" />
+            </div>
+            <div class="fld" style="min-width:220px">
+              <label>定时同步（cron 表达式，按服务器本地时区）</label>
+              <div style="display:flex;align-items:center;gap:.5rem">
+                <input type="checkbox" id="ghEnabled" />
+                <span class="hint" style="margin:0">开启</span>
+                <input id="ghCron" style="width:130px;font-family:var(--mono)" placeholder="0 3 * * *" spellcheck="false" />
+              </div>
+            </div>
+            <div class="fld" style="min-width:220px">
+              <label>说明</label>
+              <div class="hint" style="margin:0">
+                <code>分 时 日 月 周</code>，例：<code>0 3 * * *</code> 每天 3:00、
+                <code>*/30 * * * *</code> 每半小时、<code>0 4 * * 1</code> 每周一 4:00。
+                两次触发至少间隔 5 分钟。<span id="ghNextRun"></span>
+              </div>
             </div>
           </div>
-          <div class="fld">
-            <label>&nbsp;</label>
-            <div style="display:flex;gap:.5rem">
-              <button id="ghRun" type="button">从 GitHub 同步</button>
-              <button id="ghSave" type="button" class="ghost sm">保存定时设置</button>
+
+          <div class="form-row" style="margin-bottom:10px">
+            <div class="fld" style="min-width:270px">
+              <label>代理地址（服务器直连不通 GitHub 时才需要）</label>
+              <input id="ghProxyUrl" placeholder="http://1.2.3.4:7890 或 socks5h://1.2.3.4:1080" />
+            </div>
+            <div class="fld" style="min-width:150px">
+              <label>代理账号（不需要认证就留空）</label>
+              <input id="ghProxyUser" placeholder="留空 = 无认证" autocomplete="off" />
+            </div>
+            <div class="fld" style="min-width:170px">
+              <label>代理口令（改口令时才填）</label>
+              <input id="ghProxyPass" type="password" placeholder="留空 = 不修改" autocomplete="new-password" />
             </div>
           </div>
+
+          <div class="form-row">
+            <button id="ghRun" type="button">从 GitHub 同步</button>
+            <button id="ghTest" type="button" class="ghost sm">测试连接</button>
+            <button id="ghSave" type="button" class="ghost sm">保存设置</button>
+            <button id="ghProxyClear" type="button" class="ghost sm">清除代理账号</button>
+          </div>
+          <div class="hint" style="margin-top:8px">仓库填 <b>owner/name</b>，<b>页面配置优先</b>于环境变量
+            <b>GITHUB_REPO</b>；留空则回退到环境变量（环境变量仍可在
+            <b>/opt/clipsync-server/clipsync-server.env</b> 里直接改，两种方式都保留）。
+            服务端从 GitHub Release 把安装包<b>转存</b>到自己这里，客户端走原有更新入口即可更新。
+            代理地址留空 = 交给服务进程的 <b>HTTPS_PROXY</b> 环境变量（都没配就直连）；
+            <b>socks5h</b> = 域名交给代理解析（服务器自己解不出 github.com 时用），另可选 http / https / socks5。
+            账号口令由服务端拼进地址并做 URL 编码，<b>不用自己写 %40</b>；口令<b>不回显</b>，要改就在这填一次新的。</div>
         </div>
       </section>
 
@@ -357,6 +527,22 @@
 
   <div id="toast" class="toast" data-page-node-id="rB0dj1obCcEBxxhIkpzdbO"></div>
 
+  <!-- ===== 修改密码弹窗 ===== -->
+  <div id="pwdModal" class="modal hidden">
+    <div class="modal-box">
+      <div class="panel-title" style="margin-bottom:12px">修改密码</div>
+      <div class="fld"><label>当前密码</label><input type="password" id="pwdOld" autocomplete="current-password" /></div>
+      <div class="fld"><label>新密码（至少 8 位）</label><input type="password" id="pwdNew" autocomplete="new-password" /></div>
+      <div class="fld"><label>确认新密码</label><input type="password" id="pwdNew2" autocomplete="new-password" /></div>
+      <div id="pwdErr" class="hint" style="margin:0 0 10px;color:var(--red)"></div>
+      <div class="hint" style="margin:0 0 12px">改完会<b>立即让所有已登录会话失效</b>，需要用新密码重新登录。</div>
+      <div class="form-row" style="justify-content:flex-end;gap:.5rem">
+        <button class="ghost sm" id="pwdCancel" type="button">取消</button>
+        <button id="pwdSubmit" type="button">确认修改</button>
+      </div>
+    </div>
+  </div>
+
 <script>
 const $ = (s)=>document.querySelector(s);
 let token = localStorage.getItem('cs_admin_token') || '';
@@ -391,8 +577,10 @@ document.addEventListener('click',(ev)=>{
 
 async function api(path, opts={}){
   const res = await fetch(path, Object.assign({headers:authHeaders()}, opts));
-  if(res.status===401){ logout(); throw new Error('unauthorized'); }
   const data = await res.json().catch(()=>({}));
+  // 服务端还没初始化（admin.json 不存在）：所有管理接口都会回这个，直接切初始化卡片
+  if(res.status===409 && data.code==='not_initialized'){ showAuthView('init'); throw new Error(data.error||'尚未初始化'); }
+  if(res.status===401){ logout(); throw new Error('unauthorized'); }
   if(!res.ok) throw new Error(data.error||('HTTP '+res.status));
   return data;
 }
@@ -710,6 +898,36 @@ function fmtSize(n){
 // sha256 不再由前端计算：服务端在上传落盘时用 sha2 自行计算并写入清单。
 // （浏览器 Web Crypto 只在安全上下文可用，http://<IP>/admin 下 crypto.subtle 为空。）
 
+// ---- 已发布安装包的逐行展示 ----
+// 时间统一本地时区：`YYYY-MM-DD HH:mm`
+function fmtTime(sec){
+  if(!sec) return '—';
+  const d=new Date(sec*1000), p=n=>String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+// 清单里的 pub_date 是 ISO 串，只取到分钟；不是 ISO 就原样显示
+function fmtPubDate(iso){
+  if(!iso) return '—';
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(iso)?iso.slice(0,10)+' '+iso.slice(11,16):iso;
+}
+function pkgRow(p,v){
+  const name=v.filename||'';
+  if(!v.uploaded){
+    return `<div class="pkg-row">
+      <span class="pkg-plat">${esc(p)}</span>
+      <span class="pkg-name missing" title="服务端还没有这个包的文件">${esc(name)||'（无文件名）'}</span>
+      <span class="pkg-size" style="color:var(--amber)">缺文件</span>
+      <span class="pkg-time">—</span></div>`;
+  }
+  // 公开端点，无需鉴权：浏览器直接 GET 就会下载（响应带 Content-Disposition）
+  const href=`/update/files/${encodeURIComponent(p)}/${encodeURIComponent(name)}`;
+  return `<div class="pkg-row">
+    <span class="pkg-plat">${esc(p)}</span>
+    <a class="pkg-name" href="${esc(href)}" download title="下载 ${esc(name)}">${esc(name)}</a>
+    <span class="pkg-size">${fmtSize(v.size)}</span>
+    <span class="pkg-time">${fmtTime(v.updated_at)}</span></div>`;
+}
+
 async function loadUpdateInfo(){
   const box=$('#updInfo');
   try{
@@ -718,39 +936,151 @@ async function loadUpdateInfo(){
     latestPlatformKeys=Object.keys(r.platforms||{});
     const verEl=$('#updVersion');
     if(!verEl.value) verEl.value=r.version; // 预填线上版本：补传平台时无需改号
-    const plats=Object.entries(r.platforms||{}).map(([p,v])=>
-      `${esc(p)}：${v.uploaded?`已上传(${fmtSize(v.size)})`:'<span style="color:var(--amber)">缺文件</span>'}`
-    ).join('　·　');
-    box.innerHTML=`线上版本 <b style="color:var(--cyan)">${esc(r.version)}</b>（${esc(r.pub_date||'-')}）`+
-      (plats?`<br>${plats}`:'')+(r.notes?`<br>${esc(r.notes)}`:'');
+    const rows=Object.entries(r.platforms||{}).map(([p,v])=>pkgRow(p,v)).join('');
+    box.innerHTML=
+      `<div style="display:flex;align-items:baseline;gap:10px;margin-bottom:10px;flex-wrap:wrap">
+         <span>线上版本 <b style="color:var(--cyan)">${esc(r.version)}</b></span>
+         <span style="font-size:12px;color:var(--muted)">发布于 ${esc(fmtPubDate(r.pub_date))}</span>
+       </div>`+
+      (rows?`<div class="pkg-list">${rows}</div>`:'<div class="pkg-empty">还没有任何平台的安装包</div>')+
+      (r.notes?`<div class="hint" style="margin:0">${esc(r.notes)}</div>`:'');
   }catch(e){
     $('#updVer').textContent='';
     latestPlatformKeys=[];
     box.innerHTML='尚未发布更新。填版本号 + 选安装包即可发布。';
   }
   refreshUpdateHints(); // 线上平台键拿到后，可给已选文件补一次架构兜底
+  loadUpdateHistory();  // 顺带刷新历史版本列表
   loadGithubSync();     // 顺带刷新「GitHub 同步」区的状态
 }
 
-/* ===== GitHub 同步（可选）=====
-   服务端从 GitHub Release 把安装包转存到自己这里；GitHub 直连不通的客户端
-   走原来的更新入口（relay）即可拿到同一个版本。 */
-async function loadGithubSync(){
-  const box=$('#ghInfo');
+/* ===== 历史版本 =====
+   服务端扫数据目录里所有落过盘的安装包（文件名带版本号，所以新旧版本互不覆盖），
+   按版本分组列出；手动上传的与 GitHub 同步下来的都在这里。点包名直接下载。 */
+async function loadUpdateHistory(){
+  const box=$('#updHistory');
   if(!box) return;
   try{
+    const r=await api('/api/admin/update/history');
+    const vs=r.versions||[];
+    const total=vs.reduce((n,v)=>n+((v.files||[]).length),0);
+    const cnt=$('#updHistCount');
+    if(cnt) cnt.textContent=total?`[${vs.length} 版 / ${total} 包]`:'[空]';
+    // 公开下载页开关（默认关闭 = 公开页只显示当前线上版本）
+    const pub=$('#updPublicHistory');
+    if(pub && !pub.dataset.busy) pub.checked=!!r.public_history;
+    if(!vs.length){
+      box.innerHTML='<div class="pkg-empty">数据目录里还没有历史安装包</div>';
+      return;
+    }
+    box.innerHTML=vs.map(v=>{
+      const rows=(v.files||[]).map(f=>{
+        // 公开端点，无需鉴权，浏览器直接 GET 就下载
+        const href=`/update/files/${encodeURIComponent(f.platform)}/${encodeURIComponent(f.filename)}`;
+        return `<div class="pkg-row">
+          <span class="pkg-plat">${esc(f.platform)}</span>
+          <a class="pkg-name" href="${esc(href)}" download title="下载 ${esc(f.filename)}">${esc(f.filename)}</a>
+          <span class="pkg-size">${fmtSize(f.size)}</span>
+          <span class="pkg-time">${fmtTime(f.updated_at)}</span></div>`;
+      }).join('');
+      return `<div class="hist-head">
+          <b>${esc(v.version)}</b>${v.is_current?'<span class="hist-cur">当前线上</span>':''}
+          <span class="hist-time">${fmtTime(v.updated_at)}</span>
+        </div><div class="pkg-list">${rows}</div>`;
+    }).join('');
+  }catch(e){
+    const cnt=$('#updHistCount'); if(cnt) cnt.textContent='';
+    box.innerHTML='<div class="hint" style="margin:0">历史版本加载失败：'+esc(e.message)+'</div>';
+  }
+}
+if($('#updHistReload')) $('#updHistReload').onclick=()=>loadUpdateHistory();
+// 公开历史版本的开关：打开后 /downloads 会把历史包一并挂出去（含测试包），所以要二次确认
+if($('#updPublicHistory')) $('#updPublicHistory').onchange=async(e)=>{
+  const el=e.target, want=el.checked;
+  if(want && !confirm('打开后，公开下载页会列出所有历史版本（包括测试包、旧版本），任何人都能下载。\n\n确认打开吗？')) {
+    el.checked=false; return;
+  }
+  el.dataset.busy='1';
+  try{
+    const r=await api('/api/admin/update/downloads',{method:'POST',body:JSON.stringify({enabled:want})});
+    el.checked=!!r.public_history;
+    toast(want?'公开下载页已列出历史版本':'公开下载页只显示当前线上版本');
+  }catch(err){
+    el.checked=!want;
+    toast('保存失败：'+err.message);
+  }finally{
+    delete el.dataset.busy;
+  }
+};
+
+/* ===== GitHub 同步（可选）=====
+   服务端从 GitHub Release 把安装包转存到自己这里；GitHub 直连不通的客户端
+   走原来的更新入口（relay）即可拿到同一个版本。
+   服务器自己连不上 GitHub 时：在这里配出网代理，或给服务进程设 HTTPS_PROXY 环境变量。 */
+
+// 代理拆成「地址 / 账号 / 口令」三个框：口令是 type=password 且**从不回显**，
+// 后端只告知「有没有保存过口令」，拼 URL 与 percent 编码全交给服务端。
+let ghProxyBase={url:'',user:'',hasPass:false};  // 本次加载到的基线（用于判断是否改动）
+let ghRepoBase='';           // 页面上配置的仓库（空 = 用环境变量）
+let ghProxySentinel='';      // 服务端下发的哨兵常量（避免前后端各写一份字符串）
+// 后端没下发哨兵时的兜底 —— 两端字符串必须一致，否则会被当成真口令写进去
+const PROXY_UNCHANGED_FALLBACK='__clipsync_proxy_unchanged__';
+const ghProxyDirty=()=> $('#ghProxyUrl').value.trim()!==ghProxyBase.url
+                       || $('#ghProxyUser').value.trim()!==ghProxyBase.user
+                       || $('#ghProxyPass').value!==''
+                       || $('#ghRepo').value.trim()!==ghRepoBase;
+function ghSetProxyFields(r){
+  ghProxySentinel=r.proxy_unchanged_sentinel||'';
+  ghProxyBase={url:r.proxy_url||'', user:r.proxy_user||'', hasPass:!!r.proxy_has_password};
+  $('#ghProxyUrl').value=ghProxyBase.url;
+  $('#ghProxyUser').value=ghProxyBase.user;
+  $('#ghProxyPass').value='';                       // 口令永不回填
+  $('#ghProxyPass').placeholder=ghProxyBase.hasPass?'已保存，留空则不修改':'留空 = 不修改';
+}
+/* 下次运行时间（服务端给的是 UTC，按浏览器本地时区显示） */
+function ghShowNextRun(iso){
+  const el=$('#ghNextRun');
+  if(!el) return;
+  const d=iso?new Date(iso):null;
+  if(!d || isNaN(d.getTime())){ el.textContent=''; return; }
+  el.innerHTML='<br>下次运行：<b>'+esc(d.toLocaleString())+'</b>';
+}
+async function loadGithubSync(){
+  const box=$('#ghInfo');
+  if(!box) return;  try{
     const r=await api('/api/admin/github-sync');
     if(!r.configured){
-      box.innerHTML='未启用：服务端未配置 <b>GITHUB_REPO</b>（如 dumengzhao/ClipSync），配置后重启服务即可。';
-      $('#ghRun').disabled=true; $('#ghSave').disabled=true; $('#ghEnabled').disabled=true;
+      box.innerHTML='未启用：请在上方填写仓库（<b>owner/name</b>），或给服务进程配置环境变量 <b>GITHUB_REPO</b>。';
+      // 仓库没配时，其它三项仍可填（填了仓库就能直接生效），只禁用「同步 / 测试」
+      ['#ghRun','#ghTest'].forEach(s=>{const e=$(s); if(e) e.disabled=true;});
+      ['#ghSave','#ghEnabled','#ghProxyClear'].forEach(s=>{const e=$(s); if(e) e.disabled=false;});
+      $('#ghEnabled').checked=!!r.enabled;
+      $('#ghCron').value=r.cron||'0 3 * * *';
+      ghShowNextRun(r.next_run_at);
+      ghSetProxyFields(r);
+      ghRepoBase=(r.repo_source==='config')?(r.repo||''):'';
+      $('#ghRepo').value=ghRepoBase;
+      $('#ghRepo').placeholder=r.env_repo?`留空则使用环境变量 ${r.env_repo}`:'如 dumengzhao/ClipSync';
+      const st=$('#ghState'); if(st) st.textContent='[未配置]';
       return;
     }
     $('#ghEnabled').checked=!!r.enabled;
     $('#ghEnabled').disabled=false;
-    $('#ghInterval').value=r.interval_minutes||720;
-    $('#ghRun').disabled=false; $('#ghSave').disabled=false;
+    $('#ghCron').value=r.cron||'0 3 * * *';
+    ghShowNextRun(r.next_run_at);
+    ['#ghRun','#ghSave','#ghTest','#ghProxyClear'].forEach(s=>{const e=$(s); if(e) e.disabled=false;});
+    ghSetProxyFields(r);
+    ghRepoBase=(r.repo_source==='config')?(r.repo||''):'';
+    $('#ghRepo').value=ghRepoBase;
+    $('#ghRepo').placeholder=r.env_repo?`留空则使用环境变量 ${r.env_repo}`:'如 dumengzhao/ClipSync';
+    const fromEnv=r.repo_source==='env';
     const last=r.last_run_at?`上次 ${esc(r.last_run_at)} · ${esc(r.last_result||'-')}`:'尚未运行过';
-    box.innerHTML=`仓库 <b>${esc(r.repo)}</b> · ${last}`;
+    const proxyLine=r.proxy_set
+      ? `　·　代理 <b>${esc(r.proxy_url||'')}</b>${r.proxy_user?`（账号 ${esc(r.proxy_user)}${r.proxy_has_password?' ＋ 口令':'，无口令'}）`:''}`
+      : (r.env_proxy?'　·　代理：走进程环境变量 HTTPS_PROXY':'　·　未配代理（直连）');
+    box.innerHTML=`仓库 <b>${esc(r.repo||'')}</b>${fromEnv?'<span class="hint" style="margin:0">（来自环境变量 GITHUB_REPO）</span>':''}`+
+      ` · ${last}${proxyLine}`;
+    const st=$('#ghState'); if(st) st.textContent=r.enabled?'[定时开启]':'';
   }catch(e){
     box.textContent='读取失败：'+e.message;
   }
@@ -773,21 +1103,74 @@ async function runGithubSync(){
   }
 }
 
-async function saveGithubConfig(){
+// 只探连通性：拿一次 GitHub 上的 latest.json，报 HTTP 码/耗时/版本。
+// 用真实同步时那个 URL 去试，通 = 同步链路通（DNS + TCP + TLS + 代理隧道）。
+async function testGithub(){
+  const box=$('#ghInfo'), btn=$('#ghTest');
+  if(!btn) return;
+  btn.disabled=true;
+  box.textContent='正在测试与 GitHub 的连通性（最多 30 秒）…';
+  try{
+    // 三个框有改动就先落盘，否则测的还是旧配置
+    if(ghProxyDirty()) await saveGithubConfig(true);
+    const r=await api('/api/admin/github-sync/test',{method:'POST'});
+    const via=r.proxy?`　·　经代理 ${esc(r.proxy)}`:'　·　未走代理（直连或环境变量）';
+    if(r.ok){
+      const head=r.http_code===404
+        ? '✓ 能连上 GitHub，但该仓库还没有已发布的 latest release（草稿与预发布不计入）'
+        : `✓ 连通（${r.ms}ms）${r.version?`：GitHub 上最新 <b>${esc(r.version)}</b>`:''}`;
+      box.innerHTML=`<span style="color:var(--cyan)">${head}</span>${via}`;
+    }else{
+      box.innerHTML=`<span style="color:var(--amber)">✗ 连不上</span>（${r.ms||0}ms）${via}<br>${esc(r.error||('HTTP '+(r.http_code||'?')))}`;
+    }
+  }catch(e){
+    box.innerHTML=`<span style="color:var(--amber)">✗ 测试失败</span>：${esc(e.message)}`;
+  }finally{
+    btn.disabled=false;
+  }
+}
+
+async function saveGithubConfig(quiet){
   const box=$('#ghInfo');
   try{
-    const body={enabled:$('#ghEnabled').checked, interval_minutes:parseInt($('#ghInterval').value||'720',10)};
-    await api('/api/admin/github-sync/config',{method:'POST',body:JSON.stringify(body)});
-    await loadGithubSync();
-    toast('已保存 GitHub 同步设置');
+    // 口令框：**非空**才算「改口令」；留空发哨兵（= 保持已保存的口令）
+    const body={
+      enabled:$('#ghEnabled').checked,
+      cron:$('#ghCron').value.trim(),
+      repo:$('#ghRepo').value.trim(),
+      proxy_url:$('#ghProxyUrl').value.trim(),
+      proxy_user:$('#ghProxyUser').value.trim(),
+      proxy_pass:$('#ghProxyPass').value!==''?$('#ghProxyPass').value
+                 :(ghProxySentinel||PROXY_UNCHANGED_FALLBACK),
+    };
+    const r=await api('/api/admin/github-sync/config',{method:'POST',body:JSON.stringify(body)});
+    // 保存后按后台返回值刷新基线（口令永远不回显），避免下次误判成「有改动」
+    ghRepoBase=(r.repo_source==='config')?(r.repo||''):'';
+    $('#ghRepo').value=ghRepoBase;
+    ghProxyBase={url:r.proxy_url||'', user:r.proxy_user||'', hasPass:!!r.proxy_has_password};
+    $('#ghProxyUrl').value=ghProxyBase.url;
+    $('#ghProxyUser').value=ghProxyBase.user;
+    $('#ghProxyPass').value='';
+    $('#ghProxyPass').placeholder=ghProxyBase.hasPass?'已保存，留空则不修改':'留空 = 不修改';
+    if(!quiet){ await loadGithubSync(); toast('已保存 GitHub 同步设置'); }
   }catch(e){
-    box.textContent='保存失败：'+e.message;
+    if(!quiet) box.textContent='保存失败：'+e.message;
+    else throw e;   // 「测试前自动保存」失败要冒泡，别让测试用旧配置悄悄跑
   }
+}
+
+// 「清除代理账号」= 把账号与口令一起抹掉（只保留地址），仍需点保存生效
+function clearGithubProxyCreds(){
+  $('#ghProxyUser').value='';
+  $('#ghProxyPass').value='';
+  toast('已清空账号与口令，点「保存设置」生效');
 }
 
 // 存在性判断：区块若被移除/隐藏，别让整段脚本在这里崩掉
 if($('#ghRun')) $('#ghRun').onclick=runGithubSync;
-if($('#ghSave')) $('#ghSave').onclick=saveGithubConfig;
+if($('#ghTest')) $('#ghTest').onclick=testGithub;
+if($('#ghSave')) $('#ghSave').onclick=()=>saveGithubConfig(false);
+if($('#ghProxyClear')) $('#ghProxyClear').onclick=clearGithubProxyCreds;
 
 function updAddRow(){
   const row=document.createElement('div');
@@ -979,28 +1362,123 @@ $('#loginForm').onsubmit=async(e)=>{
   try{
     const r = await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({user:$('#u').value,pass:$('#p').value})});
-    const d = await r.json();
+    const d = await r.json().catch(()=>({}));
+    if(r.status===409 && d.code==='not_initialized'){ showAuthView('init'); return; }
     if(!r.ok){ $('#loginErr').textContent=d.error||'登录失败'; return; }
-    token=d.token; localStorage.setItem('cs_admin_token',token); enterApp();
+    token=d.token; localStorage.setItem('cs_admin_token',token);
+    localStorage.setItem('cs_admin_user',$('#u').value.trim()||'admin');
+    enterApp();
   }catch(e){ $('#loginErr').textContent='网络错误'; }
 };
-$('#logout').onclick=()=>{ logout(); };
+if($('#logout')) $('#logout').onclick=()=>{ logout(); };
+// 右上角账号菜单（退出从这里走；旧的 #logout 按钮已移除，留个兜底绑定）
+if($('#menuLogout')) $('#menuLogout').onclick=()=>{ closeAcctMenu(); logout(); };
 $('#backBtn').onclick=()=>{ location.hash='#/'; };
 
+/* 三个视图互斥：init（未初始化）/ login（登录）/ app（已登录） */
+function showAuthView(name){
+  $('#init').style.display  = name==='init'  ? 'block' : 'none';
+  $('#login').style.display = name==='login' ? 'block' : 'none';
+  $('#app').style.display   = name==='app'   ? 'block' : 'none';
+}
+async function isInitialized(){
+  try{
+    const r = await fetch('/api/admin/init-status');
+    if(!r.ok) return true;              // 老版本服务端没有这个端点：按已初始化处理，走登录
+    const d = await r.json();
+    return d.initialized===true;
+  }catch(e){ return true; }
+}
 function logout(){
   token=''; closeDevWs(); localStorage.removeItem('cs_admin_token');
-  $('#app').style.display='none'; $('#login').style.display='block';
+  showAuthView('login');
 }
+
+/* ================= 首次初始化 ================= */
+$('#initForm').onsubmit=async(e)=>{
+  e.preventDefault();
+  const err=(m)=>{ $('#initErr').textContent=m; };
+  err(''); $('#initBtn').disabled=true;
+  try{
+    const r=await fetch('/api/admin/init',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({user:$('#initUser').value, pass_hash:$('#initHash').value})});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok) return err(d.error||('HTTP '+r.status));
+    // 写入成功不签发会话：必须让他用真实口令登录一次，验证这串哈希没贴错
+    $('#u').value=$('#initUser').value.trim()||'admin';
+    $('#p').value='';
+    showAuthView('login');
+    toast('已写入，请用真实密码登录验证');
+    setTimeout(()=>$('#p').focus(),60);
+  }catch(e){ err('网络错误'); }
+  finally{ $('#initBtn').disabled=false; }
+};
+
+/* ================= 右上角账号菜单 ================= */
+function openAcctMenu(){ $('#acctMenu').classList.remove('hidden'); $('#acctBtn').setAttribute('aria-expanded','true'); }
+function closeAcctMenu(){ $('#acctMenu').classList.add('hidden'); $('#acctBtn').setAttribute('aria-expanded','false'); }
+if($('#acctBtn')) $('#acctBtn').onclick=(e)=>{
+  e.stopPropagation();
+  $('#acctMenu').classList.contains('hidden')?openAcctMenu():closeAcctMenu();
+};
+// 点别处 / 按 Esc 都关掉
+document.addEventListener('click',(e)=>{
+  if($('#acctMenu') && !$('#acctMenu').classList.contains('hidden')
+     && !$('#acctMenu').contains(e.target) && !$('#acctBtn').contains(e.target)) closeAcctMenu();
+});
+document.addEventListener('keydown',(e)=>{ if(e.key==='Escape'){ closeAcctMenu(); closePwdModal(); } });
+
+/* ================= 修改密码 ================= */
+function openPwdModal(){
+  $('#pwdOld').value=''; $('#pwdNew').value=''; $('#pwdNew2').value='';
+  $('#pwdErr').textContent=''; $('#pwdModal').classList.remove('hidden');
+  setTimeout(()=>$('#pwdOld').focus(),50);
+}
+function closePwdModal(){ if($('#pwdModal')) $('#pwdModal').classList.add('hidden'); }
+if($('#menuChangePwd')) $('#menuChangePwd').onclick=()=>{ closeAcctMenu(); openPwdModal(); };
+if($('#pwdCancel')) $('#pwdCancel').onclick=closePwdModal;
+if($('#pwdModal')) $('#pwdModal').onclick=(e)=>{ if(e.target===$('#pwdModal')) closePwdModal(); };
+if($('#pwdSubmit')) $('#pwdSubmit').onclick=async()=>{
+  const oldP=$('#pwdOld').value, n1=$('#pwdNew').value, n2=$('#pwdNew2').value;
+  const err=(m)=>{ $('#pwdErr').textContent=m; };
+  if(!oldP) return err('请填写当前密码');
+  if(n1.length<8) return err('新密码至少 8 位');
+  if(n1==='clipsync') return err('新密码不能是默认口令 clipsync');
+  if(n1!==n2) return err('两次输入的新密码不一致');
+  $('#pwdSubmit').disabled=true; err('');
+  try{
+    // 注意：这里**不能**用 api() 的 401 自动登出逻辑 —— 改完密码会话本就该失效，
+    // 我们要自己提示「请重新登录」，而不是被当成「未授权」。
+    const res=await fetch('/api/admin/password',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},
+      body:JSON.stringify({old_pass:oldP,new_pass:n1})});
+    const d=await res.json().catch(()=>({}));
+    if(!res.ok){
+      if(res.status===401){ err('当前会话已失效，请重新登录后再修改'); return; }
+      return err(d.error||('HTTP '+res.status));
+    }
+    closePwdModal();
+    toast('密码已更新，请重新登录');
+    setTimeout(()=>logout(),900);   // 旧令牌已全部失效，直接退回登录页
+  }catch(e){ err('修改失败：'+e.message); }
+  finally{ $('#pwdSubmit').disabled=false; }
+};
 function enterApp(){
-  $('#login').style.display='none'; $('#app').style.display='block';
+  showAuthView('app');
+  const who=localStorage.getItem('cs_admin_user')||'admin';
+  if($('#acctName')) $('#acctName').textContent=who;
+  if($('#acctAvatar')) $('#acctAvatar').textContent=(who[0]||'A').toUpperCase();
   if(!location.hash) location.hash='#/';
   route();
 }
 
 (async()=>{
-  if(!token){ $('#login').style.display='block'; return; }
+  // 未初始化时连登录框都不该出现——先问服务端一句
+  if(!(await isInitialized())){ showAuthView('init'); return; }
+  if(!token){ showAuthView('login'); return; }
   try{ await loadNetworks(); enterApp(); }
-  catch(e){ $('#login').style.display='block'; }
+  catch(e){ showAuthView('login'); }
 })();
 </script>
 </body>

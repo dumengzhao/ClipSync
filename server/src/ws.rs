@@ -44,7 +44,7 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppState
     // 连接数上限：超出直接关闭，避免海量空闲连接耗尽内存与文件句柄
     if WS_CONNS.fetch_add(1, Ordering::SeqCst) >= MAX_WS_CONNS {
         WS_CONNS.fetch_sub(1, Ordering::SeqCst);
-        eprintln!("[clipsync-server] WS 连接数已达上限（{MAX_WS_CONNS}），拒绝新连接");
+        tracing::warn!("WS 连接数已达上限（{MAX_WS_CONNS}），拒绝新连接");
         return;
     }
     let _conn_guard = ConnGuard;
@@ -94,7 +94,7 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppState
             Ok(Some(Ok(m))) => m,
             Ok(_) => break,
             Err(_) => {
-                eprintln!("[clipsync-server] WS 空闲超时（{WS_IDLE_TIMEOUT:?}），关闭连接");
+                tracing::warn!("WS 空闲超时（{WS_IDLE_TIMEOUT:?}），关闭连接");
                 break;
             }
         };

@@ -22,7 +22,18 @@ pub async fn admin_ws(
     State(state): State<Arc<AppState>>,
 ) -> Response {
     // 自鉴权（WS 升级请求无法走 admin_auth 中间件的 Bearer 头）
-    if verify_session(&state.server_key, &q.token).is_none() {
+    // 未初始化时直接拒：没有凭据也就没有合法会话
+    let epoch = {
+        let g = state
+            .admin_creds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match g.as_ref() {
+            Some(c) => c.updated_at,
+            None => return (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+        }
+    };
+    if verify_session(&state.server_key, &q.token, epoch).is_none() {
         return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
     let net_id = q.net_id;

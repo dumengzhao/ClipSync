@@ -18,6 +18,17 @@ anyhow = "1"
 hmac = "0.12"
 base64 = "0.22"
 rust-embed = "8"
+# 交互式读口令（终端不回显）—— 仅 `clipsync-server hash` 子命令用到，纯 Rust、无 C 代码
+rpassword = "7"
+# 定时同步的 cron 表达式（GitHub 同步）。纯 Rust（chrono + nom），无 C 代码
+cron = "0.12"
+# 取本地时区的当前时间（cron 的 `upcoming` 需要时区参数，日志时间戳也用它）
+chrono = "0.4"
+# 服务端日志：结构化级别 + 时间戳，同时输出到 stdout(systemd journal) 与按天滚动的日志文件。
+# 纯 Rust，无 C 代码（musl 静态构建已验证）。
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "registry", "ansi", "std"] }
+tracing-appender = "0.2"
 # 注意：**服务端刻意不引入 reqwest/rustls** —— 它们会拉进含 C 代码的 ring，
 # 而 ring 需要 musl C 编译器（本机与部署机都没有、也没有 sudo）→ 会直接毁掉
 # 「musl 静态单文件」这个交付形态 ✗。GitHub 同步走系统 curl 子进程（见 github_sync.rs）。

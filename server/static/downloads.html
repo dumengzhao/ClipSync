@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>ClipSync 下载</title>
+<style>
+  :root{
+    --bg:#04070f;
+    --panel:rgba(11,18,35,.78);
+    --line:rgba(56,189,248,.14);
+    --line-strong:rgba(56,189,248,.38);
+    --text:#d7e5f7;
+    --muted:#5d7191;
+    --cyan:#22d3ee;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    font-family:var(--sans);background:var(--bg);color:var(--text);
+    min-height:100vh;font-size:14px;line-height:1.5;
+  }
+  body::before{
+    content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
+    background:
+      radial-gradient(ellipse 90% 55% at 50% -12%, rgba(56,189,248,.13), transparent 65%),
+      radial-gradient(ellipse 50% 40% at 90% 110%, rgba(129,140,248,.08), transparent 60%),
+      linear-gradient(rgba(56,189,248,.035) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(56,189,248,.035) 1px, transparent 1px);
+    background-size:100% 100%,100% 100%,44px 44px,44px 44px;
+  }
+  .wrap{position:relative;z-index:1;max-width:780px;margin:0 auto;padding:7vh 16px 48px}
+  .logo{text-align:center;margin-bottom:28px}
+  .logo .mark{
+    width:56px;height:56px;margin:0 auto 14px;border-radius:14px;
+    background:linear-gradient(135deg,rgba(34,211,238,.2),rgba(37,99,235,.25));
+    border:1px solid var(--line-strong);display:flex;align-items:center;justify-content:center;
+    font-family:var(--mono);font-size:22px;color:var(--cyan);
+    box-shadow:0 0 30px rgba(34,211,238,.3);animation:logoPulse 3s ease-in-out infinite}
+  @keyframes logoPulse{50%{box-shadow:0 0 46px rgba(34,211,238,.55)}}
+  h1{margin:0;font-family:var(--mono);font-size:18px;letter-spacing:.2em;text-align:center;font-weight:600}
+  h1 b{color:var(--cyan)}
+  .sub{text-align:center;color:var(--muted);font-size:11px;letter-spacing:.3em;margin-top:6px;font-family:var(--mono)}
+  .panel{
+    background:var(--panel);border:1px solid var(--line-strong);border-radius:14px;
+    padding:20px 18px;margin-bottom:16px;backdrop-filter:blur(12px);position:relative}
+  .ver-line{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:4px}
+  .ver-line .label{font-size:12px;color:var(--muted);letter-spacing:.08em}
+  .ver-line b{font-family:var(--mono);font-size:17px;color:var(--cyan)}
+  .meta{font-size:12px;color:var(--muted);font-family:var(--mono)}
+  .notes{font-size:13px;color:var(--text);margin-top:12px;padding-top:12px;border-top:1px solid var(--line);white-space:pre-wrap}
+  .pkg-list{margin-top:14px;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:rgba(4,9,20,.35)}
+  .pkg-row{
+    /* 最后一列用 auto（=内容宽），别给固定宽度：按钮只有两个字，固定列会在它右侧留一大片空 */
+    display:grid;grid-template-columns:130px minmax(0,1fr) 80px 130px auto;gap:12px;align-items:center;
+    padding:10px 12px;border-top:1px solid var(--line);font-size:13px}
+  .pkg-row:first-child{border-top:none}
+  .pkg-plat{font-family:var(--mono);font-size:11px;color:var(--cyan)}
+  .pkg-name{
+    font-family:var(--mono);font-size:12px;color:var(--text);text-decoration:none;min-width:0;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  a.pkg-name:hover{color:var(--cyan);text-decoration:underline}
+  .pkg-name.missing{color:var(--muted);cursor:not-allowed}
+  .pkg-size,.pkg-time{font-family:var(--mono);font-size:11px;color:var(--muted);text-align:right;white-space:nowrap}
+  /* 每行末尾的下载按钮：只靠颜色区分，不加背景与图标 */
+  .dl-btn{
+    font-family:var(--sans);font-size:12px;text-decoration:none;white-space:nowrap;text-align:right;
+    justify-self:end;color:var(--cyan);background:none;border:none;padding:2px 0;
+    transition:color .15s}
+  .dl-btn:hover{color:#67e8f9;text-decoration:underline}
+  .dl-btn.disabled{color:var(--muted);cursor:not-allowed}
+  .dl-btn.disabled:hover{text-decoration:none}
+  .sect{font-family:var(--mono);font-size:12px;letter-spacing:.14em;color:var(--muted);margin:26px 0 8px}
+  .hist-head{display:flex;align-items:baseline;gap:8px;margin:14px 0 6px;font-family:var(--mono);font-size:13px}
+  .hist-head b{color:var(--text);letter-spacing:.04em}
+  .hist-time{margin-left:auto;color:var(--muted);font-size:11px}
+  .empty{padding:14px 4px;font-size:13px;color:var(--muted)}
+  .foot{text-align:center;font-size:11px;color:var(--muted);font-family:var(--mono);margin-top:26px;letter-spacing:.06em}
+  @media (max-width:720px){
+    .wrap{padding:5vh 12px 40px}
+    .pkg-row{grid-template-columns:1fr;gap:4px}
+    .pkg-size,.pkg-time{text-align:left}
+    .dl-btn{justify-self:start;margin-top:6px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="logo">
+    <div class="mark">⇄</div>
+    <h1>CLIP<b>SYNC</b></h1>
+    <div class="sub">DOWNLOADS</div>
+  </div>
+
+  <div class="panel" id="current">
+    <div class="empty">加载中…</div>
+  </div>
+
+  <div id="history"></div>
+
+  <div class="foot">CLIPSYNC · 剪贴板与文件同步</div>
+</div>
+
+<script>
+function $(s){return document.querySelector(s);}
+function esc(s){
+  return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function fmtSize(n){
+  if(n==null) return '—';
+  if(n<1024) return n+' B';
+  if(n<1024*1024) return (n/1024).toFixed(1)+' KB';
+  return (n/1048576).toFixed(1)+' MB';
+}
+function fmtTime(sec){
+  if(!sec) return '—';
+  const d=new Date(sec*1000), p=n=>String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function fmtPubDate(iso){
+  if(!iso) return '—';
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(iso)?iso.slice(0,10)+' '+iso.slice(11,16):iso;
+}
+function pkgRows(files){
+  return files.map(f=>{
+    const name=f.filename||'';
+    if(f.available===false || !name){
+      return `<div class="pkg-row">
+        <span class="pkg-plat">${esc(f.platform)}</span>
+        <span class="pkg-name missing">暂未提供</span>
+        <span class="pkg-size">—</span><span class="pkg-time">—</span>
+        <span class="dl-btn disabled">暂缺</span></div>`;
+    }
+    // 相对路径：浏览器按当前 host 解析，反代/域名/内网都通用
+    const href=`/update/files/${encodeURIComponent(f.platform)}/${encodeURIComponent(name)}`;
+    return `<div class="pkg-row">
+      <span class="pkg-plat">${esc(f.platform)}</span>
+      <a class="pkg-name" href="${esc(href)}" download title="下载 ${esc(name)}">${esc(name)}</a>
+      <span class="pkg-size">${fmtSize(f.size)}</span>
+      <span class="pkg-time">${fmtTime(f.updated_at)}</span>
+      <a class="dl-btn" href="${esc(href)}" download title="下载 ${esc(name)}">下载</a></div>`;
+  }).join('');
+}
+
+(async()=>{
+  const cur=$('#current'), hist=$('#history');
+  let d;
+  try{
+    const r=await fetch('/update/versions.json',{cache:'no-store'});
+    d=await r.json();
+  }catch(e){
+    cur.innerHTML='<div class="empty">加载失败，请稍后重试。</div>';
+    return;
+  }
+  if(!d.version){
+    cur.innerHTML='<div class="empty">还没有发布任何版本。</div>';
+    return;
+  }
+  const plats=Object.entries(d.platforms||{}).map(([p,v])=>({platform:p,...v}));
+  cur.innerHTML=
+    `<div class="ver-line"><span class="label">最新版本</span><b>${esc(d.version)}</b></div>
+     <div class="meta">发布于 ${esc(fmtPubDate(d.pub_date))}</div>`+
+    (plats.length?`<div class="pkg-list">${pkgRows(plats)}</div>`:'<div class="empty">该版本暂无安装包</div>')+
+    (d.notes?`<div class="notes">${esc(d.notes)}</div>`:'');
+
+  const vs=d.history||[];
+  if(vs.length){
+    hist.innerHTML='<div class="sect">历史版本</div>'+vs.map(v=>
+      `<div class="hist-head"><b>${esc(v.version)}</b>
+         <span class="hist-time">${fmtTime(v.updated_at)}</span></div>
+       <div class="pkg-list">${pkgRows(v.files||[])}</div>`
+    ).join('');
+  }
+})();
+</script>
+</body>
+</html>

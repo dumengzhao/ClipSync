@@ -78,7 +78,10 @@
 ### 5.1 文件存储（无数据库）
 目录 `server/data/`（或环境变量 `CLIPSYNC_DATA_DIR`）：
 - `networks.json`：`Network[]`，Token 仅存哈希；结构见 5.2。
-- `admin.json`：`{ user, pass_hash }`（argon2）；首次运行若缺失则按 `ADMIN_USER`/`ADMIN_PASS` 环境变量生成，或控制台打印随机密码。
+- `admin.json`：`{ user, pass_hash, updated_at }`，`pass_hash` 是 Argon2id 的 PHC 串。**这是管理员凭据的唯一来源**
+  （没有环境变量兜底）；文件缺失即「未初始化」，服务照常启动但管理接口一律 409，首次访问 `/admin`
+  由页面填入**自生成的哈希串**完成初始化。`updated_at` 同时充当会话版本号（改密码后旧 JWT 立即失效）。
+- `downloads.json`：`{ public_history }`，控制公开下载页 `/downloads` 是否列出历史版本（默认 false）。
 - `server.key`：服务端会话签名密钥（缺失则随机生成并落盘）。
 - 写入策略：内存为权威缓存，变更时**原子写**（写临时文件 + rename）落盘，重启从文件恢复。
 

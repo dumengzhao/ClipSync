@@ -105,8 +105,8 @@ static MISSING_FORWARD_HEADER_WARNED: std::sync::atomic::AtomicBool =
 
 fn warn_missing_forward_headers_once() {
     if !MISSING_FORWARD_HEADER_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        eprintln!(
-            "[clipsync-server] 警告：请求来自环回/受信代理但未携带 X-Real-IP / X-Forwarded-For —— \
+        tracing::warn!(
+            "请求来自环回/受信代理但未携带 X-Real-IP / X-Forwarded-For —— \
              反向代理没有转发真实客户端 IP，管理登录退避会退化成单桶 \
              （任意来源 5 次错码即可锁死管理员）。请在反代补上：\
              proxy_set_header X-Real-IP $remote_addr; \
@@ -116,19 +116,48 @@ fn warn_missing_forward_headers_once() {
 }
 
 /// 内嵌管理页面资源（编译时打包进二进制，免部署静态文件）。
+///
+/// `pub(crate)`：下载页（`downloads.html`，在 `update.rs` 里提供，**无需登录**）
+/// 也用同一份内嵌资源。
 #[derive(RustEmbed)]
 #[folder = "static/"]
-struct Assets;
+pub(crate) struct Assets;
+
+/// 取一份凭据快照：`None` = 尚未初始化。
+///
+/// 别跨 await 持锁：这里没有 await，但保持同样的习惯。
+fn creds_snapshot(state: &AppState) -> Option<storage::AdminCreds> {
+    state
+        .admin_creds
+        .lock()
+        .map(|c| c.clone())
+        .unwrap_or_else(|e| e.into_inner().clone())
+}
+
+/// 「尚未初始化」的统一响应：409 + `code`，前端据此切到初始化页面。
+fn not_initialized() -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({"error": "管理员凭据尚未初始化", "code": "not_initialized"})),
+    )
+        .into_response()
+}
 
 /// 管理 API 鉴权中间件：校验 Bearer 会话 token（HMAC 签名）。
+///
+/// 未初始化时一律 409 —— 此时根本没有凭据可校验，必须明确区分「没初始化」和
+/// 「token 不对」，否则前端只会看到「未授权」然后反复弹登录框。
 pub async fn admin_auth(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
+    let Some(creds) = creds_snapshot(&state) else {
+        return not_initialized();
+    };
     let token = req
         .headers()
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
     let ok = token
-        .map(|t| verify_session(&state.server_key, t).is_some())
+        .map(|t| verify_session(&state.server_key, t, creds.updated_at).is_some())
         .unwrap_or(false);
     if !ok {
         return (
@@ -167,7 +196,10 @@ pub async fn admin_login(
     // 仅环回或 TRUSTED_PROXIES 声明的受信代理才采信转发头。
     headers: axum::http::HeaderMap,
     Json(body): Json<LoginBody>,
-) -> Json<Value> {
+) -> Response {
+    let Some(creds) = creds_snapshot(&state) else {
+        return not_initialized();
+    };
     let throttle_key =
         client_throttle_key(peer_addr.map(|c| c.0), &headers, &state.trusted_proxies);
     // 1) 退避检查（按源 IP）：锁定期内直接拒绝，且**不做口令校验**（也就不会消耗 Argon2）
@@ -180,12 +212,13 @@ pub async fn admin_login(
                     let left = (until - now).as_secs() + 1;
                     return Json(json!({
                         "error": format!("登录尝试过于频繁，请 {left} 秒后再试")
-                    }));
+                    }))
+                        .into_response();
                 }
             }
         }
     }
-    if body.user != state.admin_user || !storage::verify_pass(&state.admin_pass_hash, &body.pass) {
+    if body.user != creds.user || !storage::verify_pass(&creds.pass_hash, &body.pass) {
         // 2) 失败计数与递增锁定
         {
             let mut t = LOGIN_THROTTLES.lock().unwrap_or_else(|e| e.into_inner());
@@ -203,15 +236,16 @@ pub async fn admin_login(
             if th.fails >= LOGIN_MAX_FAILS {
                 let now = Instant::now();
                 th.locked_until = Some(now + th.lock_len);
-                eprintln!(
-                    "[clipsync-server] {throttle_key} 管理登录连续失败 {} 次，锁定 {:?}",
-                    th.fails, th.lock_len
+                tracing::warn!(
+                    "{throttle_key} 管理登录连续失败 {} 次，锁定 {:?}",
+                    th.fails,
+                    th.lock_len
                 );
                 th.lock_len = (th.lock_len * 2).min(LOGIN_MAX_LOCK);
                 th.fails = 0;
             }
         }
-        return Json(json!({"error": "invalid credentials"}));
+        return Json(json!({"error": "invalid credentials"})).into_response();
     }
     // 3) 成功：清零退避状态
     {
@@ -221,8 +255,176 @@ pub async fn admin_login(
             .unwrap_or_else(|e| e.into_inner())
             .remove(&throttle_key);
     }
-    let token = issue_session(&state.server_key, &state.admin_user);
-    Json(json!({ "token": token }))
+    let token = issue_session(&state.server_key, &creds.user, creds.updated_at);
+    Json(json!({ "token": token })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct InitBody {
+    /// 管理员用户名
+    pub user: String,
+    /// **口令哈希串**（不是口令本身）：管理员在别处用 Argon2id 生成后粘贴过来
+    pub pass_hash: String,
+}
+
+/// 管理员用户名长度上限。
+///
+/// 初始化端点是**公开**的（未初始化时谁都能调），所以每个入参都要有上限 ——
+/// 否则可以在窗口期塞一个几 MB 的用户名进 `admin.json`，之后每次读凭据都难受。
+const ADMIN_USER_MAX_LEN: usize = 64;
+/// 新口令长度上限（正常口令远小于此；防止已登录者用超长输入拖慢 Argon2）。
+const ADMIN_PASS_MAX_LEN: usize = 1024;
+
+/// GET /api/admin/init-status —— 是否已经初始化（**公开**端点）。
+///
+/// 公开是因为它只回答「有没有凭据」这一个比特，而「没有凭据」这件事对任何访问者
+/// 都是显然的（届时所有管理接口都返回同一个 409）。前端据此决定显示登录卡片还是
+/// 初始化卡片，省得用户在未初始化时对着登录框干瞪眼。
+pub async fn admin_init_status(State(state): State<Arc<AppState>>) -> Json<Value> {
+    Json(json!({ "initialized": creds_snapshot(&state).is_some() }))
+}
+
+/// POST /api/admin/init —— **仅在未初始化时**可用：写入用户名与口令哈希串。
+///
+/// 设计取舍：
+/// - 只收**哈希串**、不收明文口令：明文从生成到使用都不经过服务端；
+/// - 只能做一次（已初始化即 409）—— 否则谁都能抢先给自己设个口令；
+///   判据是**内存态 + 磁盘各查一次**：内存态挡住正常路径，磁盘那次挡住
+///   「运行期间手工放进 admin.json」这种两边不一致的情况（见函数内的注释）；
+/// - 写入后**不签发会话**：管理员必须用真实口令登录一次，能登进去才证明他贴的这串
+///   哈希确实对应他知道的那个口令。否则贴错一串就等于把自己永久锁在门外（只能去
+///   服务器上删 admin.json）。
+pub async fn admin_init(State(state): State<Arc<AppState>>, Json(body): Json<InitBody>) -> Response {
+    let user = body.user.trim().to_string();
+    if user.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "用户名不能为空"})),
+        )
+            .into_response();
+    }
+    if user.chars().count() > ADMIN_USER_MAX_LEN {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("用户名过长（上限 {ADMIN_USER_MAX_LEN} 字符）")})),
+        )
+            .into_response();
+    }
+    // 控制字符一律拒绝：这个值会写进 admin.json、也会进日志与页面，
+    // 带换行就能伪造日志行、把管理页的显示搅乱。
+    if user.chars().any(|c| c.is_control()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "用户名不能包含换行等控制字符"})),
+        )
+            .into_response();
+    }
+    // 哈希校验放在取锁之前：它要跑一次 Argon2（慢），别占着锁
+    let hash = match storage::validate_hash_input(&body.pass_hash) {
+        Ok(h) => h,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
+    };
+    // 检查与写入在同一个临界区内，避免两个并发请求都通过「未初始化」检查
+    let mut guard = state
+        .admin_creds
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if guard.is_some() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "管理员凭据已初始化", "code": "already_initialized"})),
+        )
+            .into_response();
+    }
+    // 二次确认：**磁盘上真的没有凭据文件**。
+    //
+    // 内存态是启动时读进来的，两者可能不一致 —— 比如运行期间有人（部署脚本）手工
+    // 放了一份 admin.json，内存里还是 None。只看内存的话，这个请求就会把那份文件
+    // **悄悄覆盖掉**，管理员还以为自己配的口令生效了。
+    // 顺手把内存态补成磁盘内容，状态就自愈了。
+    if let Some(on_disk) = state.store.load_admin() {
+        *guard = Some(on_disk);
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "凭据文件已存在，不能覆盖（请用真实密码登录，或直接改数据目录下的 admin.json）",
+                "code": "already_initialized"
+            })),
+        )
+            .into_response();
+    }
+    let creds = storage::AdminCreds {
+        user: user.clone(),
+        pass_hash: hash,
+        updated_at: storage::now_unix(),
+    };
+    if let Err(e) = state.store.save_admin(&creds) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("写入 admin.json 失败：{e}")})),
+        )
+            .into_response();
+    }
+    *guard = Some(creds);
+    tracing::info!(
+        "管理员凭据已初始化（{}）——请用真实密码登录一次以验证哈希串",
+        crate::logging::clean(&user)
+    );
+    Json(json!({"ok": true, "user": user})).into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct ChangePassBody {
+    /// 当前密码（必须提供：防止拿到会话就能改密码）
+    pub old_pass: String,
+    pub new_pass: String,
+}
+
+/// POST /api/admin/password —— 修改管理员密码。
+///
+/// 要点：① 必须验旧口令；② 长度与强度校验沿用启动时的规则（≥8 位、不许是 `clipsync`）；
+/// ③ 只把 **Argon2id 哈希**写进 admin.json（0600），明文不落盘；
+/// ④ 更新密码版本号 → **所有已签发的会话令牌立即失效**，前端改完必须重新登录。
+pub async fn change_password(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ChangePassBody>,
+) -> Response {
+    let new = body.new_pass.trim();
+    if new.len() > ADMIN_PASS_MAX_LEN {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("新密码过长（上限 {ADMIN_PASS_MAX_LEN} 字符）")})),
+        )
+            .into_response();
+    }
+    if let Err(e) = storage::validate_new_password(new) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
+    }
+    let updated = match state.store.change_password(&body.old_pass, new) {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
+    };
+    // 内存态同步：改完密码，新哈希与版本号都要立刻生效（否则新密码登不进来、
+    // 旧令牌也还在用）
+    let user = {
+        let mut cur = state
+            .admin_creds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *cur = Some(updated.clone());
+        updated.user.clone()
+    };
+    tracing::info!(
+        "管理员密码已更新（{}）——旧会话令牌已全部失效，需要重新登录",
+        crate::logging::clean(&user)
+    );
+    Json(json!({"ok": true})).into_response()
 }
 
 /// GET /admin：返回内嵌的管理页面 HTML。
@@ -536,5 +738,128 @@ mod tests {
             "2001:db8::1"
         );
         assert!(parse_ip_lax("not-an-ip").is_none());
+    }
+}
+
+/// 初始化端点的回归测试：重点是把「**已初始化就绝对不能再覆盖**」钉死。
+#[cfg(test)]
+mod init_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    fn tmp_state(creds: Option<storage::AdminCreds>) -> (Arc<AppState>, std::path::PathBuf) {
+        let uniq = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("clipsync-init-ut-{}-{uniq}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = Arc::new(AppState {
+            store: storage::Store::new(dir.clone()),
+            networks: Mutex::new(vec![]),
+            hub: crate::hub::Hub::new(),
+            admin_ws: Mutex::new(HashMap::new()),
+            server_key: "test-key".into(),
+            admin_creds: Mutex::new(creds),
+            update_dir: dir.join("update"),
+            update_public_base: None,
+            update_max_upload: 10 * 1024 * 1024,
+            trusted_proxies: vec![],
+        });
+        (state, dir)
+    }
+
+    fn on_disk_hash(state: &AppState) -> Option<String> {
+        state.store.load_admin().map(|c| c.pass_hash)
+    }
+
+    /// 场景一：内存已是「已初始化」→ 409，磁盘原封不动。
+    #[tokio::test]
+    async fn refuses_when_memory_says_initialized() {
+        let original = storage::hash_pass("original-pw");
+        let (state, _dir) = tmp_state(Some(storage::AdminCreds {
+            user: "admin".into(),
+            pass_hash: original.clone(),
+            updated_at: 1,
+        }));
+        state
+            .store
+            .save_admin(&storage::AdminCreds {
+                user: "admin".into(),
+                pass_hash: original.clone(),
+                updated_at: 1,
+            })
+            .unwrap();
+
+        let resp = admin_init(
+            State(state.clone()),
+            Json(InitBody {
+                user: "hacker".into(),
+                pass_hash: storage::hash_pass("evil-pw"),
+            }),
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(on_disk_hash(&state), Some(original), "磁盘上的凭据必须纹丝不动");
+    }
+
+    /// 场景二：内存说没初始化，但磁盘上已经有凭据文件（运行期间被手工放进去的）→
+    /// 同样 409，并且**不能覆盖**那份文件（否则管理员配的口令会被页面悄悄改写）。
+    #[tokio::test]
+    async fn refuses_when_credentials_file_exists_on_disk() {
+        let original = storage::hash_pass("handwritten-pw");
+        let (state, _dir) = tmp_state(None); // 内存：未初始化
+        state
+            .store
+            .save_admin(&storage::AdminCreds {
+                user: "admin".into(),
+                pass_hash: original.clone(),
+                updated_at: 1,
+            })
+            .unwrap();
+
+        let resp = admin_init(
+            State(state.clone()),
+            Json(InitBody {
+                user: "hacker".into(),
+                pass_hash: storage::hash_pass("evil-pw"),
+            }),
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(on_disk_hash(&state), Some(original), "不能覆盖磁盘上已有的凭据");
+        // 顺便自愈：内存态补成磁盘内容，之后不用重启也能正常登录
+        assert!(creds_snapshot(&state).is_some(), "内存态应被补成磁盘内容");
+    }
+
+    /// 场景三：真的没初始化 → 第一次成功，第二次必定被拒且内容不变。
+    #[tokio::test]
+    async fn succeeds_once_then_locks_out() {
+        let (state, _dir) = tmp_state(None);
+        let mine = storage::hash_pass("my-real-pw");
+
+        let resp = admin_init(
+            State(state.clone()),
+            Json(InitBody {
+                user: "admin".into(),
+                pass_hash: mine.clone(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(on_disk_hash(&state), Some(mine.clone()));
+
+        let resp2 = admin_init(
+            State(state.clone()),
+            Json(InitBody {
+                user: "hacker".into(),
+                pass_hash: storage::hash_pass("evil-pw"),
+            }),
+        )
+        .await;
+        assert_eq!(resp2.status(), StatusCode::CONFLICT);
+        assert_eq!(on_disk_hash(&state), Some(mine), "第二次不得改写已写入的凭据");
     }
 }

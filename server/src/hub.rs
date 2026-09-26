@@ -71,8 +71,10 @@ impl Hub {
             Ok(Ok(())) => true,
             Ok(Err(_)) => false,
             Err(_) => {
-                eprintln!(
-                    "[clipsync-server] 设备 {device_id} 出站队列等待 {}s 仍满，本条载荷已丢弃（客户端疑似卡死）",
+                // 设备 id 来自网络：进日志前过一遍 clean（清掉换行等控制字符，防伪造日志行）
+                tracing::warn!(
+                    "设备 {} 出站队列等待 {}s 仍满，本条载荷已丢弃（客户端疑似卡死）",
+                    crate::logging::clean(device_id),
                     PAYLOAD_SEND_TIMEOUT.as_secs()
                 );
                 false

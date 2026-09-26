@@ -28,8 +28,16 @@ pub struct AppState {
     pub admin_ws: Mutex<HashMap<String, Vec<Arc<mpsc::Sender<String>>>>>,
     /// 会话签名密钥：登录签发/HMAC 校验 admin 会话
     pub server_key: String,
-    pub admin_user: String,
-    pub admin_pass_hash: String,
+    /// 管理员凭据（**只有哈希**）—— 放在锁里，因为「初始化 / 改密码」要在运行时更新它，
+    /// 而 `AppState` 是 `Arc` 共享的只读引用。
+    ///
+    /// 拆成 `admin_user` / `admin_pass_hash` / `admin_pwd_epoch` 三个字段的话，
+    /// 改完密码没法原子地更新内存态（旧哈希还在 → 新密码登不进去）。
+    ///
+    /// `None` = **尚未初始化**（还没有 `admin.json`）：此时管理 API 一律 409，
+    /// 管理页显示初始化卡片。用 `Option` 而不是「空哈希串」当哨兵，让编译器
+    /// 逼每个使用点都处理这个状态 —— 否则漏判一处就等于「无口令可登录」。
+    pub admin_creds: std::sync::Mutex<Option<crate::storage::AdminCreds>>,
     /// 客户端更新托管根目录（latest.json 与 files/<platform>/）
     pub update_dir: PathBuf,
     /// 改写 latest.json url 用的公开基址（如 https://sync.example.com）；缺省回退请求头（仅 https）

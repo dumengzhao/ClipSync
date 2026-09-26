@@ -31,6 +31,12 @@ struct Claims {
     iat: usize,
     /// 过期时间（Unix 秒）
     exp: usize,
+    /// **密码版本号**（`AdminCreds.updated_at`）：改密码后旧令牌立即失效。
+    ///
+    /// JWT 是无状态的，不带上这个字段的话，改完密码旧令牌仍能用 3 天 ——
+    /// 万一口令已泄露，改密码就形同虚设。
+    #[serde(default)]
+    pwd: u64,
 }
 
 #[derive(Serialize)]
@@ -79,12 +85,13 @@ pub const SESSION_TTL: i64 = 3 * 24 * 3600;
 /// 签发管理员会话 JWT（自实现 HS256，密钥为 server.key）。
 /// 完全无状态：令牌自包含 exp，服务端不存储任何会话。
 /// 不依赖 ring / 任何 C 工具链，可纯 Rust 交叉编译到任意平台。
-pub fn issue_session(key: &str, user: &str) -> String {
+pub fn issue_session(key: &str, user: &str, pwd_epoch: u64) -> String {
     let now = now_unix() as usize;
     let claims = Claims {
         sub: user.to_string(),
         iat: now,
         exp: now + SESSION_TTL as usize,
+        pwd: pwd_epoch,
     };
     let header_json = serde_json::to_string(&JwtHeader {
         alg: "HS256",
@@ -100,8 +107,10 @@ pub fn issue_session(key: &str, user: &str) -> String {
     format!("{}.{}", signing_input, sig_b64)
 }
 
-/// 校验管理员会话 JWT（验签名 + 验 exp）。成功返回用户名（sub），失败返回 None。
-pub fn verify_session(key: &str, token: &str) -> Option<String> {
+/// 校验管理员会话 JWT（验签名 + 验 exp + **验密码版本号**）。成功返回用户名（sub），失败返回 None。
+///
+/// `pwd_epoch` 为当前 `AdminCreds.updated_at`；令牌里的版本对不上（说明改过密码）一律拒绝。
+pub fn verify_session(key: &str, token: &str, pwd_epoch: u64) -> Option<String> {
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
         return None;
@@ -115,6 +124,9 @@ pub fn verify_session(key: &str, token: &str) -> Option<String> {
     let payload = b64url_decode(parts[1])?;
     let claims: Claims = serde_json::from_slice(&payload).ok()?;
     if claims.exp as i64 <= now_unix() {
+        return None;
+    }
+    if claims.pwd != pwd_epoch {
         return None;
     }
     Some(claims.sub)
