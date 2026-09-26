@@ -93,6 +93,40 @@ pub fn platform_key() -> &'static str {
     "unknown"
 }
 
+/// GitHub 直连更新的来源仓库。
+///
+/// 与「从服务端中继更新」是**两条互不影响的独立链路**（用户明确要求不纠缠）：
+///
+/// | | 清单与安装包来源 | 信任锚 |
+/// |---|---|---|
+/// | 中继链路（原有） | 用户自己配置的 `server_url`（同源校验） | 用户自己的服务器 + TLS |
+/// | GitHub 链路（本模块） | 本仓库的 Release（`releases/latest`） | **github.com 的 TLS** + 仓库完整性 |
+///
+/// 两条链路**共用同一套安装闸门**：`download_update_impl` 里落盘前的 sha256 校验、
+/// 以及 `install_verified_update` 里「只认本次下载并校验通过的那个包」+ 启动前复算哈希。
+/// 也就是说 GitHub 链路并不会放宽任何安装侧的安全约束。
+pub const GITHUB_REPO: &str = "dumengzhao/ClipSync";
+
+/// GitHub 链路允许下载的域名：仓库本体 + Release 资产的实际落点
+/// （`github.com` 会 302 到 CDN，reqwest 自动跟随）。
+///
+/// 仍然要校验主机：清单虽然来自 github.com，但万一它被替换（或仓库被投毒），
+/// 也不能借我们之手去下载任意外域的二进制。
+const GITHUB_ALLOWED_HOSTS: &[&str] = &[
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "github-releases.githubusercontent.com",
+];
+
+/// 本仓库最新发布清单的地址。
+///
+/// 用 `releases/latest` 资产路径而**不是** GitHub API：资产路径天然排除草稿与预发布，
+/// 与「人工 Publish 才对外可见」的发布流程一致，且不吃 API 的 60 次/小时限额。
+pub fn github_manifest_url() -> String {
+    format!("https://github.com/{GITHUB_REPO}/releases/latest/download/latest.json")
+}
+
 /// 从用户配置的 server_url 推导更新基址。
 ///
 /// 规则：**配的什么就用什么**（用户明确要求不因安全边界而拒绝）——
@@ -256,15 +290,29 @@ pub fn is_installed_build_cmd() -> bool {
 pub async fn do_check_update(server_url: &str) -> Result<Option<UpdateInfo>, String> {
     let base = update_base_from_server_url(server_url)
         .ok_or_else(|| "未配置服务端地址，请在设置里填写服务端连接地址".to_string())?;
-    let url = format!("{base}/update/latest.json");
-    let resp = reqwest::get(&url)
+    fetch_manifest(&format!("{base}/update/latest.json")).await
+}
+
+/// 直连 GitHub 检查更新（设置页「检查更新 GitHub」按钮）。
+///
+/// 与中继链路完全独立：**不读 `server_url`**，所以服务端没配 / 连不上 / 没发布清单时，
+/// 这条链路依然可用。
+#[tauri::command]
+pub async fn check_update_github() -> Result<Option<UpdateInfo>, String> {
+    fetch_manifest(&github_manifest_url()).await
+}
+
+/// 拉取并解析更新清单 → 与当前版本比对。
+/// `Ok(None)` = 已是最新，或该地址下还没有清单（404，例如对方尚未发布过）。
+pub async fn fetch_manifest(url: &str) -> Result<Option<UpdateInfo>, String> {
+    let resp = reqwest::get(url)
         .await
         .map_err(|e| format!("请求更新清单失败: {e}"))?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
     }
     if !resp.status().is_success() {
-        return Err(format!("服务端返回 HTTP {}", resp.status()));
+        return Err(format!("更新清单返回 HTTP {}", resp.status()));
     }
     let text = resp
         .text()
@@ -280,7 +328,7 @@ pub async fn do_check_update(server_url: &str) -> Result<Option<UpdateInfo>, Str
         .platforms
         .get(platform_key())
         .cloned()
-        .ok_or_else(|| format!("服务端清单缺少本平台（{}）安装包", platform_key()))?;
+        .ok_or_else(|| format!("更新清单缺少本平台（{}）安装包", platform_key()))?;
     Ok(Some(UpdateInfo {
         version: m.version,
         notes: m.notes,
@@ -290,35 +338,92 @@ pub async fn do_check_update(server_url: &str) -> Result<Option<UpdateInfo>, Str
     }))
 }
 
+/// 下载来源。决定 URL 白名单规则 —— 这是「渲染器可传任意 URL」这个信任边界上的关键一环。
+enum DownloadSource {
+    /// 中继链路：必须与本机配置的服务端**同源**（scheme + host + port）。
+    /// 清单是服务端下发的：若不校验，服务端被控或响应被篡改时就能把安装包指向
+    /// 任意外域（乃至明文 http），而 SHA256 也来自同一份清单、形同虚设。
+    Relay,
+    /// GitHub 链路：必须 https，且主机在 `GITHUB_ALLOWED_HOSTS` 内。
+    Github,
+}
+
+/// GitHub 链路的主机/协议校验。
+///
+/// 抽成纯函数是为了能单测 —— 这是「渲染器可传任意 URL」边界上的一条安全规则，
+/// 值得钉死。用**主机名精确匹配**而不是 `contains`/后缀判断：后者会被
+/// `github.com.evil.tld`、`evilgithub.com` 这类名字骗过。
+fn github_url_allowed(target: &reqwest::Url) -> Result<(), String> {
+    if target.scheme() != "https" {
+        return Err("GitHub 更新地址必须是 https".to_string());
+    }
+    let host = target.host_str().unwrap_or("");
+    if !GITHUB_ALLOWED_HOSTS.contains(&host) {
+        return Err(format!("更新地址不在 GitHub 允许的域名内（{host}）"));
+    }
+    Ok(())
+}
+
 /// 下载安装包到临时目录，流式计算 sha256 并与 manifest 比对；
-/// 不一致则删除文件并报错。成功返回本地路径。
+/// 不一致则删除文件并报错。成功返回本地路径。**中继链路入口。**
 #[tauri::command]
 pub async fn download_update(
     app: tauri::AppHandle,
     url: String,
     sha256: String,
 ) -> Result<String, String> {
+    download_update_impl(app, url, sha256, DownloadSource::Relay).await
+}
+
+/// 同上下载，但走 **GitHub 链路**（设置页「检查更新 GitHub」）。
+#[tauri::command]
+pub async fn download_update_github(
+    app: tauri::AppHandle,
+    url: String,
+    sha256: String,
+) -> Result<String, String> {
+    download_update_impl(app, url, sha256, DownloadSource::Github).await
+}
+
+/// 两条链路共用的下载实现。**除来源校验外逐行一致** ——
+/// 也就是说 GitHub 链路不会放宽任何一条既有约束：随机临时目录 + `create_new` 防预置、
+/// 流式 sha256、校验失败即删、只有校验通过才登记 `pending_update`（安装闸门见
+/// `install_verified_update`）。
+async fn download_update_impl(
+    app: tauri::AppHandle,
+    url: String,
+    sha256: String,
+    source: DownloadSource,
+) -> Result<String, String> {
     if !is_installed_build() {
         return Err("当前为免安装版，不支持在线更新（请使用 NSIS 安装版）".to_string());
     }
-    // 下载地址必须与本机配置的服务端**同源**（scheme + host + port）。
-    // 清单是服务端下发的：若不校验，服务端被控或响应被篡改时就能把安装包
-    // 指向任意外域（乃至明文 http），而 SHA256 也来自同一份清单、形同虚设。
-    let expected_base = {
-        let state = app.state::<crate::AppState>();
-        let server_url = state.config.lock().server_url.clone();
-        update_base_from_server_url(&server_url)
-    };
-    let expected = expected_base.ok_or_else(|| "未配置服务端地址，无法校验更新来源".to_string())?;
     let target = reqwest::Url::parse(&url).map_err(|e| format!("更新地址非法: {e}"))?;
-    let allowed = reqwest::Url::parse(&expected).map_err(|e| format!("服务端地址非法: {e}"))?;
-    if target.scheme() != allowed.scheme()
-        || target.host_str() != allowed.host_str()
-        || target.port_or_known_default() != allowed.port_or_known_default()
-    {
-        return Err(format!(
-            "更新地址与配置的服务端不同源，已拒绝下载：{url}（期望源自 {expected}）"
-        ));
+    match source {
+        DownloadSource::Relay => {
+            let expected_base = {
+                let state = app.state::<crate::AppState>();
+                let server_url = state.config.lock().server_url.clone();
+                update_base_from_server_url(&server_url)
+            };
+            let expected =
+                expected_base.ok_or_else(|| "未配置服务端地址，无法校验更新来源".to_string())?;
+            let allowed =
+                reqwest::Url::parse(&expected).map_err(|e| format!("服务端地址非法: {e}"))?;
+            if target.scheme() != allowed.scheme()
+                || target.host_str() != allowed.host_str()
+                || target.port_or_known_default() != allowed.port_or_known_default()
+            {
+                return Err(format!(
+                    "更新地址与配置的服务端不同源，已拒绝下载：{url}（期望源自 {expected}）"
+                ));
+            }
+        }
+        DownloadSource::Github => {
+            if let Err(why) = github_url_allowed(&target) {
+                return Err(format!("{why}，已拒绝下载：{url}"));
+            }
+        }
     }
     let fname = basename_of(&url);
     if fname.is_empty() || fname.contains("..") || fname.contains('/') || fname.contains('\\') {
@@ -616,6 +721,43 @@ mod tests {
         assert!(!is_newer("0.1.0", "0.2.0"));
         // 解析失败 → 退化为字符串比较
         assert!(is_newer("beta-2", "0.1.0"));
+    }
+
+    /// GitHub 链路的下载地址白名单：**精确主机匹配 + 强制 https**。
+    /// 这条规则挡的是「清单被替换后把安装包指向任意外域」，必须钉死。
+    #[test]
+    fn github_download_url_policy() {
+        let ok = |u: &str| github_url_allowed(&reqwest::Url::parse(u).unwrap()).is_ok();
+
+        // 允许：仓库本体 + 资产 CDN 实际落点
+        assert!(ok("https://github.com/dumengzhao/ClipSync/releases/download/v1/a.exe"));
+        assert!(ok("https://release-assets.githubusercontent.com/a/b"));
+        assert!(ok("https://objects.githubusercontent.com/a/b"));
+
+        // 拒绝：明文 http
+        assert!(!ok("http://github.com/dumengzhao/ClipSync/releases/download/v1/a.exe"));
+
+        // 拒绝：其它域名
+        assert!(!ok("https://evil.tld/a.exe"));
+        assert!(!ok("https://raw.githubusercontent.com/dumengzhao/ClipSync/main/a.exe"));
+
+        // 关键：看像但不是的，不能被子串/后缀判断骗过（必须是精确主机名相等）
+        assert!(!ok("https://github.com.evil.tld/a.exe"));
+        assert!(!ok("https://evilgithub.com/a.exe"));
+        assert!(!ok("https://notgithub.com/a.exe"));
+        assert!(!ok("https://githubusercontent.com/a.exe"));
+    }
+
+    /// 清单地址必须是 `releases/latest` 的**资产**路径：
+    /// 该路径天然排除草稿与预发布（与「人工 Publish 才对外可见」的发布流程一致）。
+    #[test]
+    fn github_manifest_url_uses_assets_path() {
+        let u = github_manifest_url();
+        assert_eq!(
+            u,
+            format!("https://github.com/{GITHUB_REPO}/releases/latest/download/latest.json")
+        );
+        assert!(u.ends_with("/releases/latest/download/latest.json"));
     }
 
     /// `is_installed_build` 的核心判定逻辑（剥离豁免分支，跑真实文件检测）。
