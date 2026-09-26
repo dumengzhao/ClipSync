@@ -508,6 +508,11 @@ pub fn run() {
                 app.state::<AppState>()
                     .hub
                     .set_max_folder_files(max_folder_files);
+                // 跳过 0 字节文件（设置项，默认开）
+                let skip_empty_files = app.state::<AppState>().config.lock().skip_empty_files;
+                app.state::<AppState>()
+                    .hub
+                    .set_skip_empty_files(skip_empty_files);
             }
             let state = app.state::<AppState>();
             let (enable_mdns, listen_port) = {
@@ -643,6 +648,9 @@ pub fn run() {
             update::download_update,
             update::install_update,
             update::is_installed_build_cmd,
+            // GitHub 直连更新：与上面的中继链路互不影响（不读 server_url）
+            update::check_update_github,
+            update::download_update_github,
             tauri_cmd::list_cross_lan_offers,
             tauri_cmd::pull_cross_lan,
             tauri_cmd::cancel_pull_cross_lan,

@@ -263,6 +263,8 @@ pub fn apply_config(
     state.hub.set_pairing_code(cfg.pairing_code.clone());
     // 同步「文件夹文件数上限」到连接中枢（复制文件夹超限拦截阈值）
     state.hub.set_max_folder_files(cfg.max_folder_files);
+    // 同步「跳过 0 字节文件」到连接中枢（复制空文件时不广播）
+    state.hub.set_skip_empty_files(cfg.skip_empty_files);
 
     // 同步手动地址簿：配置是持久化真源，每次保存都据此重建内存地址簿，
     // 使监控任务的兜底直连始终读到最新地址（重启时 lib.rs 也已据此初始化）。

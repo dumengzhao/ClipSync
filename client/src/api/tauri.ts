@@ -179,6 +179,8 @@ export interface AppConfig {
   auto_pull_threshold_mb?: number;
   /** 复制文件夹时递归文件数上限：超过此值则拦截推送、仅本地提示请压缩。0 表示不限制。默认 100 */
   max_folder_files?: number;
+  /** 复制的文件里含 0 字节文件时是否跳过不推送。默认开（0B 多半是占位/残渣，推过去只是空文件） */
+  skip_empty_files?: boolean;
   // ===== 跨局域网中转（服务端） =====
   /** 服务端 WebSocket 地址，例如 ws://your-host:20070/ws；为空表示不使用服务端 */
   server_url?: string;
@@ -429,9 +431,22 @@ export async function checkUpdate(): Promise<UpdateInfo | null> {
   return invoke<UpdateInfo | null>('check_update');
 }
 
+/**
+ * 直连 GitHub 检查更新（与中继链路**独立**：不读 server_url，服务端没配/连不上也能用）。
+ * null = 已是最新，或该仓库尚未发布过 Release。
+ */
+export async function checkUpdateGithub(): Promise<UpdateInfo | null> {
+  return invoke<UpdateInfo | null>('check_update_github');
+}
+
 /** 下载安装包到临时目录并做 sha256 完整性校验，返回本地文件路径 */
 export async function downloadUpdate(url: string, sha256: string): Promise<string> {
   return invoke<string>('download_update', { url, sha256 });
+}
+
+/** 同上下载，但走 GitHub 链路（后端只放行 github.com 及其资产 CDN，且必须 https） */
+export async function downloadUpdateGithub(url: string, sha256: string): Promise<string> {
+  return invoke<string>('download_update_github', { url, sha256 });
 }
 
 /** 运行安装包（Windows NSIS 被动模式安装后退出进程） */

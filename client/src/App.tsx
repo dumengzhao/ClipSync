@@ -387,6 +387,18 @@ export default function App() {
       setFolderWarn(`${name}文件夹文件数量超过100，请压缩后复制`);
       window.setTimeout(() => setFolderWarn(null), 6000);
     });
+    // 复制的文件里有 0 字节文件：已跳过未推送，本地提示一声（设置里可关闭该行为）
+    const unlistenEmptySkipped = listen<{ count: number; names: string[] }>(
+      'empty-file-skipped',
+      (e) => {
+        const { count, names } = e.payload;
+        const list = (names || []).join('、');
+        setFolderWarn(
+          `已跳过 ${count} 个 0 字节文件${list ? `（${list}${count > names.length ? ' 等' : ''}）` : ''}，未推送`,
+        );
+        window.setTimeout(() => setFolderWarn(null), 6000);
+      },
+    );
     // 跨局域网服务端事件
     // 跨局域网服务端连接状态（标题栏左侧展示）；本处仅需在重连成功时清除「被移除」提示
     const unlistenServerStatus = listen<number>('server-status', (e) => {
@@ -450,6 +462,7 @@ export default function App() {
       unlistenUnpaired.then((u) => u());
       unlistenInfoUpdated.then((u) => u());
       unlistenCountExceeded.then((u) => u());
+      unlistenEmptySkipped.then((u) => u());
       unlistenCleared.then((u) => u());
     unlistenCrossDropped.then((u) => u());
       unlistenFileOffer.then((u) => u());

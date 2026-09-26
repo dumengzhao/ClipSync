@@ -477,6 +477,9 @@ pub struct ConnectionHub {
     /// 文件夹文件数上限：本机复制文件夹时递归文件数超过此值则拦截推送、仅本地提示。
     /// 0 表示不限制。配置加载/保存时由 `set_max_folder_files` 同步。
     max_folder_files: Mutex<usize>,
+    /// 是否跳过 **0 字节**文件（默认开）：本机复制的文件/目录里大小为 0 的条目
+    /// 不进清单、不广播。配置加载/保存时由 `set_skip_empty_files` 同步。
+    skip_empty_files: Mutex<bool>,
     /// 已建立加密通道的对端（key 为 device_id）
     peers: Mutex<HashMap<String, Peer>>,
     /// 当前已连地址集合（key = remote `host:port`），用于 mDNS 失效时按手动/已知地址
@@ -532,6 +535,7 @@ impl ConnectionHub {
             paired_codes: Mutex::new(HashMap::new()),
             pairing_code: Mutex::new(String::new()),
             max_folder_files: Mutex::new(100),
+            skip_empty_files: Mutex::new(true),
             peers: Mutex::new(HashMap::new()),
             connected_addrs: Mutex::new(HashSet::new()),
             connecting: Mutex::new(HashSet::new()),
@@ -560,6 +564,40 @@ impl ConnectionHub {
     /// 同步设置中的「文件夹文件数上限」到内存（配置加载/保存时调用）。
     pub fn set_max_folder_files(&self, n: usize) {
         *self.max_folder_files.lock() = n;
+    }
+
+    /// 同步设置中的「跳过 0 字节文件」到内存（配置加载/保存时调用）。
+    pub fn set_skip_empty_files(&self, on: bool) {
+        *self.skip_empty_files.lock() = on;
+    }
+
+    /// 成对剔除 0 字节条目。
+    ///
+    /// `files` 与 `local_paths` **下标一一对应**（前者进网络清单，后者只在本地用于读盘），
+    /// 所以必须成对过滤 —— 只保留一侧会让清单与实际文件错位，对端收到的内容就串了。
+    /// 返回 `(保留的元数据, 保留的路径, 被跳过的文件名)`。
+    fn drop_empty_entries(
+        files: Vec<FileMeta>,
+        local_paths: Vec<PathBuf>,
+    ) -> (Vec<FileMeta>, Vec<PathBuf>, Vec<String>) {
+        // 两组一旦不等长，zip 会静默截断 —— 那等于悄悄丢文件。构造方保证等长，这里盯住它。
+        debug_assert_eq!(
+            files.len(),
+            local_paths.len(),
+            "清单与路径必须一一对应，否则过滤后会错位"
+        );
+        let mut kept_files = Vec::with_capacity(files.len());
+        let mut kept_paths = Vec::with_capacity(local_paths.len());
+        let mut skipped = Vec::new();
+        for (meta, path) in files.into_iter().zip(local_paths) {
+            if meta.file_size == 0 {
+                skipped.push(meta.file_name);
+            } else {
+                kept_files.push(meta);
+                kept_paths.push(path);
+            }
+        }
+        (kept_files, kept_paths, skipped)
     }
 
     /// 读取当前静态配对口令（供首配对握手使用）。
@@ -943,6 +981,33 @@ impl ConnectionHub {
                     files.push(meta);
                 }
             }
+        }
+        // 「跳过 0 字节文件」：0B 多半是占位符/下载残渣/锁文件，推过去只会让对方拿到
+        // 一个空文件。注意 `files` 与 `local_paths` 是**下标一一对应**的两组，
+        // 过滤必须成对进行 —— 只留一组会让对端清单与实际文件错位（发错内容）。
+        if *self.skip_empty_files.lock() {
+            let (kept_files, kept_paths, skipped_names) = Self::drop_empty_entries(files, local_paths);
+            if !skipped_names.is_empty() {
+                let count = skipped_names.len();
+                // 名字只留给本地日志与提示，不进网络元数据
+                let preview: Vec<String> = skipped_names.iter().take(3).cloned().collect();
+                tracing::info!(
+                    "已跳过 {count} 个 0 字节文件（可在设置里关闭「跳过空文件」）：{}",
+                    preview.join("、")
+                );
+                if let Some(app) = self.app.lock().clone() {
+                    let _ = app.emit(
+                        "empty-file-skipped",
+                        serde_json::json!({
+                            "count": count,
+                            "names": preview,
+                            "total": skipped_names.len(),
+                        }),
+                    );
+                }
+            }
+            files = kept_files;
+            local_paths = kept_paths;
         }
         if files.is_empty() {
             return;
@@ -3640,6 +3705,102 @@ pub(crate) enum ConfigReply {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 「跳过 0 字节文件」：成对过滤后，清单与路径必须仍然一一对应。
+    ///
+    /// 这里最容易写错的不是「怎么判断空」，而是**只过滤了一侧** ——
+    /// files 与 local_paths 一旦错位，对端收到的清单会指向错误的本地文件（发错内容）。
+    #[test]
+    fn drop_empty_entries_keeps_manifest_and_paths_aligned() {
+        let meta = |name: &str, size: u64| FileMeta {
+            file_name: name.to_string(),
+            file_size: size,
+            is_dir: false,
+            relative_path: name.to_string(),
+            modified_at: 0,
+            mime_type: String::new(),
+            hash: None,
+        };
+        let files = vec![
+            meta("empty.txt", 0),
+            meta("keep.bin", 3),
+            meta("nested/also-empty", 0),
+            meta("tail.bin", 9),
+        ];
+        let paths: Vec<PathBuf> = [
+            "a/empty.txt",
+            "a/keep.bin",
+            "a/nested/also-empty",
+            "a/tail.bin",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+
+        let (kept_files, kept_paths, skipped) =
+            ConnectionHub::drop_empty_entries(files, paths);
+
+        assert_eq!(
+            kept_files.iter().map(|m| m.file_name.as_str()).collect::<Vec<_>>(),
+            vec!["keep.bin", "tail.bin"]
+        );
+        assert_eq!(
+            kept_paths,
+            vec![PathBuf::from("a/keep.bin"), PathBuf::from("a/tail.bin")],
+            "路径必须跟着对应的元数据一起留下，否则清单与实际文件错位"
+        );
+        assert_eq!(skipped, vec!["empty.txt", "nested/also-empty"]);
+    }
+
+    /// 全是空文件时 → 两边都清空（调用方据此直接返回，不广播）。
+    #[test]
+    fn drop_empty_entries_can_empty_everything() {
+        let one_empty = FileMeta {
+            file_name: "zero.dat".to_string(),
+            file_size: 0,
+            is_dir: false,
+            relative_path: "zero.dat".to_string(),
+            modified_at: 0,
+            mime_type: String::new(),
+            hash: None,
+        };
+        let (f, p, s) = ConnectionHub::drop_empty_entries(
+            vec![one_empty],
+            vec![PathBuf::from("dir/zero.dat")],
+        );
+        assert!(f.is_empty() && p.is_empty());
+        assert_eq!(s, vec!["zero.dat"]);
+    }
+
+    /// 没有空文件时原样返回（顺序不变）。
+    #[test]
+    fn drop_empty_entries_is_noop_without_empty_files() {
+        let files = vec![
+            FileMeta {
+                file_name: "a".into(),
+                file_size: 1,
+                is_dir: false,
+                relative_path: "a".into(),
+                modified_at: 0,
+                mime_type: String::new(),
+                hash: None,
+            },
+            FileMeta {
+                file_name: "b".into(),
+                file_size: 2,
+                is_dir: false,
+                relative_path: "b".into(),
+                modified_at: 0,
+                mime_type: String::new(),
+                hash: None,
+            },
+        ];
+        let paths = vec![PathBuf::from("d/a"), PathBuf::from("d/b")];
+        let (f, p, s) = ConnectionHub::drop_empty_entries(files.clone(), paths.clone());
+        assert_eq!(f.len(), 2);
+        assert_eq!(p, paths);
+        assert!(s.is_empty());
+    }
 
     /// 回归测试：同一配对码下，两端**交叉核对**的口令确认标签必须相等。
     ///

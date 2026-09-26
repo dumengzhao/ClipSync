@@ -7,6 +7,8 @@ import {
   regeneratePairingCode,
   checkUpdate,
   downloadUpdate,
+  checkUpdateGithub,
+  downloadUpdateGithub,
   installUpdate,
   isInstalledBuild,
   getVersion,
@@ -149,6 +151,13 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
   const [upd, setUpd] = useState<UpdateInfo | null>(null);
   const [updBusy, setUpdBusy] = useState<'check' | 'download' | null>(null);
   const [updMsg, setUpdMsg] = useState('');
+  // GitHub 直连更新：**另一条独立链路**，自成一套状态，不与上面那条纠缠。
+  // 用途：客户端所在网络连不上配置的服务端时仍可更新（服务端地址取自 GitHub 仓库本身）。
+  const [ghUpd, setGhUpd] = useState<UpdateInfo | null>(null);
+  const [ghBusy, setGhBusy] = useState<'check' | 'download' | null>(null);
+  const [ghMsg, setGhMsg] = useState('');
+  // 两条链路共用后端同一条 emit("update-progress")，用它把进度消息路由到正确的提示位
+  const ghDownloadingRef = useRef(false);
   // 免安装版不支持更新，启动时一次性探测，整段更新 UI 直接不渲染
   const [installedBuild, setInstalledBuild] = useState<boolean | null>(null);
   // 当前客户端版本号（来自 Cargo.toml / tauri.conf.json 的 package version）
@@ -226,9 +235,11 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
       message?: string;
     }>('update-progress', (e) => {
       const p = e.payload;
-      if (p.message) setUpdMsg(p.message);
-      else if (p.percent !== null) setUpdMsg(`正在下载更新… ${p.percent}%`);
-      else setUpdMsg(`正在下载更新… ${(p.downloaded / 1048576).toFixed(1)} MB`);
+      // 两条链路共用后端同一个事件，按「当前在下载哪一路」分流到各自的提示位
+      const setter = ghDownloadingRef.current ? setGhMsg : setUpdMsg;
+      if (p.message) setter(p.message);
+      else if (p.percent !== null) setter(`正在下载更新… ${p.percent}%`);
+      else setter(`正在下载更新… ${(p.downloaded / 1048576).toFixed(1)} MB`);
     });
     return () => {
       un.then((u) => u());
@@ -238,6 +249,7 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
   // 「下载并安装」：下载 + sha256 校验 + 拉起安装包（Windows 上随后自动退出旧进程）
   const doInstall = async () => {
     if (!upd) return;
+    ghDownloadingRef.current = false;
     setUpdBusy('download');
     setUpdMsg('');
     try {
@@ -248,6 +260,43 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
       setUpdMsg('安装失败: ' + String(e));
     } finally {
       setUpdBusy(null);
+    }
+  };
+
+  // GitHub 直连：检查。与上面那条链路共用 `install_update`，安装闸门完全一致。
+  const doCheckGithub = async () => {
+    setGhBusy('check');
+    setGhMsg('');
+    try {
+      const r = await checkUpdateGithub();
+      if (!r) {
+        setGhUpd(null);
+        setGhMsg('已是最新');
+      } else {
+        setGhUpd(r);
+        setGhMsg('');
+      }
+    } catch (e) {
+      setGhUpd(null);
+      setGhMsg('检查失败: ' + String(e));
+    } finally {
+      setGhBusy(null);
+    }
+  };
+
+  const doInstallGithub = async () => {
+    if (!ghUpd) return;
+    ghDownloadingRef.current = true;
+    setGhBusy('download');
+    setGhMsg('');
+    try {
+      const p = await downloadUpdateGithub(ghUpd.url, ghUpd.sha256);
+      setGhMsg('校验通过，正在启动安装…');
+      await installUpdate(p);
+    } catch (e) {
+      setGhMsg('安装失败: ' + String(e));
+    } finally {
+      setGhBusy(null);
     }
   };
 
@@ -482,7 +531,8 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
   const pickSyncDir = async () => {
     const selected = await open({ directory: true, multiple: false });
     if (typeof selected === 'string') {
-      update('sync_dir', selected);
+      // 必须 persist：update() 只改本地 state，选完目录不写盘 = 设置直接丢失
+      persist({ sync_dir: selected }, '已保存同步目录');
     }
   };
 
@@ -716,6 +766,7 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
             placeholder="例如 D:/ClipSync"
             value={cfg.sync_dir ?? ''}
             onChange={(e) => update('sync_dir', e.target.value)}
+            {...textSave('sync_dir', (s) => s)}
           />
           <button className="btn btn-sm btn-ghost" onClick={pickSyncDir}>
             浏览
@@ -727,7 +778,7 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
         <input
           type="checkbox"
           checked={cfg.auto_pull_enabled ?? false}
-          onChange={(e) => update('auto_pull_enabled', e.target.checked)}
+          onChange={(e) => persist({ auto_pull_enabled: e.target.checked })}
         />
       </div>
       <div className="row">
@@ -776,6 +827,14 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
             const v = Math.round(Number(s));
             return Number.isFinite(v) && v >= 0 ? v : 0;
           })}
+        />
+      </div>
+      <div className="row">
+        <label>跳过 0 字节文件（默认开，复制空文件时不推送）</label>
+        <input
+          type="checkbox"
+          checked={cfg.skip_empty_files ?? true}
+          onChange={(e) => persist({ skip_empty_files: e.target.checked })}
         />
       </div>
 
@@ -1142,6 +1201,27 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
               : updMsg
                 ? ` · ${updMsg}`
                 : ''}
+          </p>
+
+          <div className="row">
+            <label>检查新版本（直连 GitHub 仓库）</label>
+            <button onClick={doCheckGithub} disabled={ghBusy !== null}>
+              {ghBusy === 'check' ? '检查中…' : '检查更新 GitHub'}
+            </button>
+            {ghUpd && (
+              <button onClick={doInstallGithub} disabled={ghBusy !== null}>
+                {ghBusy === 'download' ? '下载中…' : `下载并安装 v${ghUpd.version}`}
+              </button>
+            )}
+          </div>
+          <p className="hint">
+            {ghUpd
+              ? `远端 v${ghUpd.version}${ghUpd.pub_date ? `（${ghUpd.pub_date}）` : ''}${
+                  ghUpd.notes ? `：${ghUpd.notes}` : ''
+                }`
+              : ghMsg
+                ? ghMsg
+                : '与上面那条互不影响：服务端连不上时可走这条，安装包直接来自 GitHub'}
           </p>
         </>
       ) : (

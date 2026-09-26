@@ -61,6 +61,13 @@ pub struct AppConfig {
     /// 0 视为「不限制」（任何大小的文件夹都正常同步）。默认 100。
     #[serde(default = "default_max_folder_files")]
     pub max_folder_files: usize,
+    /// 复制的文件里含 **0 字节**文件时，是否跳过不推送（默认开）。
+    ///
+    /// 0B 文件多半是占位符、被中断下载的残渣、程序锁文件之类；推给对端只会让对方
+    /// 拿到一个空文件，白占一次传输与一条待拉取提示。关掉即恢复「原样推送」。
+    /// 只影响**本机主动复制**的推送，接收侧行为不变。
+    #[serde(default = "default_true")]
+    pub skip_empty_files: bool,
     // ===== 跨局域网中转（服务端）相关配置 =====
     /// 服务端 WebSocket 地址，例如 `ws://your-host:20070/ws`。为空表示不使用服务端（仅局域网直连）。
     #[serde(default)]
@@ -173,6 +180,7 @@ impl Default for AppConfig {
             auto_pull_enabled: false,
             auto_pull_threshold_mb: 1,
             max_folder_files: 100,
+            skip_empty_files: true,
             server_url: String::new(),
             network_token: String::new(),
             ext_file_ep: String::new(),
@@ -222,5 +230,17 @@ mod tests {
             ..AppConfig::default()
         };
         assert_eq!(z.auto_pull_threshold_bytes(), 0);
+    }
+
+    #[test]
+    fn skip_empty_files_defaults_to_on() {
+        assert!(AppConfig::default().skip_empty_files);
+        // 老配置里没有这个字段 ⇒ 也要回退到「开」
+        let old: AppConfig = serde_json::from_str(r#"{"device_name":"x","auto_start":false,
+            "sync_text":true,"sync_image":true,"sync_file":true,"max_file_size_mb":10,
+            "max_image_size_mb":50,"listen_port":20071,"enable_mdns":true,
+            "manual_addresses":[],"sync_primary_selection":false,"cache_ttl_hours":24}"#)
+        .unwrap();
+        assert!(old.skip_empty_files, "旧配置缺字段时必须默认跳过 0 字节文件");
     }
 }
