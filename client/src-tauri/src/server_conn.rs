@@ -593,6 +593,12 @@ impl ServerConn {
 
         let cfg = self.app.state::<AppState>().config.lock().clone();
         if cfg.network_token.trim().is_empty() {
+            // 别静默返回：这条路径下客户端**不会发起连接**，日志里原本一片空白。
+            // 注意 token 正常是存在系统密钥链里的（见 config::merge_network_token），
+            // 只有在密钥链读取失败/确实没配过时才会走到这里。
+            tracing::warn!(
+                "未配置网络 Access Token，跳过连接服务端 —— 请在「设置 → 网络 Token」里填入（管理页可查看/复制）"
+            );
             anyhow::bail!("network_token 为空，无法连接服务端");
         }
         let mut hw = self.cached_hw_id.lock().clone();

@@ -16,6 +16,7 @@ import {
   scanLanServerConfigs,
   applyLanServerConfig,
   clearNetworkToken,
+  revealNetworkToken,
   firewallRuleExists,
   firewallFix,
   openLogWindow,
@@ -135,6 +136,8 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
   }>({ open: false, groups: [] });
   // Network Token 显隐：默认隐藏（星号）
   const [showToken, setShowToken] = useState(false);
+  // 「显示」时向后端要真值（默认不回显），拿到后缓存；编辑或清空即失效
+  const [revealedToken, setRevealedToken] = useState<string | null>(null);
   // 防火墙修复：规则是否已放行 / 修复中
   const [fwOk, setFwOk] = useState<boolean | null>(null);
   const [fwBusy, setFwBusy] = useState(false);
@@ -976,7 +979,13 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
                 : '服务端创建网络时返回的一次性 Token'
             }
             // 占位符不当内容显示：留空即「不改动」（真实 Token 由 Rust 侧保留）
-            value={tokenIsSet ? '' : (cfg.network_token ?? '')}
+            value={
+              showToken && tokenIsSet
+                ? (revealedToken ?? '')
+                : tokenIsSet
+                  ? ''
+                  : (cfg.network_token ?? '')
+            }
             onChange={(e) => update('network_token', e.target.value)}
             // 不用 textSave：它把「空串 ≠ 持久值」当变化提交，而这里空串恰恰是
             // 「不改动」的表示（真实 Token 在后端）。回车/失焦只提交非空的新值。
@@ -989,7 +998,22 @@ export default function SettingsPage({ onBack }: { onBack: () => void }) {
             type="button"
             aria-label={showToken ? '隐藏 Token' : '显示 Token'}
             title={showToken ? '隐藏 Token' : '显示 Token'}
-            onClick={() => setShowToken((v) => !v)}
+            onClick={async () => {
+              if (showToken) {
+                setShowToken(false);
+                return;
+              }
+              // 已设置但真值不回显：点「显示」时按需取一次
+              if (tokenIsSet && revealedToken === null) {
+                try {
+                  setRevealedToken(await revealNetworkToken());
+                } catch (e) {
+                  setMsg('读取 Token 失败: ' + String(e));
+                  return;
+                }
+              }
+              setShowToken(true);
+            }}
             style={{
               position: 'absolute',
               right: '0.45rem',

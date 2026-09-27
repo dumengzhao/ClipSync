@@ -100,10 +100,16 @@ const KEYRING_ACCOUNT_TOKEN: &str = "network_token";
 /// 读取时把密钥链里的网络密钥合并回来；若配置文件里还留着老的明文 token，
 /// 顺手迁移进密钥链并重写配置（抹掉明文）。
 fn merge_network_token(app: &tauri::AppHandle, mut cfg: AppConfig) -> AppConfig {
-    let from_keyring = crate::crypto::keystore::load(KEYRING_SERVICE, KEYRING_ACCOUNT_TOKEN)
-        .ok()
-        .and_then(|bytes| String::from_utf8(bytes).ok())
-        .filter(|t| !t.is_empty());
+    let from_keyring = match crate::crypto::keystore::load(KEYRING_SERVICE, KEYRING_ACCOUNT_TOKEN) {
+        Ok(bytes) => String::from_utf8(bytes).ok().filter(|t| !t.is_empty()),
+        Err(e) => {
+            // 读不出来就当成「没有」，但**必须留痕**：否则 token 明明在密钥链里，
+            // 客户端却会静默地不连服务端（2026-09-27 那次「设备连不上、日志一片空白」
+            // 就是这个形状 —— 只能靠翻源码才看出来）。
+            tracing::warn!("从系统密钥链读取网络密钥失败（本次将视为未配置）：{e}");
+            None
+        }
+    };
     match from_keyring {
         Some(t) => cfg.network_token = t,
         // 密钥链里没有、但配置文件里有（老版本遗留的明文）：迁移进密钥链后抹掉明文

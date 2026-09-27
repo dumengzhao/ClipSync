@@ -375,6 +375,11 @@ export async function scanLanServerConfigs(): Promise<LanServerConfigSummary[]> 
   return invoke<LanServerConfigSummary[]>('scan_lan_server_configs');
 }
 
+/** 取出真实的网络 Token 供设置页「显示」按钮展示（默认不回显，见 get_config 的占位符说明）。 */
+export async function revealNetworkToken(): Promise<string> {
+  return invoke<string>('reveal_network_token');
+}
+
 /** 显式清空本机网络 Token（仅由设置页「清空」按钮调用）。
  *  单独成命令：让「清空中继密钥」成为显式、不可误触的动作——set_config 一律把空
  *  Token 视为「不改动」。 */

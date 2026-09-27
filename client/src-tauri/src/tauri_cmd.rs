@@ -402,6 +402,16 @@ pub fn pair_manual(
 /// 单独成命令的原因：让「清空中继密钥」成为一个**显式、不可误触**的动作。
 /// `set_config` 一律把空 token 视为「不改动」，否则前端把「已设置」的输入框
 /// 当空串提交时就会悄悄抹掉密钥（服务端只存 token 的 hash，抹掉即不可恢复）。
+/// 显式取出真实的网络 Token（仅由设置页「显示」按钮调用）。
+///
+/// 默认**不回显**：`get_config` 一律把真值换成占位符（见 `NETWORK_TOKEN_SENTINEL`），
+/// 这样「空串 = 不改动」的语义才成立、真值也不随前端状态来回读写。
+/// 想看/复制时走这个命令 —— 明文只在 Rust → 渲染器的这一次调用里出现。
+#[tauri::command]
+pub fn reveal_network_token(state: State<AppState>) -> Result<String, String> {
+    Ok(state.config.lock().network_token.clone())
+}
+
 #[tauri::command]
 pub fn clear_network_token(state: State<AppState>, app: AppHandle) -> Result<(), String> {
     let mut cfg = state.config.lock().clone();
