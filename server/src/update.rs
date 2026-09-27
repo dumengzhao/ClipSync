@@ -15,7 +15,6 @@ use axum::extract::{Multipart, Path, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -286,77 +285,8 @@ pub async fn download_file(
 
 // ---------- 公开下载页（无需登录） ----------
 
-/// 文件里没有版本号时归到这个组（公开页会把它过滤掉，管理页留着便于排查）。
+/// 文件里没有版本号时归到这个组；公开页会把它过滤掉（认不出版本的杂物不该挂出去）。
 const UNKNOWN_VERSION: &str = "未识别版本";
-
-/// 公开下载页的开关，落盘在 `<update_dir>/downloads.json`。
-///
-/// 默认**只公开当前线上版本**：数据目录里往往还躺着测试包、中途失败的版本，
-/// 一开历史就等于把它们也挂到公网。要公开历史得管理员显式打开（见管理页开关）。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct DownloadsConfig {
-    #[serde(default)]
-    pub public_history: bool,
-}
-
-fn downloads_config_path(update_dir: &std::path::Path) -> std::path::PathBuf {
-    update_dir.join("downloads.json")
-}
-
-/// 读开关：文件不存在/读不动一律当**关闭**（失败要往安全一侧倒）。
-async fn load_downloads_config(update_dir: &std::path::Path) -> DownloadsConfig {
-    tokio::fs::read_to_string(downloads_config_path(update_dir))
-        .await
-        .ok()
-        .and_then(|s| serde_json::from_str::<DownloadsConfig>(&s).ok())
-        .unwrap_or_default()
-}
-
-fn save_downloads_config(
-    update_dir: &std::path::Path,
-    cfg: &DownloadsConfig,
-) -> Result<(), String> {
-    let text = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
-    crate::storage::atomic_write(&downloads_config_path(update_dir), &text)
-        .map_err(|e| e.to_string())
-}
-
-#[derive(Debug, Deserialize)]
-pub struct PublicHistoryBody {
-    pub enabled: bool,
-}
-
-/// POST /api/admin/update/downloads —— 切换公开下载页是否列出历史版本（需登录）。
-pub async fn admin_set_downloads(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<PublicHistoryBody>,
-) -> Response {
-    let cfg = DownloadsConfig {
-        public_history: body.enabled,
-    };
-    match save_downloads_config(&state.update_dir, &cfg) {
-        Ok(()) => {
-            tracing::info!(
-                "公开下载页：历史版本{}",
-                if cfg.public_history {
-                    "已公开（所有历史包任何人都能下载）"
-                } else {
-                    "只公开当前线上版本"
-                }
-            );
-            (
-                StatusCode::OK,
-                Json(json!({ "ok": true, "public_history": cfg.public_history })),
-            )
-                .into_response()
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": format!("写入 downloads.json 失败：{e}") })),
-        )
-            .into_response(),
-    }
-}
 
 /// GET /update/versions.json —— **公开**（无鉴权）：给下载页用的版本数据。
 ///
@@ -367,7 +297,6 @@ pub async fn admin_set_downloads(
 /// 这样同一个端点在局域网 HTTP、公网 HTTPS、反代域名下都对，服务端不需要知道自己的外网地址。
 pub async fn public_versions(State(state): State<Arc<AppState>>) -> Response {
     let current = current_version_of(&state).await;
-    let cfg = load_downloads_config(&state.update_dir).await;
 
     // 当前版本：以 latest.json 为准（notes / pub_date 只有这里有）
     let mut platforms = serde_json::Map::new();
@@ -403,19 +332,14 @@ pub async fn public_versions(State(state): State<Arc<AppState>>) -> Response {
         }
     }
 
-    // 历史：开关打开时才给（排除当前版本，也排除认不出版本的组）。
-    // 扫描目录只在真要给出历史时才做 —— 这是个**匿名**端点，别让关掉开关的部署
-    // 每个请求都白扫一遍文件系统。
-    let history: Vec<Value> = if cfg.public_history {
-        scan_version_groups(&state)
-            .await
-            .iter()
-            .filter(|(v, _, _)| v != UNKNOWN_VERSION && current.as_deref() != Some(v.as_str()))
-            .map(|(v, ts, files)| json!({ "version": v, "updated_at": ts, "files": files }))
-            .collect()
-    } else {
-        Vec::new()
-    };
+    // 历史版本：**始终列出**（这是下载页的主要用途之一）。
+    // 只排除两类：当前版本（上面单独展示了）与「认不出版本」的杂物组。
+    let history: Vec<Value> = scan_version_groups(&state)
+        .await
+        .iter()
+        .filter(|(v, _, _)| v != UNKNOWN_VERSION && current.as_deref() != Some(v.as_str()))
+        .map(|(v, ts, files)| json!({ "version": v, "updated_at": ts, "files": files }))
+        .collect();
 
     (
         [(CONTENT_TYPE, "application/json")],
@@ -424,7 +348,6 @@ pub async fn public_versions(State(state): State<Arc<AppState>>) -> Response {
             "pub_date": pub_date,
             "notes": notes,
             "platforms": platforms,
-            "public_history": cfg.public_history,
             "history": history,
         })
         .to_string(),
@@ -580,41 +503,6 @@ async fn scan_version_groups(state: &AppState) -> Vec<(String, u64, Vec<Value>)>
             .then(b.1.cmp(&a.1))
     });
     versions
-}
-
-/// GET /api/admin/update/history —— **所有历史上的安装包**，按版本分组。
-///
-/// 历史是自然存在的：包按 `files/<platform>/<文件名>` 落盘，而文件名里带版本号，
-/// 新版本不会覆盖旧版本 —— 所以这个端点不需要额外记账，直接扫目录即可。
-/// 手动上传的包与「从 GitHub 同步」下来的包都在同一个目录里，一并在列。
-pub async fn admin_history(State(state): State<Arc<AppState>>) -> Response {
-    let current = current_version_of(&state).await;
-    let groups = scan_version_groups(&state).await;
-    let total: usize = groups.iter().map(|(_, _, f)| f.len()).sum();
-    let out: Vec<Value> = groups
-        .into_iter()
-        .map(|(v, ts, files)| {
-            json!({
-                "version": v,
-                "updated_at": ts,
-                "is_current": current.as_deref() == Some(v.as_str()),
-                "files": files,
-            })
-        })
-        .collect();
-
-    (
-        [(CONTENT_TYPE, "application/json")],
-        json!({
-            "current_version": current,
-            "total_files": total,
-            "versions": out,
-            // 公开下载页是否列出历史（管理页的开关状态回显）
-            "public_history": load_downloads_config(&state.update_dir).await.public_history,
-        })
-        .to_string(),
-    )
-        .into_response()
 }
 
 /// GET /api/admin/update —— 当前线上版本摘要（无发布则 404）。
@@ -1574,66 +1462,6 @@ mod history_tests {
         })
     }
 
-    #[tokio::test]
-    async fn history_groups_by_version_and_marks_current() {
-        let state = tmp_state();
-        let root = state.update_dir.join("files");
-        for p in ["windows-x86_64", "linux-x86_64", "darwin-aarch64"] {
-            std::fs::create_dir_all(root.join(p)).unwrap();
-        }
-        let put = |p: &str, n: &str, size: usize| {
-            std::fs::write(root.join(p).join(n), vec![b'x'; size]).unwrap();
-        };
-        put("windows-x86_64", "ClipSync_0.3.2_x64-setup.exe", 100);
-        put("linux-x86_64", "ClipSync_0.3.2_amd64.AppImage", 300);
-        put("darwin-aarch64", "ClipSync_0.3.1_aarch64.dmg", 200);
-        // 干扰项：上传中断留下的半成品，不该出现在历史里
-        put("windows-x86_64", "ClipSync_0.3.2_x64-setup.exe.tmp", 50);
-        // 当前线上版本
-        std::fs::write(
-            state.update_dir.join("latest.json"),
-            r#"{"version":"0.3.2","notes":"","pub_date":"","platforms":{}}"#,
-        )
-        .unwrap();
-
-        let resp = admin_history(State(state.clone())).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = http_body_util::BodyExt::collect(resp.into_body())
-            .await
-            .unwrap()
-            .to_bytes();
-        let v: Value = serde_json::from_slice(&bytes).unwrap();
-
-        assert_eq!(v["current_version"], "0.3.2");
-        assert_eq!(v["total_files"], 3, "临时文件不该被算进去");
-        let versions = v["versions"].as_array().unwrap();
-        assert_eq!(versions.len(), 2, "应分成两个版本组: {v}");
-        // 0.3.2 有两个平台、且被标记为当前
-        assert_eq!(versions[0]["version"], "0.3.2");
-        assert_eq!(versions[0]["is_current"], true);
-        assert_eq!(versions[0]["files"].as_array().unwrap().len(), 2);
-        assert_eq!(versions[0]["files"][0]["size"], 300); // linux 排在前（按平台名）
-                                                          // 0.3.1 只剩 darwin
-        assert_eq!(versions[1]["version"], "0.3.1");
-        assert_eq!(versions[1]["is_current"], false);
-        assert_eq!(versions[1]["files"][0]["platform"], "darwin-aarch64");
-    }
-
-    #[tokio::test]
-    async fn history_is_empty_and_calm_without_files() {
-        let state = tmp_state();
-        let resp = admin_history(State(state.clone())).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = http_body_util::BodyExt::collect(resp.into_body())
-            .await
-            .unwrap()
-            .to_bytes();
-        let v: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["total_files"], 0);
-        assert_eq!(v["versions"].as_array().unwrap().len(), 0);
-        assert!(v["current_version"].is_null());
-    }
-
     // ---------- 公开下载页 ----------
 
     async fn body_json(resp: Response) -> Value {
@@ -1671,100 +1499,67 @@ mod history_tests {
         .unwrap();
     }
 
-    /// 默认（开关关）：只给当前版本，历史一律不出现在公开数据里。
+    /// 公开数据里**始终**包含历史版本（含当前版本单独展示的平台清单）。
     #[tokio::test]
-    async fn public_versions_hides_history_by_default() {
+    async fn public_versions_lists_current_and_history() {
         let state = tmp_state();
         seed_downloads_fixture(&state);
         let v = body_json(public_versions(State(state.clone())).await).await;
 
+        // 当前版本：来自 latest.json
         assert_eq!(v["version"], "0.3.2");
         assert_eq!(v["notes"], "修了几个 bug");
         assert_eq!(v["pub_date"], "2026-09-25T10:00:00Z");
-        assert_eq!(v["public_history"], false);
-        assert_eq!(
-            v["history"].as_array().unwrap().len(),
-            0,
-            "默认不该泄露历史"
-        );
         assert_eq!(v["platforms"]["windows-x86_64"]["available"], true);
         assert_eq!(v["platforms"]["windows-x86_64"]["size"], 111);
-    }
 
-    /// 打开开关：给出历史版本，但仍要藏起「认不出版本」的杂物与当前版本本身。
-    #[tokio::test]
-    async fn public_versions_lists_history_when_enabled() {
-        let state = tmp_state();
-        seed_downloads_fixture(&state);
-        save_downloads_config(
-            &state.update_dir,
-            &DownloadsConfig {
-                public_history: true,
-            },
-        )
-        .unwrap();
-
-        let v = body_json(public_versions(State(state.clone())).await).await;
-        assert_eq!(v["public_history"], true);
+        // 历史版本：总是列出，且要藏起「认不出版本」的杂物与当前版本自身
         let h = v["history"].as_array().unwrap();
-        assert_eq!(h.len(), 1, "只应有一个历史版本: {v}");
+        assert_eq!(h.len(), 1, "应有一个历史版本: {v}");
         assert_eq!(h[0]["version"], "0.3.1");
         assert_eq!(h[0]["files"][0]["filename"], "ClipSync_0.3.1_aarch64.dmg");
-        // 当前版本不重复出现在历史里，杂物分组也不出现
         for g in h {
-            assert_ne!(g["version"], "0.3.2");
-            assert_ne!(g["version"], UNKNOWN_VERSION);
+            assert_ne!(g["version"], "0.3.2", "当前版本不该重复出现在历史里");
+            assert_ne!(g["version"], UNKNOWN_VERSION, "认不出版本的杂物不该公开");
         }
     }
 
-    /// 安全默认值：配置缺失/坏掉一律当「不公开历史」。
+    /// 空目录也要给一份能渲染的稳定结构（下载页据此显示「还没有发布任何版本」）。
     #[tokio::test]
-    async fn downloads_config_fails_closed() {
+    async fn public_versions_is_calm_without_files() {
         let state = tmp_state();
-        assert!(
-            !load_downloads_config(&state.update_dir)
-                .await
-                .public_history
-        );
-        std::fs::write(downloads_config_path(&state.update_dir), b"{ not json").unwrap();
-        assert!(
-            !load_downloads_config(&state.update_dir)
-                .await
-                .public_history
-        );
-        assert!(
-            !serde_json::from_str::<DownloadsConfig>("{}")
-                .unwrap()
-                .public_history
-        );
+        let v = body_json(public_versions(State(state.clone())).await).await;
+        assert!(v["version"].is_null());
+        assert_eq!(v["history"].as_array().unwrap().len(), 0);
+        assert_eq!(v["platforms"].as_object().unwrap().len(), 0);
     }
 
-    /// 开关端点读写往返。
+    /// 扫描分组本身：版本降序、组内按平台、跳过 .tmp 半成品。
     #[tokio::test]
-    async fn admin_toggle_roundtrip() {
+    async fn scan_groups_versions_and_skips_partial_files() {
         let state = tmp_state();
-        let resp = admin_set_downloads(
-            State(state.clone()),
-            Json(PublicHistoryBody { enabled: true }),
+        seed_downloads_fixture(&state);
+        let root = state.update_dir.join("files");
+        // 半成品（上传中断留下）不该被算进任何版本
+        std::fs::write(
+            root.join("windows-x86_64")
+                .join("ClipSync_0.3.3_x64-setup.exe.tmp"),
+            b"partial",
         )
-        .await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert!(
-            load_downloads_config(&state.update_dir)
-                .await
-                .public_history
-        );
+        .unwrap();
 
-        let resp = admin_set_downloads(
-            State(state.clone()),
-            Json(PublicHistoryBody { enabled: false }),
-        )
-        .await;
-        assert_eq!(resp.status(), StatusCode::OK);
+        let groups = scan_version_groups(&state).await;
+        let versions: Vec<&str> = groups.iter().map(|(v, _, _)| v.as_str()).collect();
+        // 0.3.2（当前）与 0.3.1（历史）都在；.tmp 不产生 0.3.3 组
+        assert!(versions.contains(&"0.3.2"));
+        assert!(versions.contains(&"0.3.1"));
         assert!(
-            !load_downloads_config(&state.update_dir)
-                .await
-                .public_history
+            !versions.contains(&"0.3.3"),
+            "半成品文件不该成组: {versions:?}"
         );
+        // 版本号降序
+        let idx_current = versions.iter().position(|v| *v == "0.3.2").unwrap();
+        let idx_old = versions.iter().position(|v| *v == "0.3.1").unwrap();
+        assert!(idx_current < idx_old, "新版应排在前面: {versions:?}");
     }
 }

@@ -99,28 +99,21 @@ SERVICE
 }
 install_service
 
-# env：首次部署用示例生成（ADMIN_PASS 留空），已存在则保留。
-# 无论首次还是更新，若 ADMIN_PASS 为空则随机生成，避免空密码上线。
+# env：首次部署用示例生成；**已存在则原样保留**（更新时线上配置不受影响）。
+#
+# 注意：服务端**没有任何凭据类环境变量** —— 管理员口令是 <数据目录>/admin.json 里的
+# Argon2id 哈希，首次部署后在管理页「初始化」卡片粘贴自生成的哈希串（见 README）。
 ENV_FILE="$INSTALL_DIR/clipsync-server.env"
 if [ ! -f "$ENV_FILE" ]; then
   if [ -f "$SCRIPT_DIR/clipsync-server.env.example" ]; then
     cp "$SCRIPT_DIR/clipsync-server.env.example" "$ENV_FILE"
   else
-    cat > "$ENV_FILE" <<ENV
-CLIPSYNC_DATA_DIR=$INSTALL_DIR/data
-ADMIN_USER=admin
-ADMIN_PASS=
-LISTEN=0.0.0.0:$PORT
-ENV
+    {
+      printf 'CLIPSYNC_DATA_DIR=%s\n' "$INSTALL_DIR/data"
+      printf 'LISTEN=0.0.0.0:%s\n' "$PORT"
+    } > "$ENV_FILE"
   fi
   echo ">>> 已生成 env -> $ENV_FILE (权限 600)"
-fi
-
-# ADMIN_PASS 为空（首次占位或手填空）则随机生成并写回
-if ! grep -Eq '^ADMIN_PASS=.+' "$ENV_FILE"; then
-  PASS="$(openssl rand -hex 12)"
-  sed -i "s|^ADMIN_PASS=.*|ADMIN_PASS=$PASS|" "$ENV_FILE"
-  echo ">>> 已生成随机管理员密码（请记好）: $PASS"
 fi
 chmod 600 "$ENV_FILE"
 
@@ -141,7 +134,8 @@ if [ "$DO_START" -eq 1 ]; then
     echo ">>> 服务状态: $(systemctl is-active "$SVC")"
     echo ">>> 健康检查: $(curl -fsS "http://127.0.0.1:$PORT/healthz" || echo '无响应(服务可能还在起)')"
   else
-    echo ">>> 服务未运行，查看日志: journalctl -u $SVC -n 50" >&2
+    echo ">>> 服务未运行。业务日志只写文件：tail -n 50 $INSTALL_DIR/data/logs/clipsync-server.log.*" >&2
+    echo ">>> （启动失败的 panic 才在 journal 里：journalctl -u $SVC -n 50）" >&2
     exit 1
   fi
 fi
@@ -149,3 +143,8 @@ fi
 echo
 echo "部署完成。可选下一步：配置 nginx 反代（见 nginx-clipsync.conf.example），"
 echo "走 nginx TLS 时桌面端服务器地址填 wss://域名。"
+echo
+echo "若还没初始化过管理员口令（本机没有 admin.json），还需要："
+echo "  1) $INSTALL_DIR/clipsync-server hash          # 交互输入口令，输出 Argon2id 哈希串"
+echo "  2) 打开 http://<服务器地址>:$PORT/admin ，在「初始化」卡片里粘贴哈希串 + 用户名"
+echo "  （服务端不存明文口令；忘记口令就删 $INSTALL_DIR/data/admin.json 重启重来）"

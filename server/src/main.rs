@@ -109,6 +109,7 @@ fn build_router(state: Arc<AppState>) -> axum::Router {
             get(admin::list_networks).post(admin::create_network),
         )
         .route("/api/admin/networks/:id/rename", post(admin::rename_network))
+        .route("/api/admin/networks/:id/token", post(admin::set_network_token))
         .route("/api/admin/networks/:id/devices", get(admin::list_devices))
         .route(
             "/api/admin/networks/:id/devices/:dev/enable",
@@ -134,11 +135,6 @@ fn build_router(state: Arc<AppState>) -> axum::Router {
         .route(
             "/api/admin/update",
             get(update::admin_info).post(update::admin_upload),
-        )
-        .route("/api/admin/update/history", get(update::admin_history))
-        .route(
-            "/api/admin/update/downloads",
-            post(update::admin_set_downloads),
         )
         .route("/api/admin/password", post(admin::change_password))
         // 上传安装包可能 >2MB，须放开 axum 默认的 2MB DefaultBodyLimit

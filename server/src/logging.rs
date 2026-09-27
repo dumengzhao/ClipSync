@@ -123,6 +123,25 @@ fn prune_old_logs(dir: &std::path::Path) {
     }
 }
 
+/// 是否**同时**把日志打到 stdout。
+///
+/// 默认**不打**（2026-09-27 用户要求）：日志只进文件，控制台窗口保持干净 ——
+/// 想看实时日志就跟文件（`Get-Content <file> -Wait` / `tail -f`）。
+/// 需要临时在终端看时设 `CLIPSYNC_LOG_STDOUT=1`。
+///
+/// 唯一的例外：**日志目录建不出来时强制走 stdout**（见 `init`），否则一条日志都留不下。
+fn stdout_enabled() -> bool {
+    parse_bool_env(&std::env::var("CLIPSYNC_LOG_STDOUT").unwrap_or_default())
+}
+
+/// 宽松地解析布尔环境变量：`1/true/yes/on`（忽略大小写）为真，其余为假。
+fn parse_bool_env(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 /// 初始化日志。幂等：重复调用只会保留第一次的设置（`try_init` 失败即忽略）。
 pub fn init(data_dir: &str) {
     let level = log_level();
@@ -148,17 +167,20 @@ pub fn init(data_dir: &str) {
             );
         }
         Err(e) => {
-            // 日志目录建不出来就只走 stdout，别让服务起不来
+            // 日志目录建不出来：退回 stdout，至少别把日志全丢掉（服务照常启动）
             eprintln!(
-                "[clipsync-server] 无法创建日志目录 {}：{e}（只输出到 stdout）",
+                "[clipsync-server] 无法创建日志目录 {}：{e} —— 改为输出到 stdout",
                 dir.display()
             );
         }
     }
-    let stdout_layer = tracing_subscriber::fmt::layer()
-        .with_timer(LocalTimer)
-        .with_target(false)
-        .with_writer(std::io::stdout);
+    // 默认不往控制台打；目录建不出来时（file_layer 为 None）无条件退回 stdout
+    let stdout_layer = (stdout_enabled() || file_layer.is_none()).then(|| {
+        tracing_subscriber::fmt::layer()
+            .with_timer(LocalTimer)
+            .with_target(false)
+            .with_writer(std::io::stdout)
+    });
 
     if let Err(e) = registry()
         .with(stdout_layer)
@@ -172,7 +194,7 @@ pub fn init(data_dir: &str) {
     }
 
     tracing::info!(
-        "日志已启动：级别={level}，日志目录={}（按天滚动，保留 {LOG_KEEP_DAYS} 天）",
+        "日志已启动：级别={level}，只写文件 {}（按天滚动，保留 {LOG_KEEP_DAYS} 天）",
         dir.display()
     );
 }
@@ -197,6 +219,19 @@ mod tests {
         let out = clean(&long);
         assert_eq!(out.chars().count(), 201, "200 字符 + 省略号");
         assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn stdout_switch_is_off_by_default_and_lenient() {
+        // 默认不打到控制台（用户要求：只写文件）
+        assert!(!parse_bool_env(""));
+        assert!(!parse_bool_env("0"));
+        assert!(!parse_bool_env("no"));
+        assert!(!parse_bool_env("随便写点啥"));
+        // 显式打开的各种写法
+        for on in ["1", "true", "TRUE", " yes ", "on"] {
+            assert!(parse_bool_env(on), "应识别为开启: {on:?}");
+        }
     }
 
     #[test]

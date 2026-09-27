@@ -174,6 +174,65 @@ pub struct CreateNetBody {
     pub name: String,
     #[serde(default)]
     pub description: String,
+    /// 手动指定的 Network Token；`None` / 空白 = 自动生成。
+    #[serde(default)]
+    pub token: Option<String>,
+}
+
+/// 手动输入 Token 的长度下限。
+///
+/// 它**不是**一个普通的标识符，而是共享密钥：服务端拿它做接入鉴权，客户端之间还用
+/// 它派生跨 LAN 文字的加密密钥。太短意味着可被离线爆破 ⇒ 下限比管理员口令（8 位）更严。
+const TOKEN_MIN_LEN: usize = 16;
+/// 手动输入 Token 的长度上限（防止把大段文本塞进来）。
+const TOKEN_MAX_LEN: usize = 128;
+
+/// 校验**手动输入**的 Network Token。
+///
+/// 只做「够长、无空白、无控制字符」这几件确定的事；不做「必须有数字/大小写」这类
+/// 复杂度规则 —— 那是口令的思路，而这里真正的强度来源是长度与随机性（点「随机生成」即可）。
+pub fn validate_network_token(raw: &str) -> Result<String, String> {
+    let t = raw.trim();
+    let n = t.chars().count();
+    if n < TOKEN_MIN_LEN {
+        return Err(format!(
+            "Token 至少 {TOKEN_MIN_LEN} 位（它是共享密钥，太短会被爆破；也可以点「随机生成」）"
+        ));
+    }
+    if n > TOKEN_MAX_LEN {
+        return Err(format!("Token 过长（上限 {TOKEN_MAX_LEN} 位）"));
+    }
+    if t.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("Token 不能包含空格、换行等空白字符".into());
+    }
+    Ok(t.to_string())
+}
+
+/// 解析「用户给的 token 或自动生成一个」，并检查不与已有网络重复。
+///
+/// 重复检查是必须的：Token 决定设备归属哪个网络，两个网络用同一个 Token 会让
+/// 接入方的归属变得不确定（也让「禁用某设备」这类操作可能落到错误的网络上）。
+///
+/// `skip` 是「排除自己的下标」——轮换时要把当前网络排除，否则「重设成同一个值」会被判重复。
+/// 只比对 `token_hash`，不去 clone 网络（每个网络里还挂着设备列表）。
+fn resolve_network_token(
+    nets: &[Network],
+    skip: Option<usize>,
+    requested: Option<&str>,
+) -> Result<String, String> {
+    let token = match requested.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(t) => validate_network_token(t)?,
+        None => gen_token(),
+    };
+    let h = hash_token(&token);
+    let dup = nets
+        .iter()
+        .enumerate()
+        .any(|(i, n)| Some(i) != skip && n.token_hash == h);
+    if dup {
+        return Err("这个 Token 已经被另一个网络使用了，请换一个".into());
+    }
+    Ok(token)
 }
 
 #[derive(serde::Deserialize)]
@@ -476,25 +535,86 @@ pub async fn list_networks(State(state): State<Arc<AppState>>) -> Json<Value> {
 pub async fn create_network(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateNetBody>,
-) -> Json<Value> {
-    let token = gen_token();
-    let net = Network {
-        id: gen_token(),
-        token_hash: hash_token(&token),
-        token: token.clone(),
-        name: body.name,
-        description: body.description,
-        nodes: vec![],
-        removed_devices: vec![],
-        created: crate::state::now_secs(),
-    };
-    {
+) -> Response {
+    // 解析 Token 与「把网络放进列表」必须在**同一个临界区**里完成：
+    // 分两次取锁的话，两个并发请求可能都通过查重，最后落成两个相同 Token 的网络。
+    // 锁里只做内存操作（校验 + 查重 + push），不碰磁盘。
+    let net = {
         let mut nets = state.networks.lock().unwrap();
+        let token = match resolve_network_token(&nets, None, body.token.as_deref()) {
+            Ok(t) => t,
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response()
+            }
+        };
+        let net = Network {
+            id: gen_token(),
+            token_hash: hash_token(&token),
+            token: token.clone(),
+            name: body.name,
+            description: body.description,
+            nodes: vec![],
+            removed_devices: vec![],
+            created: crate::state::now_secs(),
+        };
         nets.push(net.clone());
-    }
+        net
+    };
     let _ = state.save();
     // Token 仅在此处明文返回一次
-    Json(json!({ "id": net.id, "name": net.name, "token": token }))
+    Json(json!({ "id": net.id, "name": net.name, "token": net.token })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct SetTokenBody {
+    /// 新的 Network Token；`None` / 空白 = 自动生成一个。
+    #[serde(default)]
+    pub token: Option<String>,
+}
+
+/// POST /api/admin/networks/:id/token —— 重新设置某个网络的 Token（手填或自动生成）。
+///
+/// 用途是**轮换**：Token 泄露、或想换成自己管理的密钥时用。注意换完之后，
+/// 所有还在用旧 Token 的客户端都会接入失败，必须同步更新 —— 前端会先让管理员确认。
+pub async fn set_network_token(
+    State(state): State<Arc<AppState>>,
+    Path(net_id): Path<String>,
+    Json(body): Json<SetTokenBody>,
+) -> Response {
+    let mut nets = state.networks.lock().unwrap();
+    let Some(idx) = nets.iter().position(|n| n.id == net_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "network not found" })),
+        )
+            .into_response();
+    };
+    // 校验重复时**排除自己**（否则「重新设置成同一个值」会被判重复）；
+    // 与写入放在同一个临界区里，避免并发轮换互相覆盖。
+    let token = match resolve_network_token(&nets, Some(idx), body.token.as_deref()) {
+        Ok(t) => t,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    };
+    nets[idx].token_hash = hash_token(&token);
+    nets[idx].token = token.clone();
+    drop(nets);
+    let _ = state.save();
+    tracing::info!(
+        "网络 {} 的 Token 已重新设置（{}）",
+        net_id,
+        if body
+            .token
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_some()
+        {
+            "手动输入"
+        } else {
+            "自动生成"
+        }
+    );
+    Json(json!({ "ok": true, "id": net_id, "token": token })).into_response()
 }
 
 pub async fn rename_network(
@@ -870,6 +990,84 @@ mod init_tests {
             on_disk_hash(&state),
             Some(mine),
             "第二次不得改写已写入的凭据"
+        );
+    }
+}
+
+/// 手动输入 / 自动生成 Network Token 的回归测试。
+#[cfg(test)]
+mod token_tests {
+    use super::*;
+
+    fn net_with_token(t: &str) -> Network {
+        Network {
+            id: "n1".into(),
+            token_hash: hash_token(t),
+            token: t.into(),
+            name: "net".into(),
+            description: String::new(),
+            nodes: vec![],
+            removed_devices: vec![],
+            created: 0,
+        }
+    }
+
+    #[test]
+    fn manual_token_must_be_long_and_clean() {
+        // 太短：这是共享密钥（还参与跨 LAN 文字加密），不能放行
+        assert!(validate_network_token("short").is_err());
+        assert!(validate_network_token("0123456789abcde").is_err()); // 15 位
+        assert!(validate_network_token("0123456789abcdef").is_ok()); // 16 位
+
+        // 空白与控制字符一律拒绝（换行会污染配置/日志，空格易被误抄）
+        assert!(validate_network_token("0123456789 abcdef").is_err());
+        assert!(validate_network_token("0123456789abcdef\n").is_ok()); // 尾部换行被 trim
+        assert!(validate_network_token("0123\t456789abcdef").is_err());
+
+        // 超长拒绝；正常的值原样返回（并去掉首尾空白）
+        assert!(validate_network_token(&"x".repeat(TOKEN_MAX_LEN + 1)).is_err());
+        assert_eq!(
+            validate_network_token("  my-own-token-0123456789  ").unwrap(),
+            "my-own-token-0123456789"
+        );
+    }
+
+    #[test]
+    fn blank_means_generate_and_duplicates_are_rejected() {
+        let existing = vec![net_with_token("0123456789abcdef")];
+
+        // 留空 / None / 纯空白 → 自动生成（24 字节 hex = 48 字符），且不与已有重复
+        for blank in [None, Some(""), Some("   ")] {
+            let t = resolve_network_token(&existing, None, blank).unwrap();
+            assert_eq!(t.len(), 48, "自动生成的应是 48 位 hex: {t}");
+            assert!(t.chars().all(|c| c.is_ascii_hexdigit()));
+        }
+
+        // 手填合法值 → 原样采用
+        assert_eq!(
+            resolve_network_token(&existing, None, Some("my-token-1234567890")).unwrap(),
+            "my-token-1234567890"
+        );
+
+        // 与已有网络相同 → 拒绝（否则设备归属哪个网络会变得不确定）
+        let e = resolve_network_token(&existing, None, Some("0123456789abcdef")).unwrap_err();
+        assert!(e.contains("已经被另一个网络使用"), "错误信息应可读: {e}");
+    }
+
+    /// 轮换时「排除自己」：`skip` 指向自己时，重设成同一个值不该被判重复；
+    /// 不排除时（`None`）同一个值就该被拦下 —— 两条一起测，才有对照。
+    #[test]
+    fn rotation_excludes_self_when_checking_duplicates() {
+        let mine = "my-token-1234567890";
+        let nets = vec![net_with_token(mine)];
+        assert_eq!(
+            resolve_network_token(&nets, Some(0), Some(mine)).unwrap(),
+            mine,
+            "排除自己后不该判重复"
+        );
+        assert!(
+            resolve_network_token(&nets, None, Some(mine)).is_err(),
+            "对照组：不排除自己时同一个值必须被判重复"
         );
     }
 }

@@ -249,15 +249,6 @@
   .pkg-name.missing{color:var(--amber);cursor:not-allowed}
   .pkg-size,.pkg-time{font-family:var(--mono);font-size:11px;color:var(--muted);text-align:right;white-space:nowrap}
   .pkg-empty{padding:10px 12px;font-size:12px;color:var(--muted)}
-  /* ===== 历史版本：按版本分组，每组一段包列表 ===== */
-  .hist-head{
-    display:flex;align-items:baseline;gap:8px;margin:14px 0 6px;
-    font-family:var(--mono);font-size:13px}
-  .hist-head b{color:var(--text);letter-spacing:.04em}
-  .hist-cur{
-    font-size:10px;color:var(--cyan);border:1px solid var(--line-strong);
-    border-radius:20px;padding:1px 8px;letter-spacing:.06em}
-  .hist-time{margin-left:auto;color:var(--muted);font-size:11px}
   /* ===== 右上角账号（头像 + 下拉菜单）===== */
   .acct{position:relative;display:flex;align-items:center}
   .acct-btn{
@@ -385,10 +376,16 @@
           <div class="form-row" data-page-node-id="TXd5GNqjdPmOJvvm0MYS2O">
             <div class="fld" data-page-node-id="FGJFHcw3AEQ4xDzUEtEpgt"><label data-page-node-id="rGM1efrT16Xys8wEVJcrM3">名称</label><input id="netName" placeholder="如 My Network" data-page-node-id="qpwONQ0hVe2E47nA91l3oP"/></div>
             <div class="fld" data-page-node-id="YpkyiXnvXBCRco4V37lsrF"><label data-page-node-id="gbCXKCSoxRa5B7woAhdjP3">描述（可选）</label><input id="netDesc" placeholder="" data-page-node-id="skDsSAa9xSXavWVVZJEA48"/></div>
+            <div class="fld" style="min-width:300px"><label>Access Token（留空 = 自动生成，至少 16 位）</label>
+              <div style="display:flex;gap:6px">
+                <input id="netToken" placeholder="留空 = 自动生成" autocomplete="off" spellcheck="false" style="flex:1;font-family:var(--mono);font-size:12px"/>
+                <button class="ghost sm" id="netTokenGen" type="button" title="生成一个随机的 Token">随机生成</button>
+              </div>
+            </div>
             <button id="createNet" data-page-node-id="1pjcEFGBTtFRFkm2mLW8hS">创建</button>
           </div>
           <div id="newToken" class="token-box hidden" data-page-node-id="OTFf3pN7kIcdbBYLqyTXGg"></div>
-          <div class="hint" data-page-node-id="bclKHGduVhuZZFAFcoD6J8">⚠ Token 已持久化保存，可在网络明细页随时查看并复制。</div>
+          <div class="hint" data-page-node-id="bclKHGduVhuZZFAFcoD6J8">Token 是<b>共享密钥</b>（服务端接入鉴权 + 跨 LAN 文字加密），手动输入至少 16 位；留空则由服务端自动生成（48 位 hex）。它已持久化保存，可在网络明细页随时查看、复制或重新设置。</div>
         </div>
 
         <div id="netList" class="net-grid" data-page-node-id="3CToDRnVPiYZBGWchysjQC"></div>
@@ -409,21 +406,11 @@
           </div>
           <div class="hint" data-page-node-id="eQ97gcqmSmZYR43VP4BRmZ">选好各平台安装包、填好版本号即可；安装包 <b data-page-node-id="p01iWwZwb0r0xjmSu2BQP1">sha256 由服务端在落盘时计算</b>并写入清单（不再依赖浏览器加密能力）。服务端按<b>平台键合并</b>进线上 latest.json：本次上传的平台覆盖更新，未涉及的平台原样保留，无需一次传齐。</div>
 
-          <!-- 历史版本：数据目录里所有落过盘的包，按版本分组（手动上传 + GitHub 同步都在内） -->
-          <div style="display:flex;align-items:baseline;gap:10px;margin-top:20px;flex-wrap:wrap">
-            <span style="font-family:var(--mono);font-size:12px;letter-spacing:.12em;color:var(--muted)">
-              HISTORY <span class="cnt" id="updHistCount"></span>
-            </span>
-            <button class="ghost sm" id="updHistReload" type="button">刷新列表</button>
+          <!-- 历史版本不在管理页展示：它是给外部用户看的，统一放在公开下载页 -->
+          <div style="margin-top:14px">
             <a href="/downloads" target="_blank" rel="noopener" class="ghost sm"
-               style="text-decoration:none;display:inline-flex;align-items:center;padding:6px 12px;border:1px solid var(--line-strong);border-radius:8px;color:var(--text);font-size:12px">打开公开下载页 ↗</a>
-            <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer"
-                   title="默认关闭：公开页只显示当前线上版本。打开后，下面列出的历史版本也会出现在公开下载页上（含测试包，注意甄别）。">
-              <input type="checkbox" id="updPublicHistory" />
-              公开页也列出历史版本
-            </label>
+               style="text-decoration:none;display:inline-flex;align-items:center;padding:6px 12px;border:1px solid var(--line-strong);border-radius:8px;color:var(--text);font-size:12px">查看公开下载页（含历史版本）↗</a>
           </div>
-          <div id="updHistory" class="hint" style="margin:6px 0 0">加载中…</div>
         </div>
 
         <!-- ===== GitHub 同步（独立面板：服务端需配置 GITHUB_REPO 才可用）===== -->
@@ -505,6 +492,7 @@
                 <code id="tok-val" class="tok-val" data-token="" data-page-node-id="YCflLAsqOAvcCyopPodFzx">••••••••••••••••</code>
                 <button class="ghost sm" id="tokEye" data-page-node-id="FTMlMQJy9qjonKcll8qKkw">显示</button>
                 <button class="ghost sm hidden" id="tokCopy" data-page-node-id="0bGikQCz9IblD9IFurOXfq">复制</button>
+                <button class="ghost sm" id="tokReset" type="button" title="手动输入或随机生成一个新的 Token">重新设置</button>
               </div>
             </div>
           </div>
@@ -528,6 +516,24 @@
   <div id="toast" class="toast" data-page-node-id="rB0dj1obCcEBxxhIkpzdbO"></div>
 
   <!-- ===== 修改密码弹窗 ===== -->
+  <div id="tokModal" class="modal hidden">
+    <div class="modal-box">
+      <div class="panel-title" style="margin-bottom:12px">重新设置 Access Token<span class="n" id="tokName" style="margin-left:8px"></span></div>
+      <div class="fld"><label>新 Token（至少 16 位；留空 = 自动生成）</label>
+        <div style="display:flex;gap:6px">
+          <input id="tokNew" autocomplete="off" spellcheck="false" style="flex:1;font-family:var(--mono);font-size:12px" />
+          <button class="ghost sm" id="tokGen" type="button">随机生成</button>
+        </div>
+      </div>
+      <div id="tokErr" class="hint" style="margin:0 0 10px;color:var(--red)"></div>
+      <div class="hint" style="margin:0 0 12px">Token 是<b>共享密钥</b>（服务端鉴权 + 跨 LAN 文字加密）。换掉之后，<b>所有还在用旧 Token 的客户端都会接入失败</b>，需要逐台更新。</div>
+      <div class="form-row" style="justify-content:flex-end;gap:.5rem">
+        <button class="ghost sm" id="tokCancel" type="button">取消</button>
+        <button id="tokSubmit" type="button">确认更换</button>
+      </div>
+    </div>
+  </div>
+
   <div id="pwdModal" class="modal hidden">
     <div class="modal-box">
       <div class="panel-title" style="margin-bottom:12px">修改密码</div>
@@ -857,6 +863,52 @@ $('#tokEye').onclick = ()=>{
 };
 $('#tokCopy').onclick = ()=>copyText($('#tok-val').dataset.token||'');
 
+/* ================= Access Token：随机生成 / 重新设置 ================= */
+// 24 字节 → 48 位 hex，与后端 gen_token() 的形态一致。
+// 用 crypto.getRandomValues：它**不要求安全上下文**（只有 crypto.subtle 才要求），
+// 所以 http 下也能生成，不必为了「随机生成」按钮专门跑一趟后端。
+function randomToken(){
+  const b=new Uint8Array(24);
+  if(window.crypto && crypto.getRandomValues) crypto.getRandomValues(b);
+  else for(let i=0;i<b.length;i++) b[i]=Math.floor(Math.random()*256);
+  return Array.from(b).map(x=>x.toString(16).padStart(2,'0')).join('');
+}
+if($('#netTokenGen')) $('#netTokenGen').onclick=()=>{ $('#netToken').value=randomToken(); };
+
+function openTokModal(){
+  const net=_netCache.find(n=>n.id===currentNet);
+  $('#tokNew').value=''; $('#tokErr').textContent='';
+  if($('#tokName')) $('#tokName').textContent = net ? net.name : '';
+  $('#tokModal').classList.remove('hidden');
+  setTimeout(()=>$('#tokNew').focus(),50);
+}
+function closeTokModal(){ if($('#tokModal')) $('#tokModal').classList.add('hidden'); }
+if($('#tokReset')) $('#tokReset').onclick=openTokModal;
+if($('#tokGen')) $('#tokGen').onclick=()=>{ $('#tokNew').value=randomToken(); };
+if($('#tokCancel')) $('#tokCancel').onclick=closeTokModal;
+if($('#tokModal')) $('#tokModal').onclick=(e)=>{ if(e.target===$('#tokModal')) closeTokModal(); };
+if($('#tokSubmit')) $('#tokSubmit').onclick=async()=>{
+  const err=m=>{ $('#tokErr').textContent=m; };
+  const v=$('#tokNew').value.trim();
+  if(v && v.length<16) return err('至少 16 位（留空则自动生成）');
+  if(!currentNet) return err('请先进入某个网络的明细页');
+  if(!confirm('换掉 Token 后，所有仍在使用旧 Token 的客户端都会接入失败，需要逐台更新。\n\n继续吗？')) return;
+  $('#tokSubmit').disabled=true; err('');
+  try{
+    const r=await api(`/api/admin/networks/${encodeURIComponent(currentNet)}/token`,
+                      {method:'POST',body:JSON.stringify({token:v})});
+    closeTokModal();
+    await loadNetworks();
+    // 明细页那张 Token 卡片同步成新值，但仍保持隐藏（明文不必常驻在屏幕上）
+    if($('#tok-val')){ $('#tok-val').dataset.token=r.token; $('#tok-val').dataset.shown='0';
+                       $('#tok-val').textContent='••••••••••••••••'; }
+    if($('#tokCopy')) $('#tokCopy').classList.add('hidden');
+    if($('#tokEye')) $('#tokEye').textContent='显示';
+    toast('Token 已更新，请同步更新所有客户端');
+  }catch(e){ err(e.message||'保存失败'); }
+  finally{ $('#tokSubmit').disabled=false; }
+};
+
 async function copyText(t){
   try{
     await navigator.clipboard.writeText(t);
@@ -874,13 +926,19 @@ $('#newNet').onclick=()=>{ $('#newNetPanel').classList.toggle('hidden'); $('#net
 $('#createNet').onclick=async()=>{
   const name=$('#netName').value.trim();
   if(!name){ toast('请输入名称'); return; }
-  const r = await api('/api/admin/networks',{method:'POST',body:JSON.stringify({name, description:$('#netDesc').value})});
-  const box=$('#newToken');
-  box.classList.remove('hidden');
-  box.innerHTML = `<div class="tok"><code class="tok-val" style="flex:1">${esc(r.token)}</code><button class="ghost sm" data-act="copy" data-val="${esc(r.token)}">复制</button></div>`;
-  $('#netName').value=''; $('#netDesc').value='';
-  toast('网络已创建');
-  await loadNetworks();
+  const wantToken = $('#netToken') ? $('#netToken').value.trim() : '';
+  // 失败必须让用户看见：Token 太短/重复都会回 400；静默吞掉的话用户只会觉得「点了没反应」
+  try{
+    const r = await api('/api/admin/networks',{method:'POST',body:JSON.stringify({name, description:$('#netDesc').value, token:wantToken})});
+    const box=$('#newToken');
+    box.classList.remove('hidden');
+    box.innerHTML = `<div class="tok"><code class="tok-val" style="flex:1">${esc(r.token)}</code><button class="ghost sm" data-act="copy" data-val="${esc(r.token)}">复制</button></div>`;
+    $('#netName').value=''; $('#netDesc').value=''; if($('#netToken')) $('#netToken').value='';
+    toast('网络已创建');
+    await loadNetworks();
+  }catch(e){
+    toast(e.message || '创建失败');
+  }
 };
 
 /* ================= 客户端更新托管 ================= */
@@ -950,68 +1008,11 @@ async function loadUpdateInfo(){
     box.innerHTML='尚未发布更新。填版本号 + 选安装包即可发布。';
   }
   refreshUpdateHints(); // 线上平台键拿到后，可给已选文件补一次架构兜底
-  loadUpdateHistory();  // 顺带刷新历史版本列表
   loadGithubSync();     // 顺带刷新「GitHub 同步」区的状态
 }
 
-/* ===== 历史版本 =====
-   服务端扫数据目录里所有落过盘的安装包（文件名带版本号，所以新旧版本互不覆盖），
-   按版本分组列出；手动上传的与 GitHub 同步下来的都在这里。点包名直接下载。 */
-async function loadUpdateHistory(){
-  const box=$('#updHistory');
-  if(!box) return;
-  try{
-    const r=await api('/api/admin/update/history');
-    const vs=r.versions||[];
-    const total=vs.reduce((n,v)=>n+((v.files||[]).length),0);
-    const cnt=$('#updHistCount');
-    if(cnt) cnt.textContent=total?`[${vs.length} 版 / ${total} 包]`:'[空]';
-    // 公开下载页开关（默认关闭 = 公开页只显示当前线上版本）
-    const pub=$('#updPublicHistory');
-    if(pub && !pub.dataset.busy) pub.checked=!!r.public_history;
-    if(!vs.length){
-      box.innerHTML='<div class="pkg-empty">数据目录里还没有历史安装包</div>';
-      return;
-    }
-    box.innerHTML=vs.map(v=>{
-      const rows=(v.files||[]).map(f=>{
-        // 公开端点，无需鉴权，浏览器直接 GET 就下载
-        const href=`/update/files/${encodeURIComponent(f.platform)}/${encodeURIComponent(f.filename)}`;
-        return `<div class="pkg-row">
-          <span class="pkg-plat">${esc(f.platform)}</span>
-          <a class="pkg-name" href="${esc(href)}" download title="下载 ${esc(f.filename)}">${esc(f.filename)}</a>
-          <span class="pkg-size">${fmtSize(f.size)}</span>
-          <span class="pkg-time">${fmtTime(f.updated_at)}</span></div>`;
-      }).join('');
-      return `<div class="hist-head">
-          <b>${esc(v.version)}</b>${v.is_current?'<span class="hist-cur">当前线上</span>':''}
-          <span class="hist-time">${fmtTime(v.updated_at)}</span>
-        </div><div class="pkg-list">${rows}</div>`;
-    }).join('');
-  }catch(e){
-    const cnt=$('#updHistCount'); if(cnt) cnt.textContent='';
-    box.innerHTML='<div class="hint" style="margin:0">历史版本加载失败：'+esc(e.message)+'</div>';
-  }
-}
-if($('#updHistReload')) $('#updHistReload').onclick=()=>loadUpdateHistory();
-// 公开历史版本的开关：打开后 /downloads 会把历史包一并挂出去（含测试包），所以要二次确认
-if($('#updPublicHistory')) $('#updPublicHistory').onchange=async(e)=>{
-  const el=e.target, want=el.checked;
-  if(want && !confirm('打开后，公开下载页会列出所有历史版本（包括测试包、旧版本），任何人都能下载。\n\n确认打开吗？')) {
-    el.checked=false; return;
-  }
-  el.dataset.busy='1';
-  try{
-    const r=await api('/api/admin/update/downloads',{method:'POST',body:JSON.stringify({enabled:want})});
-    el.checked=!!r.public_history;
-    toast(want?'公开下载页已列出历史版本':'公开下载页只显示当前线上版本');
-  }catch(err){
-    el.checked=!want;
-    toast('保存失败：'+err.message);
-  }finally{
-    delete el.dataset.busy;
-  }
-};
+/* 历史版本已移到公开下载页（/downloads）展示 —— 它是给外部用户看的，
+   管理页只管上传与发布，不再重复列一遍。 */
 
 /* ===== GitHub 同步（可选）=====
    服务端从 GitHub Release 把安装包转存到自己这里；GitHub 直连不通的客户端

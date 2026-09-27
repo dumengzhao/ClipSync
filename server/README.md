@@ -82,7 +82,10 @@ cargo build --release --target x86_64-unknown-linux-musl   # 静态单二进制
 4. **nginx 反代**（终止 TLS）：`/ws`、`/api/admin`、`/admin` 转发到 `127.0.0.1:20070`。具体配置见 **`nginx-clipsync.conf.example`**（已含 `/ws` 的 `Upgrade`/`Connection` 头映射与 3600s 长超时、`/healthz` 探针、80→443 跳转）。改好 `server_name`/证书路径后：`nginx -t && systemctl reload nginx`。
 5. **看日志 / 健康检查**：
    ```bash
-   journalctl -u clipsync-server -f          # 实时跟踪服务日志
+   tail -f /opt/clipsync-server/data/logs/clipsync-server.log.$(date +%F)   # 实时跟踪服务日志
+   # 日志**只写文件**（按天滚动、保留 14 天），不再进 journal；只有启动失败的 panic 才出现在
+   # journalctl -u clipsync-server 里。日志目录默认 <数据目录>/logs，可用 CLIPSYNC_LOG_DIR 改
+   # （如 /var/log/clipsync）；临时想在终端也看到就设 CLIPSYNC_LOG_STDOUT=1。
    curl -s 127.0.0.1:20070/healthz          # 期望 ok（未走 nginx 时）
    curl -s https://你的域名/healthz         # 走 nginx TLS 时
    ```
@@ -102,7 +105,7 @@ cargo build --release --target x86_64-unknown-linux-musl   # 静态单二进制
 
 ### 阶段 2（已完成 ✅）：管理页面 + 登录会话
 
-- **登录会话** 取代临时 `ADMIN_API_KEY`：`POST /api/admin/login` 校验账号密码后，用 `server.key` 做 HMAC-SHA256 签发会话 token（7 天有效）；管理 REST 与页面统一由 `admin_auth` 中间件校验该会话。
+- **登录会话** 取代临时 `ADMIN_API_KEY`（后来凭据本身也改成 `data/admin.json` 里的 Argon2id 哈希、由管理页初始化，见「本地运行」）：`POST /api/admin/login` 校验账号密码后，用 `server.key` 做 HMAC-SHA256 签发会话 token（7 天有效）；管理 REST 与页面统一由 `admin_auth` 中间件校验该会话。
 - **内嵌管理页**（`rust-embed` 编译时打包进二进制，免部署静态文件）：`GET /admin` 返回 `static/admin.html`（登录、网络列表、创建网络返回一次性 Token、设备列表及启用/禁用）。
 - 阶段2 联调脚本已验证：未登录拦截(401)、错误密码拦截、登录拿 token、授权访问、创建网络、`/admin` 返回页面、伪造 token 被拒。
 
@@ -111,14 +114,15 @@ cargo build --release --target x86_64-unknown-linux-musl   # 静态单二进制
 ```bash
 cd server
 cargo build                 # 或 cargo build --release
+./target/debug/clipsync-server hash         # 先生成管理员口令哈希（交互输入，终端不回显）
 CLIPSYNC_DATA_DIR=./data \
-ADMIN_USER=admin \
-ADMIN_PASS=你的密码 \
 LISTEN=0.0.0.0:20070 \
 ./target/debug/clipsync-server
 ```
 
-- 打开管理后台：`http://host:20070/admin`（首次用 `ADMIN_USER`/`ADMIN_PASS` 登录）。
+- 打开管理后台：`http://host:20070/admin` —— **首次显示「初始化」卡片**，把上一步 `hash` 生成的
+  Argon2id 哈希串和用户名粘进去即可。服务端**不存明文口令**，也**没有任何凭据类环境变量**；
+  忘记口令就删 `data/admin.json` 重启、重新初始化。
 - 健康检查：`GET /healthz`
 - 创网络（拿 Token）：登录后在前端「创建网络」按钮，或
   `curl -X POST -H "Authorization: Bearer <session>" -d '{"name":"默认","description":""}' http://127.0.0.1:20070/api/admin/networks`

@@ -1,7 +1,7 @@
 use crate::hub::{OutMsg, OUT_QUEUE_CAPACITY};
 use crate::models::{ClientToServer, ServerToClient};
 use crate::state::AppState;
-use axum::extract::{State, WebSocketUpgrade};
+use axum::extract::{ConnectInfo, State, WebSocketUpgrade};
 use axum::response::Response;
 use futures::{SinkExt, StreamExt};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -34,13 +34,24 @@ impl Drop for ConnGuard {
 }
 
 /// 设备 WS 入口：/ws
-pub async fn device_ws(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Response {
+///
+/// 带 `ConnectInfo` 取对端地址：排查「设备连不上」时要能区分**根本没连上来**（地址/证书/反代问题）
+/// 与**连上了但被拒**（Token 不对 / 设备被拉黑）—— 以前这两件事在日志里都看不出来。
+pub async fn device_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+) -> Response {
     ws.max_message_size(MAX_WS_MESSAGE_BYTES)
         .max_frame_size(MAX_WS_MESSAGE_BYTES)
-        .on_upgrade(move |socket| handle_socket(socket, state))
+        .on_upgrade(move |socket| handle_socket(socket, state, addr))
 }
 
-async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppState>) {
+async fn handle_socket(
+    socket: axum::extract::ws::WebSocket,
+    state: Arc<AppState>,
+    addr: std::net::SocketAddr,
+) {
     // 连接数上限：超出直接关闭，避免海量空闲连接耗尽内存与文件句柄
     if WS_CONNS.fetch_add(1, Ordering::SeqCst) >= MAX_WS_CONNS {
         WS_CONNS.fetch_sub(1, Ordering::SeqCst);
@@ -117,9 +128,21 @@ async fn handle_socket(socket: axum::extract::ws::WebSocket, state: Arc<AppState
                         }
                         match state.handle_auth(&token, &device, &tx) {
                             Ok((net_id, dev_id)) => {
+                                tracing::info!(
+                                    "设备 {} 已接入（来自 {}，网络 {}）",
+                                    crate::logging::clean(&dev_id),
+                                    addr,
+                                    crate::logging::clean(&net_id)
+                                );
                                 authed = Some((net_id, dev_id));
                             }
                             Err(e) => {
+                                // 被拒的原因必须留痕：否则「设备连不上」在日志里一片空白
+                                tracing::warn!(
+                                    "设备 {} 接入被拒（来自 {}）：{e}",
+                                    crate::logging::clean(&device.id),
+                                    addr
+                                );
                                 // 被拉黑的设备（device_removed）下发 Removed 让客户端明确停止重连
                                 let msg = if e == "device_removed" {
                                     OutMsg::App(ServerToClient::Removed)
