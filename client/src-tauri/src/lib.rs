@@ -2,6 +2,13 @@
 //!
 //! 模块结构见 docs/development-plan.md 第十章
 
+// Rust 1.99 起的新 lint：`#[async_trait]` 会把 trait 方法展开成返回
+// `Pin<Box<dyn Future>>` 的函数，而该类型本身已是 `#[must_use]`；宏再叠加一层
+// 无消息的 `#[must_use]` 就被判为重复。触发点在 `clipboard::ClipboardProvider`
+// 这类 trait 定义处，属于宏展开产物，源码里没有可直接删掉的 `#[must_use]`。
+// 逐个标注 `#[allow]` 只能盖住 trait 本身，方法仍会报，故在 crate 级关闭。
+#![allow(clippy::double_must_use)]
+
 pub mod cache;
 pub mod clipboard;
 pub mod config;
