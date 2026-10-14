@@ -1953,7 +1953,22 @@ impl ConnectionHub {
     pub fn cancel_pull(&self, transfer_id: &str) {
         let removed = self.active_pulls.lock().remove(transfer_id);
         let Some(st) = removed else {
-            tracing::warn!("取消拉取：本端没有进行中的传输 {transfer_id}");
+            // 本端已无该传输：可能是「已完成/已失败」的终态条目，也可能是从未真正启动
+            // 的兜底条目（前端据 `file-pull-start` 建立、后端已无对应 active_pulls 项）。
+            // 两种情况下前端点「取消」都应得到明确收口 —— 早先这里直接 return，
+            // 什么都不发，于是「取消」在小窗里表现为点了没反应，条目永久停在
+            // 「等待任务完成后关闭…」（2026-10-14 用户实测：跨天不消失）。
+            // 取消是幂等的：终态条目收到 cancelled 会把它从「拉取中」摘除并展示「已取消」，
+            // 万一随后还有 complete 到达，它也只覆盖成「已保存」，不会造成错误状态。
+            tracing::info!(
+                "取消拉取：本端已无进行中的传输 {transfer_id}，仍向前端补发 cancelled 收口"
+            );
+            if let Some(app) = self.app.lock().clone() {
+                let _ = app.emit(
+                    "file-pull-cancelled",
+                    serde_json::json!({ "transfer_id": transfer_id }),
+                );
+            }
             return;
         };
         // 先置位再摘除：写盘任务退出时据此跳过「写剪贴板 + 发完成事件」收尾

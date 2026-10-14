@@ -1,6 +1,6 @@
 [package]
 name = "clipsync"
-version = "0.3.4"
+version = "0.3.5"
 description = "Cross-platform clipboard sync tool"
 authors = ["dumengzhao"]
 edition = "2021"

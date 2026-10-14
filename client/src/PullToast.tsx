@@ -36,6 +36,28 @@ const MIN_H = 76;
 const MAX_H = 360;
 /** 上下边框合计（.pull-toast 的 1px border × 2） */
 const BORDER_H = 2;
+/** 「拉取中」条目的看门狗阈值（毫秒）：超过此时长既无进度更新、也无任何终态事件，
+ * 即判定该条目的收口事件已丢失（后端 emit 是广播、不保证送达；小窗是独立 webview，
+ * 在 macOS 上被隐藏/重新显示时可能短暂不可达），自动降级为失败结果。
+ *
+ * 没有这道闸时，丢失终态事件的条目会永久留在 `pulling`：页脚恒为
+ * 「等待任务完成后关闭…」，且 `visiblePending = items.slice(0, MAX_TOTAL - pulling.length)`
+ * 恒为空 —— 表现为「一条任务卡死、新任务来了也不显示」，只能重启进程才恢复
+ *（2026-10-14 用户实测：跨天不消失）。 */
+const PULLING_WATCHDOG_MS = 10 * 60_000;
+
+/** 从「拉取中」条目里挑出静默超时者（看门狗的判据，抽成纯函数便于单测）。
+ *
+ * `last` 缺失时回退到条目自身的创建时刻 `ts` —— 保证「start 后从未收到任何进度」
+ * 的条目也能被计时，而不是永远逃过看门狗。 */
+export function pickStaleItems(
+  pulling: readonly Item[],
+  last: Readonly<Record<string, number>>,
+  now: number,
+  thresholdMs: number,
+): Item[] {
+  return pulling.filter((x) => now - (last[x.id] ?? x.ts) >= thresholdMs);
+}
 
 function fmtSize(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -121,6 +143,11 @@ export default function PullToast() {
   const [session, setSession] = useState(0);
   const pullingRef = useRef<Item[]>([]);
   pullingRef.current = pulling;
+  /** 每个「拉取中」条目的最后活动时刻（收到 start / progress 时刷新），键为条目 id。
+   *
+   * 供看门狗判定「是否长时间无任何动静」；用 ref 而非 state —— 它只被定时器读取，
+   * 不参与渲染，放进 state 会引发无意义的重渲染。 */
+  const lastActivityRef = useRef<Record<string, number>>({});
   /** 用户点「取消」：按条目**自身**推导要调的后端命令，前端状态由 file-pull-cancelled 事件统一收口。
    *
    * 不再依赖「点拉取时登记的取消回调」：拉取也可能从**主窗口**发起
@@ -334,6 +361,8 @@ export default function PullToast() {
           // 路由在 start 事件即确定：徽标从进度条一开始就可见，不用等首个进度帧
           setRoutes((prev) => ({ ...prev, [id]: e.payload.route as string }));
         }
+        // 起手即登记活动时刻：看门狗以「start 之后多久没动静」计时
+        lastActivityRef.current[id] = Date.now();
         log(`file-pull-start: ${id}`);
         setItems((prev) => {
           const found = prev.find((x) => x.id === id);
@@ -365,6 +394,8 @@ export default function PullToast() {
         'file-pull-progress',
         (e) => {
           const id = `local:${e.payload.transfer_id}`;
+          // 每帧进度都刷新活动时刻：只要还有数据在流动，看门狗就不该介入
+          lastActivityRef.current[id] = Date.now();
           setProgress((prev) => ({
             ...prev,
             [id]: e.payload.percent,
@@ -458,56 +489,35 @@ export default function PullToast() {
         },
       ),
 
-      listen<{ ext_file_ep: string; ok: boolean; error?: string }>(
-        'cross-lan-pull-complete',
-        (e) => {
-          const ep = e.payload.ext_file_ep;
-          log(`cross-lan-pull-complete: ep=${ep} ok=${e.payload.ok}`);
-          setPulling((prev) =>
-            prev.filter((x) => !(x.kind === 'cross' && x.offer.ext_file_ep === ep)),
-          );
-          setItems((prev) =>
-            prev.filter((x) => !(x.kind === 'cross' && x.offer.ext_file_ep === ep)),
-          );
-          setResults((prev) => ({
-            ...prev,
-            [`cross-ep:${ep}`]: {
-              ok: e.payload.ok,
-              msg: e.payload.ok ? '已保存到本地' : `拉取失败：${e.payload.error || '未知错误'}`,
-            },
-          }));
-        },
-      ),
+      // 说明：跨 LAN 拉取的完成/失败统一由 `file-pull-complete` /
+      // `file-pull-error` 收口（后端 server_conn 与 tauri_cmd 均在发这两个事件）。
+      // 早先这里还监听一个 `cross-lan-pull-complete`，但后端自改用标准 `file-pull-*`
+      // 事件后**已不再发出**该事件 —— 监听器成了死代码，且会让人误以为跨 LAN 的
+      // 收口另有其路。已删除，避免后续排查被误导。
 
       // 用户主动取消拉取（P2P 与跨 LAN 共用此事件）。此处统一收口：
       // 移出「拉取中」、清进度、展示「已取消」结果，行为与失败类似但文案区分。
       listen<{ transfer_id: string }>('file-pull-cancelled', (e) => {
         const id = `local:${e.payload.transfer_id}`;
         log(`file-pull-cancelled: ${id}`);
-        // 从「拉取中」摘除条目（若还在）：保留一份引用给结果展示
-        setPulling((prev) => {
-          const it = prev.find((x) => x.id === id);
-          if (it) {
-            window.setTimeout(() => {
-              setResults((prev) => ({
-                ...prev,
-                [id]: { ok: false, msg: '已取消拉取' },
-              }));
-              setProgress((prev) => {
-                const n = { ...prev };
-                delete n[id];
-                return n;
-              });
-            }, 0);
-          }
-          return prev.filter((x) => x.id !== id);
-        });
+        // **只有「当时确实还在拉取中」才写「已取消」结果**。
+        //
+        // 取消是幂等的：后端对一条已经结束（完成/失败）的传输也会补发 cancelled
+        //（用于清掉丢失终态事件的滞留条目）。若这类迟到事件把已有的成功结果
+        // 改写成「已取消拉取」，用户会看到「文件明明存下了却显示已取消」——
+        // 所以用 ref 判定实时状态，早已摘除的条目只做清理、不改写结果。
+        const wasPulling = pullingRef.current.some((x) => x.id === id);
+        setPulling((prev) => prev.filter((x) => x.id !== id));
         setItems((prev) => prev.filter((x) => x.id !== id));
         setProgress((prev) => {
           const n = { ...prev };
           delete n[id];
           return n;
         });
+        if (!wasPulling) return;
+        window.setTimeout(() => {
+          setResults((prev) => ({ ...prev, [id]: { ok: false, msg: '已取消拉取' } }));
+        }, 0);
       }),
       // 主窗口「清空」后同步小窗：两段清单（本地 P2P + 跨 LAN）是一次清空的，
       // 这里整表清掉；正在拉取的条目在 pulling 里，不受影响。
@@ -544,6 +554,69 @@ export default function PullToast() {
       return [...prev, ...incoming.filter((x) => !have.has(x.id))].sort((a, b) => b.ts - a.ts);
     });
   }, [pulling, queued]);
+
+  // 「拉取中」看门狗：兜底清理丢失了终态事件的条目。
+  //
+  // `pulling` 完全由事件驱动（file-pull-start 进、complete/cancelled/error(fatal) 出），
+  // 没有任何与后端对账的机制。后端 emit 是广播、不保证送达，小窗又是独立 webview
+  //（macOS 上被隐藏/重新显示时可能短暂不可达）—— 一旦终态事件丢失，条目就永久滞留：
+  // 页脚恒为「等待任务完成后关闭…」，且 `visiblePending` 因 `MAX_TOTAL - pulling.length ≤ 0`
+  // 恒为空，**新任务到达也不显示**（2026-10-14 用户实测：卡了跨天，只能重启进程）。
+  //
+  // 依赖必须是 `pulling.length` 而**不是 `pulling`**：后者是数组，每次 setPulling 都换新引用，
+  // 会让 effect 反复重建 interval、计时永远从头开始 —— 下面这个 30s tick 就永远等不到。
+  // tick 内部一律经 `pullingRef` 取最新列表（它每次渲染都会被同步成当前值）。
+  const pullingCount = pulling.length;
+  useEffect(() => {
+    if (pullingCount === 0) return;
+    const tick = () => {
+      const live = pullingRef.current;
+      // 1) 回收活动时刻表：任何已不在 pulling 里的 id 都该清掉
+      //   （正常完成/取消/失败的条目走各自收口分支，不经过看门狗，不删会长期残留）
+      const liveIds = new Set(live.map((x) => x.id));
+      for (const id of Object.keys(lastActivityRef.current)) {
+        if (!liveIds.has(id)) delete lastActivityRef.current[id];
+      }
+      if (live.length === 0) return;
+      // 2) 判定静默超时者：静默超过阈值即降级为失败结果，让用户看得见、可手动清掉，
+      //    并让后续新任务重新可见。
+      const stale = pickStaleItems(
+        live,
+        lastActivityRef.current,
+        Date.now(),
+        PULLING_WATCHDOG_MS,
+      );
+      if (stale.length === 0) return;
+      for (const x of stale) {
+        log(`看门狗：${x.id} 静默超过 ${PULLING_WATCHDOG_MS / 60_000} 分钟，判定为卡死并自动收口`);
+        delete lastActivityRef.current[x.id];
+      }
+      const staleIds = new Set(stale.map((x) => x.id));
+      setPulling((prev) => prev.filter((x) => !staleIds.has(x.id)));
+      setCompleted((c) => {
+        const n = { ...c };
+        for (const x of stale) n[x.id] = x;
+        return n;
+      });
+      setResults((prev) => {
+        const n = { ...prev };
+        for (const x of stale) {
+          n[x.id] = {
+            ok: false,
+            msg: '拉取无响应（长时间未收到进度或结果），已停止跟踪；可让对端重新复制',
+          };
+        }
+        return n;
+      });
+      setProgress((prev) => {
+        const n = { ...prev };
+        for (const id of staleIds) delete n[id];
+        return n;
+      });
+    };
+    const iv = window.setInterval(tick, 30_000);
+    return () => window.clearInterval(iv);
+  }, [pullingCount]);
 
   // 关闭策略（三条规则）：
   //   1) 拉取进行中 → **绝不自动关闭**，等拉取完成并写入本机剪贴板
@@ -672,6 +745,9 @@ export default function PullToast() {
       setPulling((prev) => (prev.some((x) => x.id === it.id) ? prev : [...prev, it]));
       setItems((prev) => prev.filter((x) => x.id !== it.id));
       setProgress((prev) => ({ ...prev, [it.id]: 0 }));
+      // 本窗发起的拉取同样要登记活动时刻：否则看门狗在 start 事件迟到/丢失时
+      // 会把一条正常进行的拉取误判成卡死。
+      lastActivityRef.current[it.id] = Date.now();
       setResults((prev) => {
         const n = { ...prev };
         delete n[it.id];
@@ -704,6 +780,7 @@ export default function PullToast() {
       setItems((prev) => prev.filter((x) => x.id !== it.id));
       // 跨 LAN 拉取现在会实时上报进度；先把进度条初始化为 0，避免一上来就空白
       setProgress((prev) => ({ ...prev, [it.id]: 0 }));
+      lastActivityRef.current[it.id] = Date.now();
       setResults((prev) => {
         const n = { ...prev };
         delete n[it.id];
