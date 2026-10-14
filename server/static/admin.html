@@ -1070,6 +1070,10 @@ async function loadGithubSync(){
     $('#ghCron').value=r.cron||'0 3 * * *';
     ghShowNextRun(r.next_run_at);
     ['#ghRun','#ghSave','#ghTest','#ghProxyClear'].forEach(s=>{const e=$(s); if(e) e.disabled=false;});
+    // 上次点完同步就关了页面的话，进来时后端可能还在跑：接着轮询。
+    // 必须放在上面「统一恢复启用」**之后** —— 否则刚置灰的按钮会被那行立刻重新启用，
+    // 用户点下去只会拿到 409「已有同步正在进行中」。
+    if(r.running){ $('#ghRun').disabled=true; pollGithubSync(); }
     ghSetProxyFields(r);
     ghRepoBase=(r.repo_source==='config')?(r.repo||''):'';
     $('#ghRepo').value=ghRepoBase;
@@ -1090,18 +1094,40 @@ async function loadGithubSync(){
 async function runGithubSync(){
   const box=$('#ghInfo');
   $('#ghRun').disabled=true;
-  box.textContent='正在从 GitHub 同步（逐个平台下载并校验，耗时取决于包大小）…';
+  box.textContent='已开始后台同步（逐个平台下载并校验，耗时取决于包大小与链路）…';
   try{
-    const r=await api('/api/admin/github-sync/run',{method:'POST'});
-    const lines=(r.report.outcomes||[]).map(o=>
-      `${esc(o.platform)}：${esc(o.status)}${o.detail?'（'+esc(o.detail)+'）':''}`).join('<br>');
-    box.innerHTML=`<span style="color:var(--cyan)">✓ 同步完成</span>：版本 <b>${esc(r.report.version)}</b>（合并 ${r.report.merged_platforms} 个平台）<br>${lines||'（无可同步平台）'}`;
-    await loadUpdateInfo(); // 清单已更新，刷新线上版本显示
+    await api('/api/admin/github-sync/run',{method:'POST'});
+    await pollGithubSync();
   }catch(e){
     box.textContent='同步失败：'+e.message;
-  }finally{
     $('#ghRun').disabled=false;
   }
+}
+
+// 后端立刻返回、同步在后台跑，所以这里轮询状态直到它结束。
+// （不等结果的原因见后端 admin_run 的注释：等下去会撞上 nginx 的 60s 超时，
+//   前端只会看到 504，而后端其实还在正常下载 —— 纯误报。）
+async function pollGithubSync(){
+  const box=$('#ghInfo');
+  const t0=Date.now();
+  for(;;){
+    await new Promise(r=>setTimeout(r,3000));
+    let r;
+    try{ r=await api('/api/admin/github-sync'); }
+    catch(e){ box.textContent='查询同步状态失败：'+e.message; break; }
+    if(!r.running){
+      const s=r.last_result||'';
+      box.innerHTML = s.startsWith('OK')
+        ? '<span style="color:var(--cyan)">✓ '+esc(s)+'</span>'
+        : '<span style="color:var(--red)">✗ '+esc(s||'同步已结束，但没有留下结果记录')+'</span>';
+      await loadUpdateInfo();   // 清单可能已更新
+      break;
+    }
+    const secs=Math.round((Date.now()-t0)/1000);
+    if(secs>1800){ box.textContent='已运行超过 30 分钟，仍在后台继续；稍后刷新本页可看结果。'; break; }
+    box.textContent=`正在后台同步…已 ${secs}s（经代理可能较慢，可先做别的）`;
+  }
+  $('#ghRun').disabled=false;
 }
 
 // 只探连通性：拿一次 GitHub 上的 latest.json，报 HTTP 码/耗时/版本。

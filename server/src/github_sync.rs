@@ -81,6 +81,9 @@ const CONFIG_FILE: &str = "github-sync.json";
 const MANIFEST_MAX_BYTES: usize = 1024 * 1024;
 /// 单个安装包上限：2 GiB（安装包不可能更大，防异常清单让我们写爆磁盘）。
 const MAX_ASSET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// 单个安装包下载超时。取值宽松：经代理下 80MB+ 的包，在几百 KB/s 的链路上也要几分钟
+/// （实测 AppImage 84MB 经代理约 180s；带宽再低一档就会逼近旧值 600s）。
+const ASSET_TIMEOUT_SECS: &str = "1800";
 /// 默认定时间隔（分钟）：12 小时。
 /// 默认定时：每天凌晨 3:00（**本地时区**）。
 ///
@@ -674,12 +677,61 @@ fn sha256_file(path: &Path) -> std::io::Result<String> {
         .collect())
 }
 
+/// 下载一个资产，失败自动重试。
+///
+/// 为什么需要重试：经代理（尤其慢节点）下载大包时，链路中途超时或被上游判超时会返回
+/// **504/502**，偶尔一次失败并不代表配置错了。每次失败都会清掉 `.part` 临时文件，
+/// 所以重试是安全的；已经下完并通过校验的包在下一轮会走「skipped」直接跳过。
+async fn download_verified(
+    platform: &str,
+    url: &str,
+    expected: &str,
+    dst: &Path,
+    proxy: Option<&str>,
+) -> Result<&'static str, String> {
+    const ATTEMPTS: u32 = 5;
+    let mut last = String::new();
+    for attempt in 1..=ATTEMPTS {
+        match download_verified_once(platform, url, expected, dst, proxy).await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                last = e;
+                if attempt < ATTEMPTS {
+                    let wait = u64::from(attempt) * 5; // 5s、10s
+                    tracing::warn!(
+                        "第 {attempt}/{ATTEMPTS} 次下载 {platform}/{} 失败，{wait}s 后重试（会从断点续传）：{last}",
+                        basename_of(url)
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                }
+            }
+        }
+    }
+    Err(add_gateway_hint(format!(
+        "连续 {ATTEMPTS} 次下载失败：{last}"
+    )))
+}
+
+/// 网关类错误（504/502/503）几乎都出在**代理链路**上，而不是配置写错；
+/// 直接把排查方向写进错误信息，省得用户对着一句「HTTP 504」猜。
+fn add_gateway_hint(msg: String) -> String {
+    let m = msg.to_ascii_lowercase();
+    if m.contains("504") || m.contains("502") || m.contains("503") {
+        return format!(
+            "{msg}
+
+提示：这是代理/上游返回的网关错误，多为**链路超时或带宽不足** （经代理下载大安装包时尤其常见）。可以：换一个更快的代理节点、提高代理服务器带宽， 或改用环境变量 HTTPS_PROXY 指向更快的出口后重试。"
+        );
+    }
+    msg
+}
+
 /// 下载 `url` 到 `dst` 并校验 sha256。
 ///
 /// - 本地已存在且哈希与清单一致 → 直接跳过（不重复下载）；
 /// - 本地已存在但哈希不同 → **拒绝**（同版本不同二进制必须人工介入，不能静默覆盖）；
 /// - 先写 `.part` 再 rename：中途失败不会留下半截文件被当成完成品。
-async fn download_verified(
+async fn download_verified_once(
     platform: &str,
     url: &str,
     expected: &str,
@@ -707,13 +759,33 @@ async fn download_verified(
             .map_err(|e| format!("创建目录失败: {e}"))?;
     }
     let tmp = dst.with_extension("part");
-    let _ = tokio::fs::remove_file(&tmp).await;
+    // 断点续传：**保留**上次中断留下的片段。
+    // 慢链路（尤其经代理）常在传了几十 MB 后被中途切断（curl 退出码 18），
+    // 每次都从头下永远下不完；这里记下已有长度，交给 curl 用 `-C -` 续传。
+    let resume_from = match tokio::fs::metadata(&tmp).await {
+        Ok(m) if m.len() > 0 => m.len(),
+        _ => 0,
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     // `--fail`：非 2xx 直接非零退出，不会把错误页当安装包写下去
+    let mut cargs = curl_args(proxy);
+    cargs.extend(
+        ["--fail", "--max-time", ASSET_TIMEOUT_SECS]
+            .iter()
+            .map(|v| (*v).to_string()),
+    );
+    if resume_from > 0 {
+        // 用 `-r <offset>-` 显式要「断点之后的部分」，而不是 `-C -`：
+        // `-C -` 是靠**输出文件**的当前大小判断续传位置的，而我们是 `-o -`（stdout 流式，
+        // 边下边算哈希），stdout 没有长度可依，`-C -` 在这里不起作用。
+        // GitHub 的资产支持 Range（实测返回 206），所以自己指定区间即可。
+        cargs.push("-r".to_string());
+        cargs.push(format!("{resume_from}-"));
+    }
+    cargs.extend(["-o", "-"].iter().map(|v| (*v).to_string()));
+    cargs.push(url.to_string());
     let mut child = tokio::process::Command::new("curl")
-        .args(curl_args(proxy))
-        .args(["--fail", "--max-time", "600", "-o", "-"])
-        .arg(url)
+        .args(&cargs)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -727,11 +799,34 @@ async fn download_verified(
         Some(s) => s,
         None => return Err("无法读取 curl 输出".to_string()),
     };
-    let mut file = tokio::fs::File::create(&tmp)
-        .await
-        .map_err(|e| format!("创建临时文件失败: {e}"))?;
     let mut hasher = Sha256::new();
-    let mut total: u64 = 0;
+    let mut total: u64 = resume_from;
+    let mut file = if resume_from > 0 {
+        // 续传：先把已有片段读进哈希，再以追加方式打开继续写 —— 否则最终校验必错
+        let mut f = tokio::fs::File::open(&tmp)
+            .await
+            .map_err(|e| format!("打开已下载片段失败: {e}"))?;
+        let mut rbuf = vec![0u8; 64 * 1024];
+        loop {
+            match f.read(&mut rbuf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    hasher.update(&rbuf[..n]);
+                }
+                Err(e) => return Err(format!("读取已下载片段失败: {e}")),
+            }
+        }
+        drop(f);
+        tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&tmp)
+            .await
+            .map_err(|e| format!("续写已下载片段失败: {e}"))?
+    } else {
+        tokio::fs::File::create(&tmp)
+            .await
+            .map_err(|e| format!("创建临时文件失败: {e}"))?
+    };
     let mut buf = vec![0u8; 64 * 1024];
     loop {
         let n = match stdout.read(&mut buf).await {
@@ -740,7 +835,8 @@ async fn download_verified(
             Err(e) => {
                 let _ = child.kill().await;
                 drop(file);
-                let _ = tokio::fs::remove_file(&tmp).await;
+                // **保留** .part：多半只是链路断开，下次可从断点续传
+                // （若片段内容真坏了，最终 sha256 校验会拦下并删掉它）
                 return Err(format!("读取下载流失败: {e}"));
             }
         };
@@ -759,14 +855,12 @@ async fn download_verified(
         if let Err(e) = file.write_all(&buf[..n]).await {
             let _ = child.kill().await;
             drop(file);
-            let _ = tokio::fs::remove_file(&tmp).await;
             return Err(format!("写入失败: {e}"));
         }
     }
     if let Err(e) = file.flush().await {
         let _ = child.kill().await;
         drop(file);
-        let _ = tokio::fs::remove_file(&tmp).await;
         return Err(format!("落盘失败: {e}"));
     }
     drop(file);
@@ -780,7 +874,17 @@ async fn download_verified(
         if let Some(mut se) = child.stderr.take() {
             let _ = se.read_to_string(&mut err).await;
         }
-        let _ = tokio::fs::remove_file(&tmp).await;
+        // 416 = 我们请求的起点已经超出远端文件长度，说明本地 .part 已经"满"了，
+        // 但内容对不上（上次 rename 前被打断、或片段被写坏）。这种情况再续也是 416，
+        // 会**永久失败** ⇒ 直接删掉片段，下一轮从头下。
+        // 其余失败（如断流 curl 退出码 18）则**保留** .part，下次从断点续。
+        if err.contains("416") || err.to_ascii_lowercase().contains("range") {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(format!(
+                "分片长度超出远端文件（已删除本地片段，将重新下载）: {}",
+                scrub_proxy_in(err.trim(), proxy)
+            ));
+        }
         return Err(hint_if_no_proxy(
             format!(
                 "下载失败（curl 退出码 {:?}）: {}",
@@ -1041,8 +1145,38 @@ fn plan_tick(cron: &str, next_run_at: Option<&str>, now: u64) -> (bool, Option<S
     }
 }
 
+/// 是否有同步正在后台跑：既防重复触发，也让管理页能显示「进行中」。
+static SYNC_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 同步互斥守卫 —— **Drop 时自动释放**。
+///
+/// 用 RAII 而不是在函数末尾手动 `store(false)`：后台任务一旦 panic，手动复位那行
+/// 根本不会执行，标志会**永久卡在 true**，此后每次同步都回「已有同步进行中」。
+struct SyncGuard;
+
+impl Drop for SyncGuard {
+    fn drop(&mut self) {
+        SYNC_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// 抢占同步权；已在运行则返回 None。
+///
+/// 定时同步与「立即同步」**都走这里** —— 两者并发时会把同一个 `.part` 交叉写坏。
+fn try_acquire_sync() -> Option<SyncGuard> {
+    if SYNC_RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        None
+    } else {
+        Some(SyncGuard)
+    }
+}
+
 /// 跑一次并把结果写进配置（last_run_at / last_result），供管理页展示。
 pub async fn run_and_record(state: &Arc<AppState>) -> Result<SyncReport, String> {
+    // 定时任务与手动触发共用这一把锁（守卫在函数返回时自动释放，panic 也安全）
+    let Some(_guard) = try_acquire_sync() else {
+        return Err("已有同步正在进行中".into());
+    };
     let result = sync_once(state).await;
     let mut cfg = load_config(&state.store.dir);
     cfg.last_run_at = Some(now_rfc3339());
@@ -1089,19 +1223,28 @@ fn parse_rfc3339_epoch(s: &str) -> Option<u64> {
 // ---------- 管理端点（注册在 admin_auth 之下） ----------
 
 /// POST /api/admin/github-sync/run —— 立即同步一次。
+/// POST /api/admin/github-sync/run —— **立刻返回**，同步在后台继续跑。
+///
+/// 为什么不等结果：一次完整同步要下载几十 MB（经代理可能好几分钟），而管理页通常是
+/// 经 nginx 访问的、`proxy_read_timeout` 默认只有 **60s** ⇒ 前端只会等到一个
+/// **HTTP 504**，可后端其实还在正常下载（2026-09-28 实际踩到：用户看到「同步失败：HTTP 504」，
+/// 而包已经在下、甚至已经下完）。改成后台执行，前端轮询 `running` / `last_result`。
 pub async fn admin_run(State(state): State<Arc<AppState>>) -> Response {
-    match run_and_record(&state).await {
-        Ok(report) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "ok": true, "report": report })),
+    use std::sync::atomic::Ordering;
+    // 这里只做「快速拒绝」，真正的互斥在 run_and_record 内部（定时任务也走那条路）
+    if SYNC_RUNNING.load(Ordering::SeqCst) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "ok": false, "error": "已有同步正在进行中，请稍候" })),
         )
-            .into_response(),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "ok": false, "error": e })),
-        )
-            .into_response(),
+            .into_response();
     }
+    let st = state.clone();
+    tokio::spawn(async move {
+        // 守卫在 run_and_record 内部获取/释放；失败与成功都会记进 last_result
+        let _ = run_and_record(&st).await;
+    });
+    Json(serde_json::json!({ "ok": true, "started": true })).into_response()
 }
 
 /// GET /api/admin/github-sync —— 当前配置与上次结果（管理页展示用）。
@@ -1118,6 +1261,8 @@ pub async fn admin_get(State(state): State<Arc<AppState>>) -> Response {
         .unwrap_or_else(|| (String::new(), String::new(), false));
     Json(serde_json::json!({
         "configured": repo_for(&state).is_some(),
+        // 同步是后台任务：管理页据此显示「进行中」并决定何时停止轮询
+        "running": SYNC_RUNNING.load(std::sync::atomic::Ordering::SeqCst),
         "repo": repo_for(&state),
         // 当前值来自哪里（页面 / 环境变量），以及环境变量本身的值 —— 管理页要如实展示
         "repo_source": if load_config(&state.store.dir).repo.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_some() { "config" } else { "env" },
